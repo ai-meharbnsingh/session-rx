@@ -18,6 +18,19 @@
  * negotiated with. Cookies are never read or set; there is no ambient
  * credential for an attacker to ride.
  *
+ * ── DNS rebinding (the Host check is NOT only a CSRF check) ─────────────────
+ * The three-part check above only runs on mutating methods — GET/HEAD/OPTIONS
+ * carry no CSRF requirement, because they cannot change state through a
+ * cross-site *form* or *fetch*. But DNS rebinding lets an attacker's page,
+ * after first resolving its own hostname to this loopback port, read a GET
+ * response too: `isLoopbackPeer` still passes (the browser really is talking
+ * to 127.0.0.1 at the socket layer), and with no CORS headers set the browser
+ * falls back to treating the response as same-origin with the page that
+ * requested it — which is exactly the attacker's page. So the Host header is
+ * ALSO checked as its own middleware, on every method, before the request
+ * reaches anything else. `isAllowedHost` is the one function both that
+ * middleware and the CSRF check below call, so the two can never drift apart.
+ *
  * ── Honest degradation ──────────────────────────────────────────────────────
  * Analysis modules are imported LAZILY inside try/catch. A route whose
  * dependency is absent answers `503` with a named missing dependency. It never
@@ -237,6 +250,19 @@ function isLoopbackPeer(address) {
   return LOOPBACK_PEERS.has(address);
 }
 
+/**
+ * The ONE Host-header check. Exact match only (never a suffix/substring
+ * match — `localhost.evil.com` must fail this) against the loopback
+ * host:port allowlist built from the address this server actually bound.
+ * Called by the standalone Host middleware (every method) and by
+ * `csrfFailure` (mutating methods only) so there is exactly one place that
+ * knows what a legitimate Host header looks like.
+ */
+function isAllowedHost(state, req) {
+  const host = req.headers.host;
+  return typeof host === "string" && state.hostAllowlist.has(host.toLowerCase());
+}
+
 function constantTimeEquals(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;
   const left = Buffer.from(a, "utf8");
@@ -258,10 +284,10 @@ export function csrfFailure(state, req) {
   if (!constantTimeEquals(supplied, state.nonce)) {
     return { reason: "csrf_token_mismatch", error: "X-CSRF-Token does not match this server's startup nonce" };
   }
-  const host = req.headers.host;
-  if (typeof host !== "string" || !state.hostAllowlist.has(host.toLowerCase())) {
+  if (!isAllowedHost(state, req)) {
     return { reason: "host_rejected", error: "Host header is not the loopback address this server is bound to" };
   }
+  const host = req.headers.host;
   const origin = req.headers.origin;
   if (typeof origin !== "string" || origin.length === 0) {
     return { reason: "origin_missing", error: "Origin header is required on every mutating request" };
@@ -477,7 +503,11 @@ export function createApp(options = {}) {
     setAddress(port, host = LOOPBACK_HOST) {
       state.port = port;
       state.host = host;
-      const names = host === "::1" ? [`[::1]`] : [host, "localhost"];
+      // All three loopback aliases, always — never only the literal address
+      // this process happened to bind. `isLoopbackPeer` already tolerates a
+      // peer address reported as `::1`, so the Host allowlist must tolerate
+      // a browser writing the Host header the same way.
+      const names = [LOOPBACK_HOST, "localhost", "[::1]"];
       state.hostAllowlist = new Set(names.map((name) => `${name}:${port}`.toLowerCase()));
     },
   };
@@ -514,7 +544,26 @@ export function createApp(options = {}) {
     next();
   });
 
-  // ---- 3. path traversal, before anything touches the filesystem ----------
+  // ---- 3. Host allowlist, on EVERY method (defeats DNS rebinding) --------
+  //
+  // §5 below only runs for mutating methods, so without this a bare GET —
+  // including one served after DNS rebinding pointed the victim's browser at
+  // this loopback port under an attacker-controlled hostname — was never
+  // Host-checked. `isAllowedHost` is the SAME function §5's `csrfFailure`
+  // calls; there is exactly one place that knows what a legitimate Host
+  // header looks like.
+  app.use((req, res, next) => {
+    if (!isAllowedHost(state, req)) {
+      res.status(403).type("application/json").send(JSON.stringify({
+        error: "Host header is not the loopback address this server is bound to",
+        reason: "host_not_allowed",
+      }));
+      return;
+    }
+    next();
+  });
+
+  // ---- 4. path traversal, before anything touches the filesystem ----------
   app.use((req, res, next) => {
     let decoded;
     try {
@@ -534,7 +583,7 @@ export function createApp(options = {}) {
     next();
   });
 
-  // ---- 4. CSRF on every mutating route, BEFORE the body is parsed ---------
+  // ---- 5. CSRF on every mutating route, BEFORE the body is parsed ---------
   app.use((req, res, next) => {
     if (SAFE_METHODS.has(req.method)) {
       next();
@@ -642,7 +691,7 @@ export function createApp(options = {}) {
     return { ...collectedFor, analysis };
   }
 
-  // ---- 5. `/` and `/index.html` with the nonce injected -------------------
+  // ---- 6. `/` and `/index.html` with the nonce injected -------------------
 
   const serveIndex = route(async (req, res) => {
     const indexPath = path.join(state.publicDir, "index.html");
@@ -665,7 +714,7 @@ export function createApp(options = {}) {
   app.get("/", serveIndex);
   app.get("/index.html", serveIndex);
 
-  // ---- 6. API ------------------------------------------------------------
+  // ---- 7. API ------------------------------------------------------------
 
   // BP-005.10
   app.get("/api/collectors", route(async (req, res) => {
@@ -1022,7 +1071,7 @@ export function createApp(options = {}) {
     });
   }
 
-  // ---- 7. static assets, then honest 404s --------------------------------
+  // ---- 8. static assets, then honest 404s --------------------------------
 
   app.use(express.static(state.publicDir, {
     index: false,
@@ -1041,7 +1090,7 @@ export function createApp(options = {}) {
     });
   }));
 
-  // ---- 8. error handler --------------------------------------------------
+  // ---- 9. error handler --------------------------------------------------
 
   app.use(async (error, req, res, next) => {
     if (res.headersSent) {

@@ -200,12 +200,15 @@ const DEFAULT_COLLECTORS = () => [
 // HTTP client — `node:http`, because `fetch` refuses to set `Host`
 // ---------------------------------------------------------------------------
 
-function raw({ port, method = "GET", target, headers = {}, body = null }) {
+function raw({ port, method = "GET", target, headers = {}, body = null, setHost = true }) {
   // An explicit `undefined` means "send this header not at all"; `http.request`
   // throws on an undefined value rather than omitting it.
   const sent = Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== undefined));
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: LOOPBACK_HOST, port, method, path: target, headers: sent }, (res) => {
+    // `setHost: false` is the only way to make `http.request` send NO Host
+    // header at all — omitting it from `headers` is not enough, since Node
+    // auto-adds one from `host`/`port` unless told not to (T3 below).
+    const req = http.request({ host: LOOPBACK_HOST, port, method, path: target, headers: sent, setHost }, (res) => {
       let text = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => { text += chunk; });
@@ -218,6 +221,35 @@ function raw({ port, method = "GET", target, headers = {}, body = null }) {
     req.on("error", reject);
     if (body !== null) req.write(body);
     req.end();
+  });
+}
+
+/**
+ * A GET with truly NO Host header — for T3. `raw()` above (`setHost: false`)
+ * proves Node's own HTTP/1.1 parser already refuses such a request with a
+ * bare 400, before it ever reaches Express or this app's middleware: a
+ * Host-less HTTP/1.1 request cannot exist past the protocol layer. HTTP/1.0
+ * carries no such requirement, so a raw socket speaking HTTP/1.0 is the only
+ * way to get a Host-less request PAST the parser and into our own Host
+ * middleware — which is the thing T3 must actually exercise.
+ */
+function requestWithNoHostHeader(port, target) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: LOOPBACK_HOST, port }, () => {
+      socket.write(`GET ${target} HTTP/1.0\r\nConnection: close\r\n\r\n`);
+    });
+    let data = "";
+    socket.on("data", (chunk) => { data += chunk; });
+    socket.on("end", () => {
+      const split = data.indexOf("\r\n\r\n");
+      const head = split === -1 ? data : data.slice(0, split);
+      const bodyText = split === -1 ? "" : data.slice(split + 4);
+      const statusLine = /^HTTP\/\d\.\d (\d+)/.exec(head);
+      let json = null;
+      try { json = JSON.parse(bodyText); } catch { json = null; }
+      resolve({ status: statusLine ? Number(statusLine[1]) : null, text: bodyText, json });
+    });
+    socket.on("error", reject);
   });
 }
 
@@ -707,7 +739,14 @@ describe("BP-005.13/14 — CSRF: the four rejection paths", () => {
       headers: { host: `evil.example:${running.port}`, origin: `http://evil.example:${running.port}` },
     });
     assert.equal(res.status, 403);
-    assert.equal(res.json.reason, "host_rejected");
+    // Real interaction with the DNS-rebinding fix below: a bad Host is now
+    // caught by the standalone Host-allowlist middleware, which runs on
+    // EVERY method and therefore BEFORE this CSRF middleware ever sees the
+    // request — so this POST is refused with `host_not_allowed`, not
+    // `host_rejected`. `host_rejected` still exists and is still reachable:
+    // it is what `csrfFailure` itself returns for a bad Host, proven direct
+    // (bypassing the middleware chain) by the "order-stable" test below.
+    assert.equal(res.json.reason, "host_not_allowed");
   });
 
   it("missing Origin and Origin: null → 403 (BP-005.14)", async () => {
@@ -759,6 +798,72 @@ describe("BP-005.13/14 — CSRF: the four rejection paths", () => {
         assert.equal(header.startsWith("access-control-"), false, `${target} leaked ${header}`);
       }
     }
+  });
+});
+
+describe("DNS rebinding — Host header enforced on EVERY method (T1-T8)", () => {
+  const TARGET = "/api/fixes/claude-output-hygiene/preview";
+
+  it("T1: GET with a foreign Host is refused before it reaches any route", async () => {
+    const running = await server();
+    const res = await running.get("/api/collectors", { host: "evil.com" });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "host_not_allowed");
+  });
+
+  it("T2: a Host that merely contains 'localhost' is refused — no suffix/substring match", async () => {
+    const running = await server();
+    const res = await running.get("/api/collectors", { host: `localhost.evil.com:${running.port}` });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "host_not_allowed");
+  });
+
+  it("T3a: an HTTP/1.1 request with no Host header never reaches the app at all", async () => {
+    // Node's own parser refuses this before Express, or this file's Host
+    // middleware, ever sees it — a stronger guarantee than a 403 from us,
+    // not a weaker one. `setHost: false` is the only way `http.request` can
+    // even attempt sending no Host header.
+    const running = await server();
+    const res = await raw({ port: running.port, target: "/api/collectors", setHost: false });
+    assert.equal(res.status, 400);
+  });
+
+  it("T3b: an HTTP/1.0 request with no Host header is refused by our own middleware", async () => {
+    const running = await server();
+    const res = await requestWithNoHostHeader(running.port, "/api/collectors");
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "host_not_allowed");
+  });
+
+  it("T4: GET with Host: 127.0.0.1:<port> — the normal browser case — succeeds", async () => {
+    const running = await server();
+    const res = await running.get("/api/collectors", { host: `127.0.0.1:${running.port}` });
+    assert.equal(res.status, 200);
+  });
+
+  it("T5: GET with Host: localhost:<port> succeeds", async () => {
+    const running = await server();
+    const res = await running.get("/api/collectors", { host: `localhost:${running.port}` });
+    assert.equal(res.status, 200);
+  });
+
+  it("T6: GET with Host: [::1]:<port> succeeds", async () => {
+    const running = await server();
+    const res = await running.get("/api/collectors", { host: `[::1]:${running.port}` });
+    assert.equal(res.status, 200);
+  });
+
+  it("T7: a POST with a valid nonce and a valid Host still succeeds", async () => {
+    const running = await server();
+    const res = await running.post(TARGET);
+    assert.equal(res.status, 200, "the new Host middleware must not break the legitimate mutating path");
+  });
+
+  it("T8: a POST with a valid Host but no nonce is still 403 — CSRF intact", async () => {
+    const running = await server();
+    const res = await running.post(TARGET, { headers: { "x-csrf-token": undefined } });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "csrf_token_missing");
   });
 });
 
