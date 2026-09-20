@@ -15,8 +15,8 @@
 
 | BP-ID | File | Single responsibility | Public exports | Callers |
 |---|---|---|---|---|
-| BP-001.01 | `src/cli.js` | Parse CLI options, select free loopback port, start server, open browser | `main`, `parseArgs` | `package.json` bin; `main` calls `server.createServer` |
-| BP-001.02 | `src/server.js` | Express routes, startup nonce, loopback binding, request validation | `createServer`, `startServer` | `src/cli.js`; frontend `app.js` calls routes |
+| BP-001.01 | `src/cli.js` | Parse CLI options, select free loopback port, start server, open browser | `main`, `parseArgs` | `package.json` bin; `main` calls `server.createApp` and `server.startServer` |
+| BP-001.02 | `src/server.js` | Express routes, startup nonce, loopback binding, request validation | `createApp`, `startServer`, `redactJson`, `csrfFailure`, `filterSessions`, `sortSessions`, `injectNonce`, plus module constants | `src/cli.js`; frontend `app.js` calls routes |
 | BP-001.03 | `src/collectors/base.js` | Collector contract, bounded reads, normalized-record validation | `Collector`, `normalizeSession`, `safeReadLines` | every collector; `src/collectors/registry.js`; `src/analyzer/health.js` |
 | BP-001.04 | `src/collectors/claude.js` | Parse Claude JSONL with message-id deduplication and model-window derivation | `ClaudeCollector` | registry; tests |
 | BP-001.05 | `src/collectors/codex.js` | Parse Codex rollout JSONL and native context window | `CodexCollector` | registry; tests |
@@ -28,7 +28,7 @@
 | BP-001.11 | `src/analyzer/health.js` | Run rules against normalized sessions and produce evidence-qualified findings | `analyzeSession`, `analyzeAll` | `src/server.js`; `public/js/pages/health.js`, `sessions.js` |
 | BP-001.12 | `src/analyzer/rules.js` | Declare six rules, threshold derivations, severity, fix mapping | `RULES`, `evaluateRule` | `health.js`; tests |
 | BP-001.13 | `src/analyzer/trends.js` | Aggregate trend series and 24x15 activity heatmap | `buildTrends` | `src/server.js`; `public/js/pages/trends.js` |
-| BP-001.14 | `src/fixes/base.js` | Fix contract, backup/undo storage, atomic writes, diff generation | `Fix`, `makeUndoPath`, `restoreUndo` | every fix; `src/server.js`; tests |
+| BP-001.14 | `src/fixes/base.js` | Fix contract, backup/undo storage, atomic writes, diff generation | `FixBase`, `WritableFix`, `AppendSectionFix`, `JsonMergeFix`, `HabitRecommendation`, `createFixEnvironment`, `undoTransaction`, `readJournal`, `listTransactions`, `unifiedDiff`, plus constants and error classes | every fix; `src/server.js`; tests |
 | BP-001.15 | `src/fixes/claude/auto-compact.js` | Manage Claude auto-compact setting | `AutoCompactFix` | `rules.js`; `fix-modal.js`; tests |
 | BP-001.16 | `src/fixes/claude/output-hygiene.js` | Append Claude output-hygiene instructions | `OutputHygieneFix` | `rules.js`; `fix-modal.js`; tests |
 | BP-001.17 | `src/fixes/claude/batch-commands.js` | Append Claude batching instructions | `BatchCommandsFix` | `rules.js`; `fix-modal.js`; tests |
@@ -48,6 +48,10 @@
 | BP-001.31 | `README.md` | Installation, support matrix, security and fix behavior | none | npm consumer |
 | BP-001.32 | `LICENSE` | MIT license text | none | npm consumer |
 | BP-001.33 | `package.json` | Publish metadata, bin entry, runtime dependencies and scripts | metadata; `bin`; scripts | npm; `src/cli.js`; test runner |
+
+| BP-ID | BP-001.14 correction (shipped, the CODE was right) |
+|---|---|
+| BP-001.34 | BP-001.14 originally listed three non-existent exports: `Fix`, `makeUndoPath`, `restoreUndo`. The shipped design uses `FixBase` and `WritableFix` base classes with concrete implementations (`AppendSectionFix`, etc.) and `undoTransaction()` for undo recovery, implementing FVA-007's before/after hash journal. The three original names were never implemented under those spellings, so this row was stale while the code was correct; every BP-004 fix contract is satisfied by the shipped design. |
 
 ## BP-002 Collector contract
 
@@ -187,6 +191,7 @@ Fix = {
 | BP-005.08 | `POST` | `/api/fixes/:fixId/undo` | `{undoPath}`, `X-CSRF-Token` | `{restored:true,byteIdentical:true}` |
 | BP-005.09 | `GET` | `/api/fixes/:fixId/check` | none | `{applied:boolean,marker:string}` |
 | BP-005.10 | `GET` | `/api/collectors` | none | `{collectors:[{id,installed,status,paths}]}` |
+| BP-005.20 | `GET` | `/api/fixes` | none | `{fixes:[{id,title,kind,blueprint,available,reason}]}` — curl-able capability matrix; same honesty purpose as FVA-003; UI currently inlines fix titles via BP-005.19 |
 | BP-005.11 | `GET` | `/` and static assets | none | local HTML/JS/CSS/vendor assets only |
 
 | BP-ID | BP-005.04 correction (D-039) — the CODE was right, this row was wrong |
@@ -252,6 +257,8 @@ Fix = {
 | `tests/frontend-contract.test.js` | four pages, local Chart.js only, CSRF header, no CDN/network URL | `GATE-OFFLINE` |
 | `tests/cli.test.js` | free port, browser launch, startup under three seconds in fixture mode | `GATE-PERF` |
 | `tests/package.test.js` | packed artifact contains declared files and excludes fixtures/secrets | `GATE-FACTORY` |
+| `tests/integration.test.js` | WIRING: index.html loads every page module that exists; imports resolve on disk; no dangling imports to retired modules; no remote URLs outside vendor/. BOOT: modules load in order, DOMContentLoaded fires, routes register and render into their mounts (F-022) | `GATE-OFFLINE` |
+| `tests/registry.test.js` | Collector detection splits into supported/detection-only/absent; collection isolation and error containment; diagnostic aggregation from collect() and published properties; sessionMeta relay as plain objects; edge cases (non-array returns, empty/absent/copied meta) | `GATE-COLLECT` |
 
 ## BP-008 Disagreements
 
