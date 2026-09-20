@@ -215,6 +215,16 @@ export class GeminiCollector extends Collector {
       diagnostic.filesSkipped += 1;
       return null;
     }
+    // A file WITH a header and no turn record still becomes a session, and
+    // deliberately so: the chat existed, its start time is real evidence, and a
+    // parser that dropped it would be deciding for the reader what counts as
+    // use.  It is also the common case here — Gemini writes the header and a
+    // session_context user message the moment a chat opens, which is why 250 of
+    // the newest 250 real session files on this machine hold no turn at all.
+    // A count of 250 that means "250 chats opened, none of them used" is
+    // misleading unless something says so, so the per-CLI note in
+    // `src/analyzer/health.js` publishes the turn-less share (see
+    // `emptySessionsNote`).  The disclosure lives there; the scan is unchanged.
 
     const stamps = ordered.map((message) => isoOrNull(message.timestamp)).filter(Boolean).sort();
     // Normalized ISO strings compare correctly as strings.

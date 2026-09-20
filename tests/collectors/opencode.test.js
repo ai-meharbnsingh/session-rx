@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -383,5 +383,136 @@ test("no session from the fixture database publishes a context fraction above 1.
       assert.ok(turn.context.fraction === null || turn.context.fraction <= 1,
         `${session.sessionId}: fraction ${turn.context.fraction}`);
     }
+  }
+});
+
+// ==========================================================================
+// WHAT MUST NOT MOVE WHEN A NOTE IS ADDED
+//
+// `src/analyzer/health.js` derives "was anything cut off?" from whether the
+// number of sessions the collector returned reached the limit, and the sub-agent
+// concurrency rule reads that: cut off -> `unknown`, complete -> `not-observed`.
+// So a change to WHICH sessions a collector returns, or to HOW the limit is
+// counted, silently rewrites verdicts across every session read. This test pins
+// both halves through the real collector, with the real fixture database, at the
+// exact boundary — the limit reached, and the same scan without one.
+// ==========================================================================
+
+const { collectMany: collectManyCollectors } = await import("../../src/collectors/registry.js");
+const { analyzeAll: analyzeAllSessions } = await import("../../src/analyzer/health.js");
+
+async function opencodeReading(options = {}) {
+  const collected = await collectManyCollectors([collector()], options);
+  const out = analyzeAllSessions(collected, options);
+  return {
+    read: collected.supported[0].sessions.length,
+    entry: out.collectors.find((cli) => cli.cli === "opencode"),
+    subagentStatuses: out.sessions
+      .filter((session) => session.cli === "opencode")
+      .map((session) => session.rules.find((rule) => rule.id === "subagent-concurrency").evidence.status),
+  };
+}
+
+test("a scan that reaches the limit still returns the same sessions and the same cut-off verdicts", async () => {
+  // The fixture holds 5 sessions, one of them a sub-agent of another.
+  const complete = await opencodeReading();
+  assert.equal(complete.read, 5);
+  assert.equal(complete.entry.sessions, 4);
+  assert.equal(complete.entry.subagentSessions, 1);
+  // Nothing was cut off, so the rule may say it did not see the problem.
+  assert.deepEqual(complete.subagentStatuses, ["not-observed", "not-observed", "not-observed", "not-observed"]);
+  assert.ok(!complete.entry.note.includes("collection limit"), complete.entry.note);
+
+  // The boundary: 5 returned against a limit of 5 means more may exist.
+  const capped = await opencodeReading({ limit: 5 });
+  assert.equal(capped.read, 5);
+  assert.equal(capped.entry.sessions, 4);
+  assert.equal(capped.entry.subagentSessions, 1);
+  // One session HAS a collected child, so it is still measured; the other three
+  // cannot be told apart from a session whose children were cut off.
+  assert.deepEqual(capped.subagentStatuses, ["not-observed", "unknown", "unknown", "unknown"]);
+  assert.ok(capped.entry.note.includes("the collection limit of 5 was reached"), capped.entry.note);
+
+  // And a limit BELOW the fixture size cuts the oldest, never a different set.
+  const cut = await opencodeReading({ limit: 4 });
+  assert.equal(cut.read, 4);
+  assert.equal(cut.entry.sessions, 3);
+  assert.deepEqual(cut.subagentStatuses, ["not-observed", "unknown", "unknown"]);
+});
+
+// ==========================================================================
+// AN UNREADABLE DATABASE IS AN ERROR, NOT A MEASURED ZERO
+//
+// A `mode=ro` open of a WAL database rebuilds the `-shm` sidecar, which is a
+// WRITE into the directory holding the database. On a locked-down home, a
+// read-only mount or a restored backup that directory refuses it, and the open
+// fails outright rather than degrading. What must not happen is the failure being
+// swallowed: "0 OpenCode sessions" would be a measurement nothing made.
+//
+// FOUND, at the time this test was written: the failure is already honest. The
+// collector records the error in its diagnostic, counts the file as skipped and
+// returns no session, and `health.js` publishes the count as null with a note
+// saying the read failed. This test exists to keep it that way.
+// ==========================================================================
+
+test("a WAL database whose sidecar cannot be written reports the error and publishes no count", async (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    // Root ignores the directory mode, and Windows does not have one to ignore.
+    t.skip("this platform cannot make a directory unwritable for the current user");
+    return;
+  }
+
+  // A live WAL left un-checkpointed: what a copied or backed-up OpenCode
+  // directory looks like when the CLI was running at the time. The `-shm` is
+  // deliberately absent, because rebuilding it is the write that gets refused.
+  const source = scratch();
+  const sourceDb = buildFixtureDb(source);
+  const live = new DatabaseSync(sourceDb);
+  live.exec("pragma journal_mode=wal");
+  live.exec("pragma wal_autocheckpoint=0");
+  live.exec("insert into project (id, name, worktree) values ('p-wal', 'wal', '/tmp/wal')");
+  assert.ok(existsSync(`${sourceDb}-wal`), "the fixture must have a live WAL, or this tests nothing");
+
+  const home = scratch();
+  const dir = path.join(home, ".local", "share", "opencode");
+  mkdirSync(dir, { recursive: true });
+  const db = path.join(dir, "opencode.db");
+  copyFileSync(sourceDb, db);
+  copyFileSync(`${sourceDb}-wal`, `${db}-wal`);
+  live.close();
+
+  chmodSync(dir, 0o555);
+  try {
+    const report = createDiagnostic("opencode");
+    let sessions;
+    // Never fatal: one unreadable database must not take the scan down with it.
+    await assert.doesNotReject(async () => { sessions = await collector(home).collect({ diagnostic: report }); });
+
+    if (report.errors.length === 0) {
+      // Some builds of SQLite open an un-recovered WAL read-only anyway. Then
+      // there is no failure to be honest about, and asserting one would be a
+      // test of this machine rather than of the product.
+      t.skip("this platform opened the read-only WAL database, so there is no failure to pin");
+      return;
+    }
+
+    assert.deepEqual(sessions, [], "an unreadable database yields no session, never a partial one");
+    assert.equal(report.errors.length, 1, JSON.stringify(report.errors));
+    assert.match(report.errors[0], /open|readonly|read-only/i, report.errors[0]);
+    assert.equal(report.filesSkipped, 1, "the file must be counted as skipped, not as read");
+
+    // The honest end of it: a count of 0 is never published for a failed read.
+    const collected = await collectManyCollectors([collector(home)], {});
+    const out = analyzeAllSessions(collected, {});
+    const entry = out.collectors.find((cli) => cli.cli === "opencode");
+    assert.equal(entry.sessions, null, "a failed read states no count at all");
+    assert.equal(entry.subagentSessions, null);
+    assert.ok(entry.note.includes("reading this CLI failed"), entry.note);
+    assert.ok(entry.note.includes("unknown rather than zero"), entry.note);
+    assert.ok(collected.diagnostics.some((diagnostic) => diagnostic.cli === "opencode" && diagnostic.errors.length > 0),
+      "the error must travel to the collector diagnostics the note points the reader at");
+  } finally {
+    // Never leave an unreadable directory behind, even on a failed assertion.
+    chmodSync(dir, 0o755);
   }
 });

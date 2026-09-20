@@ -60,6 +60,19 @@ const MAX_REPRESENTATIVE_SESSIONS = 3;
 const MAX_VALUES_PER_REPRESENTATIVE = 4;
 const MAX_SOURCES_PER_RULE = 6;
 
+/**
+ * At or above this share of turn-less sessions, the per-CLI note says so.
+ *
+ * A chat that was started and never used still parses as a session — for Gemini
+ * a header line and a clock bump are the whole file — so a scan can return a
+ * full window of empty shells: 250 of 250 on the machine this was measured on,
+ * against 14 of 656 for Claude, 3 of 250 for Codex and 7 of 250 for OpenCode.
+ * The gap between those is what the threshold is set to catch: at 0.9 the real
+ * Gemini reading is disclosed and no other CLI's healthy mix raises a false
+ * alarm.
+ */
+const EMPTY_SESSION_NOTE_SHARE = 0.9;
+
 function str(value) {
   return typeof value === "string" ? value : "";
 }
@@ -265,6 +278,38 @@ function promotionNote(promotions, sessionCount) {
   return (
     `${promotions.length} of ${sessionCount} collected session${sessionCount === 1 ? "" : "s"} held more context than the model-id table allows for their model, so the window was worked out from what was observed instead: ` +
     `${described}${more}. The table entry is stale for these models; the promotion is reported rather than applied silently.`
+  );
+}
+
+/**
+ * Say so when all, or nearly all, of a CLI's sessions hold no turns.
+ *
+ * DISCLOSURE, NOT A VERDICT.  A started-and-abandoned chat is a real file and
+ * parses as a real session, so the count beside the CLI is a true count of what
+ * was read and, on its own, a misleading picture of what was used.  Neither the
+ * limit note nor the count says which; this sentence does.  Nothing here changes
+ * which sessions are read or how the limit is counted.
+ *
+ * @param {number} empty  sessions read that recorded no turn at all
+ * @param {number} total  sessions read for this CLI
+ * @param {number|null} limit  the collection limit, but only when it was reached:
+ *   only then can a session holding turns be sitting outside what was read.
+ */
+function emptySessionsNote(empty, total, limit) {
+  const outside = limit === null
+    ? ""
+    : ` Sessions that do hold turns may sit outside the newest ${limit} read here; raise the limit to reach them.`;
+  if (empty >= total) {
+    return (total === 1
+      ? "the one session read for this CLI recorded no turns at all: it is a chat that was started and then left unused, so there is nothing in it to measure."
+      : `not one of the ${total} sessions read for this CLI recorded a single turn: every one of them is a chat that was started and then left unused, so there is nothing in any of them to measure.`)
+      + outside;
+  }
+  const measurable = total - empty;
+  return (
+    `${empty} of the ${total} sessions read for this CLI recorded no turns at all — they are chats that were started and then left unused — `
+    + `so only ${measurable} of them ${measurable === 1 ? "has" : "have"} anything in it to measure.`
+    + outside
   );
 }
 
@@ -528,6 +573,14 @@ export function analyzeAll(collected = {}, options = {}) {
     // move because of it.
     const corpusComplete = limit === null || sessions.length < limit;
 
+    // How many of those sessions hold no turn at all.  Counted over the same
+    // set as the notes above (every session read for this CLI, sub-agents
+    // included) so one paragraph cannot quote two different totals.  Read-only:
+    // it feeds a note and nothing else, so no verdict can move because of it.
+    const emptySessions = sessions.filter(
+      (session) => !(Array.isArray(session?.turns) && session.turns.length > 0),
+    ).length;
+
     // Does this CLI's collector surface tool calls at all?  Answered from the
     // whole collected set, because one session cannot tell "used no tools"
     // apart from "tool calls not parsed" — and one of those is a parser gap.
@@ -615,6 +668,11 @@ export function analyzeAll(collected = {}, options = {}) {
     }
     if (!corpusComplete) {
       notes.push(`the collection limit of ${limit} was reached for this CLI, so this is the newest ${ownHealth.length} session${ownHealth.length === 1 ? "" : "s"}, not all of them.`);
+    }
+    // Last, because it reads as a qualifier on the count and the limit above it.
+    // A failed read states no count at all, and 0 of 0 is not a finding.
+    if (!readFailed && sessions.length > 0 && emptySessions >= sessions.length * EMPTY_SESSION_NOTE_SHARE) {
+      notes.push(emptySessionsNote(emptySessions, sessions.length, corpusComplete ? null : limit));
     }
     clis.push({
       cli,

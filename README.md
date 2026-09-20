@@ -106,7 +106,9 @@ Every fix is Preview, then Apply, then Undo.
 - **Apply** copies each target file byte-for-byte into
   `~/.session-rx/undo/<timestamp>/` first, then writes.
 - **Undo** restores those bytes. It refuses to run if the undo record is
-  missing or no longer matches the file it came from.
+  missing or no longer matches the file it came from. Your files are restored
+  exactly; SessionRx keeps its own history under `~/.session-rx/`, which is
+  not removed by an undo.
 
 Fixes are idempotent. Each one carries a marker, and `check()` reads that
 marker, so a fix that is already applied is not offered again and cannot be
@@ -126,6 +128,8 @@ applied twice.
 - OpenCode's database is opened read-only and queried against a table
   allowlist that excludes its `account` and `credential` tables, which hold
   plaintext tokens.
+- The report includes file paths and project names to make findings traceable,
+  so read it before sharing it publicly.
 
 ## Limitations
 

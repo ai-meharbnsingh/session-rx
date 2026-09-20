@@ -27,7 +27,7 @@ Every fix implements `preview()` / `apply()` / `undo()` / `check()`.
 
 ## READ-ONLY BY DEFAULT
 
-Collectors stream user log files with `createReadStream` — never opened for writing. The OpenCode SQLite database is opened through a `file:<path>?mode=ro` URI, so its write lock is never taken. The only writes permitted anywhere are inside a fix's `apply()`, after an explicit user click.
+Collectors stream user log files with `createReadStream` — never opened for writing. The OpenCode SQLite database is opened through a `file:<path>?mode=ro` URI, so its database file is never written; reading may advance the mtime of the WAL index sidecar file but never alters its content. The only writes to user files or settings are inside a fix's `apply()`, after an explicit user click.
 
 ## NO NETWORK
 

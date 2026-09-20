@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -282,4 +282,146 @@ test("F-010: the observed floor is the MAX per-turn context, never the sum of th
   // 30,000 + 41,344 + 12,000 = 83,344: a workload total, not a context reading.
   assert.deepEqual(session.window, { tokens: 41344, source: "observed-floor" });
   assert.notEqual(session.window.tokens, 83344);
+});
+
+// ==========================================================================
+// THE EMPTY SHELL, AND THE NOTE THAT HAS TO SAY SO
+//
+// Gemini writes the session header and a `session_context` user message the
+// moment a chat opens, so a chat that was opened and never used is a real file
+// that parses as a real session with no turn in it. On the machine this was
+// measured on, 250 of the newest 250 session files are exactly that, and the
+// only thing the product said about them was "the collection limit of 250 was
+// reached" — a count of 250 that reads as activity.
+//
+// These tests go through the REAL collector over REAL file shapes and then
+// through the REAL analyzer, and assert on the sentence a user reads. A fixture
+// that handed the analyzer pre-built sessions would prove nothing about whether
+// Gemini's own file shape reaches the note.
+// ==========================================================================
+
+const { collectMany } = await import("../../src/collectors/registry.js");
+const { analyzeAll } = await import("../../src/analyzer/health.js");
+
+/** A chat opened and never used: header, the session_context line, a clock bump. */
+function emptyShellLines(id, minute) {
+  const stamp = `2026-09-20T10:${String(minute).padStart(2, "0")}:00.000Z`;
+  return [
+    JSON.stringify({ sessionId: id, projectHash: "h", startTime: stamp, lastUpdated: stamp, kind: "main" }),
+    JSON.stringify({ $set: { messages: [{ id: `${id}-u`, timestamp: stamp, type: "user", content: [{ text: "<session_context>" }] }] } }),
+    JSON.stringify({ $set: { lastUpdated: stamp } }),
+    "",
+  ].join("\n");
+}
+
+/** A chat that was actually used: one model reply, so one turn. */
+function usedSessionLines(id, minute) {
+  const stamp = `2026-09-20T11:${String(minute).padStart(2, "0")}:00.000Z`;
+  return [
+    JSON.stringify({ sessionId: id, projectHash: "h", startTime: stamp, lastUpdated: stamp, kind: "main" }),
+    JSON.stringify({ $set: { messages: [
+      { id: `${id}-u`, timestamp: stamp, type: "user", content: [{ text: "hi" }] },
+      {
+        id: `${id}-g`, timestamp: stamp, type: "gemini", model: "gemini-2.5-pro",
+        content: [{ text: "ok" }], tokens: { input: 1000, output: 20, cached: 0 },
+      },
+    ] } }),
+    "",
+  ].join("\n");
+}
+
+/**
+ * A Gemini home holding `shells` empty chats and `used` real ones, with mtimes
+ * set so the newest-first ordering the collector relies on is deterministic.
+ */
+function shellHome(shells, used = 0) {
+  const home = scratch();
+  const chats = path.join(home, ".gemini", "tmp", "project-shells", "chats");
+  mkdirSync(chats, { recursive: true });
+  const write = (name, body, minute) => {
+    const file = path.join(chats, name);
+    writeFileSync(file, body);
+    const when = Date.UTC(2026, 8, 20, 10, minute, 0) / 1000;
+    utimesSync(file, when, when);
+  };
+  for (let i = 0; i < shells; i += 1) {
+    write(`session-2026-09-20T10-${String(i).padStart(2, "0")}-shell${i}.jsonl`, emptyShellLines(`shell${i}`, i), i);
+  }
+  for (let i = 0; i < used; i += 1) {
+    write(`session-2026-09-20T11-${String(i).padStart(2, "0")}-used${i}.jsonl`, usedSessionLines(`used${i}`, i), 30 + i);
+  }
+  return home;
+}
+
+/** The real collector, then the real analyzer: what the user would be shown. */
+async function shellReading(shells, used = 0, options = {}) {
+  const collected = await collectMany([collector(shellHome(shells, used))], options);
+  const out = analyzeAll(collected, { ...options, generatedAt: "2026-09-21T00:00:00Z" });
+  return {
+    read: collected.supported[0].sessions.length,
+    turnCounts: collected.supported[0].sessions.map((session) => session.turns.length),
+    entry: out.collectors.find((cli) => cli.cli === "gemini"),
+  };
+}
+
+test("a CLI whose every collected session holds no turn is said to hold none, not just counted", async () => {
+  const { read, turnCounts, entry } = await shellReading(3);
+  // The shells are still collected and still counted: they are real chats.
+  assert.equal(read, 3);
+  assert.equal(entry.sessions, 3);
+  assert.deepEqual(turnCounts, [0, 0, 0]);
+  assert.ok(
+    entry.note.includes("not one of the 3 sessions read for this CLI recorded a single turn"),
+    entry.note,
+  );
+  assert.ok(entry.note.includes("started and then left unused"), entry.note);
+  // With nothing cut off, there is nowhere else for a used session to be, so
+  // the note must NOT send the reader off to raise a limit.
+  assert.ok(!entry.note.includes("raise the limit"), entry.note);
+});
+
+test("when the limit was reached too, the all-empty note says used sessions may lie outside it", async () => {
+  const { read, entry } = await shellReading(3, 0, { limit: 2 });
+  assert.equal(read, 2);
+  assert.equal(entry.sessions, 2);
+  assert.ok(entry.note.includes("the collection limit of 2 was reached"), entry.note);
+  assert.ok(entry.note.includes("not one of the 2 sessions read for this CLI recorded a single turn"), entry.note);
+  assert.ok(entry.note.includes("may sit outside the newest 2 read here"), entry.note);
+  assert.ok(entry.note.includes("raise the limit to reach them"), entry.note);
+});
+
+test("the turn-less share is published with both its numbers, and the remainder with it", async () => {
+  const { read, entry } = await shellReading(9, 1);
+  assert.equal(read, 10);
+  assert.equal(entry.sessions, 10);
+  assert.ok(entry.note.includes("9 of the 10 sessions read for this CLI recorded no turns at all"), entry.note);
+  assert.ok(entry.note.includes("only 1 of them has anything in it to measure"), entry.note);
+  // 9 of 10 is not "not one of them": the one that was used is not erased.
+  assert.ok(!entry.note.includes("not one of"), entry.note);
+});
+
+test("a healthy mix of used and unused chats raises no turn-less alarm at all", async () => {
+  const { read, turnCounts, entry } = await shellReading(1, 4);
+  assert.equal(read, 5);
+  assert.deepEqual(turnCounts.filter((count) => count === 0).length, 1);
+  // 1 of 5 turn-less is ordinary — the real Claude, Codex and OpenCode readings
+  // are 2%, 1% and 3%. A note here would be a false alarm on every machine.
+  assert.equal(entry.note, null);
+});
+
+test("a CLI that is installed but has no session at all gets no turn-less note: 0 of 0 is not a finding", async () => {
+  // Installed — the tmp root exists, so this CLI is `supported` and reaches the
+  // same note-building path — but holding no session file at all.
+  const home = scratch();
+  mkdirSync(path.join(home, ".gemini", "tmp"), { recursive: true });
+  const collected = await collectMany([collector(home)], {});
+  assert.equal(collected.supported.length, 1, "the CLI must be supported, or this exercises the absent path instead");
+  assert.equal(collected.supported[0].sessions.length, 0);
+
+  const out = analyzeAll(collected, { generatedAt: "2026-09-21T00:00:00Z" });
+  const entry = out.collectors.find((cli) => cli.cli === "gemini");
+  assert.equal(entry.sessions, 0);
+  assert.ok(!entry.note.includes("recorded no turns at all"), entry.note);
+  assert.ok(!entry.note.includes("recorded a single turn"), entry.note);
+  assert.ok(entry.note.includes("no session fell inside the requested range"), entry.note);
 });
