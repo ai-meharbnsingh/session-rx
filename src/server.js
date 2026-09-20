@@ -854,6 +854,139 @@ export function createApp(options = {}) {
     await sendJson(res, 200, { ...built, scan: collectedFor.scan, diagnostics: collectedFor.collected.diagnostics ?? [] });
   }));
 
+  /**
+   * Section 6's direction, computed by the SAME builder `/api/trends` uses, on
+   * the same collected corpus with the same window options — one trend
+   * implementation, not a second copy of it (F-021).  A builder that is absent
+   * or that throws yields `unknown` WITH the reason; it never manufactures a
+   * direction, and it never fails the whole report.
+   */
+  async function reportTrend(collected, { from, to, cli }) {
+    const loaded = await load("trends");
+    if (!loaded.ok) {
+      return {
+        direction: "unknown",
+        reason: `the trend builder is unavailable in this build (${loaded.specifier ?? "no module registered"}), so no direction over time was computed; "stable" would be a claim about history nothing here looked at`,
+      };
+    }
+    try {
+      const built = loaded.module.buildTrends(collected, {
+        from: from ?? undefined,
+        to: to ?? undefined,
+        cli: cli ?? undefined,
+        now: state.now(),
+      });
+      const trend = built?.trend;
+      if (!trend || typeof trend.direction !== "string") {
+        return { direction: "unknown", reason: "the trend builder returned no direction for this window, so none is reported" };
+      }
+      return trend;
+    } catch (error) {
+      return {
+        direction: "unknown",
+        reason: `the trend for this window could not be computed (${error instanceof Error ? error.message : String(error)}), so no direction is reported`,
+      };
+    }
+  }
+
+  /**
+   * The applied-fix history section 5 renders, read from the ONE record the fix
+   * engine keeps: the FVA-007 transaction journal, through the engine's own
+   * `readJournal()`.  No second parser, no second format.
+   *
+   * Every way of NOT reading it returns `{status: "unknown", reason}`.  "No fix
+   * was applied in this period" is a claim about the user's own history, and an
+   * unread journal is no evidence for it — that sentence printed under five
+   * freshly applied fixes was the one outright falsehood in this product.
+   */
+  async function appliedFixHistory({ from, to }) {
+    const unknown = (reason) => ({ status: "unknown", reason });
+    const detail = (error) => (error?.code ? error.code : error instanceof Error ? error.message : String(error));
+
+    const loaded = await load("fixBase");
+    if (!loaded.ok) {
+      return unknown(`the fix engine is unavailable in this build (${loaded.specifier ?? "no module registered"}), so the transaction journal could not be read`);
+    }
+    const base = loaded.module;
+    let env;
+    try {
+      env = await fixEnvFor(base);
+    } catch (error) {
+      return unknown(`the fix environment could not be created (${detail(error)}), so the transaction journal could not be read`);
+    }
+    // `display()` keeps the journal and undo records in `~/...` form: the report
+    // is a file the user is expected to paste in public.
+    const shown = (value) => (typeof value === "string" && value !== "" ? env.display(value) : null);
+    const journal = shown(env.journalPath) ?? "the transaction journal";
+
+    let size;
+    try {
+      size = (await fs.stat(env.journalPath)).size;
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return unknown(`${journal} does not exist, so no applied-fix history could be read: either no fix has ever been applied here or the record was removed, and SessionRx cannot tell those two apart`);
+      }
+      return unknown(`${journal} could not be opened (${detail(error)}), so no applied-fix history could be read`);
+    }
+
+    let rows;
+    try {
+      rows = await base.readJournal(env);
+    } catch (error) {
+      return unknown(`${journal} could not be read (${detail(error)})`);
+    }
+    // `readJournal` drops a line it cannot parse, so a file with bytes and no
+    // record is a malformed journal, not an empty one.
+    if (size > 0 && rows.length === 0) {
+      return unknown(`${journal} holds ${size} byte(s) but not one parseable record, so the applied-fix history could not be reconstructed`);
+    }
+    const events = rows.filter((row) => typeof row?.event === "string" && typeof row?.fixId === "string" && row.fixId !== "");
+    if (rows.length > 0 && events.length === 0) {
+      return unknown(`${journal} holds ${rows.length} record(s), not one of which names both a fix and an event, so the applied-fix history could not be reconstructed`);
+    }
+    const applies = events.filter((row) => row.event === "apply");
+    if (events.length > 0 && applies.length === 0) {
+      return unknown(`${journal} holds ${events.length} record(s) but not one apply, so what was applied could not be reconstructed from it`);
+    }
+
+    const reverted = new Set(events.filter((row) => row.event === "undo").map((row) => row.undoPath));
+    const titles = new Map(
+      state.fixCatalog
+        .filter((fix) => typeof fix?.id === "string" && typeof fix?.title === "string")
+        .map((fix) => [fix.id, fix.title]),
+    );
+    const fromMs = from ? from.getTime() : null;
+    const toMs = to ? to.getTime() : null;
+    const inWindow = (ts) => {
+      if (fromMs === null && toMs === null) return true;
+      const at = Date.parse(typeof ts === "string" ? ts : "");
+      // An apply with no usable timestamp is EXCLUDED from a bounded window
+      // rather than assumed to be inside it, exactly as `filterSessions` does.
+      if (!Number.isFinite(at)) return false;
+      if (fromMs !== null && at < fromMs) return false;
+      if (toMs !== null && at > toMs) return false;
+      return true;
+    };
+
+    return applies.filter((row) => inWindow(row.ts)).map((row) => {
+      const targets = (Array.isArray(row.targets) ? row.targets : [])
+        .map((target) => shown(target?.path))
+        .filter(Boolean);
+      return {
+        id: row.fixId,
+        name: titles.get(row.fixId) ?? null,
+        target: targets.length > 0 ? targets.join(", ") : null,
+        appliedAt: typeof row.ts === "string" ? row.ts : null,
+        status: reverted.has(row.undoPath) ? "reverted" : "applied",
+        // The journal records each target's content HASH, never its bytes, so
+        // the BEFORE text genuinely is not in it. The generator says it was not
+        // recorded rather than implying the fix went unaudited.
+        before: null,
+        undoPath: shown(row.undoPath),
+      };
+    });
+  }
+
   // BP-005.05
   app.get("/api/report", route(async (req, res) => {
     const from = parseIsoDate(singleValue(req.query.from, "from"), "from");
@@ -872,7 +1005,13 @@ export function createApp(options = {}) {
       sessions,
       clis: result.analysis.collectors,
       generatedAt: state.now().toISOString(),
+      trend: await reportTrend(result.collected, { from, to, cli }),
     });
+    // `buildReportInput` coerces a non-array `fixes` to `[]`, and `[]` is what
+    // the generator renders as "No fix was applied in this period" — so an
+    // unreadable journal passed through it would come out as that same
+    // falsehood. The history is attached here instead, where `unknown` survives.
+    reportInput.fixes = await appliedFixHistory({ from, to });
     const document = reportModule.generateReportDocument(reportInput);
     await sendJson(res, 200, {
       markdown: document.markdown,
@@ -889,11 +1028,14 @@ export function createApp(options = {}) {
 
   /** One fix env per app: all targets resolve under `state.home` and nowhere else. */
   let fixEnvPromise = null;
+  function fixEnvFor(base) {
+    fixEnvPromise ??= Promise.resolve(base.createFixEnvironment({ home: state.home, now: state.now }));
+    return fixEnvPromise;
+  }
   async function fixEnv(res) {
     const base = await require$(res, "fixBase", "the fix engine");
     if (!base) return null;
-    fixEnvPromise ??= Promise.resolve(base.createFixEnvironment({ home: state.home, now: state.now }));
-    return { base, env: await fixEnvPromise };
+    return { base, env: await fixEnvFor(base) };
   }
 
   function findDescriptor(fixId) {

@@ -215,6 +215,34 @@ function indexPromotions(diagnostics) {
 }
 
 /**
+ * The read errors each CLI's collector hit, keyed by CLI.
+ *
+ * A COLLECTOR THAT FAILED IS NOT A COLLECTOR THAT FOUND NOTHING.  The registry
+ * contains a throwing `collect()` so one broken CLI cannot take the scan down,
+ * and files the failure under `diagnostics[].errors` — but the entry it pushes
+ * still carries `sessions: []`, which is indistinguishable from a healthy CLI
+ * with nothing in range.  Reported as such, the note claimed the CLI "was read"
+ * while its own diagnostic said nothing was read at all, and the session count
+ * was published as a measured 0.  Whether a read failed is therefore answered
+ * from the diagnostic, not from the length of the session list.
+ *
+ * @param {Array<object>} diagnostics
+ * @returns {Map<string, Array<string>>} only CLIs that recorded at least one error
+ */
+function indexReadErrors(diagnostics) {
+  const byCli = new Map();
+  for (const diagnostic of Array.isArray(diagnostics) ? diagnostics : []) {
+    const errors = (Array.isArray(diagnostic?.errors) ? diagnostic.errors : [])
+      .map((error) => str(error))
+      .filter(Boolean);
+    if (!errors.length) continue;
+    const cli = str(diagnostic?.cli) || "unknown";
+    byCli.set(cli, [...(byCli.get(cli) ?? []), ...errors]);
+  }
+  return byCli;
+}
+
+/**
  * One sentence per CLI, stating what was promoted and why, so a stale
  * `MODEL_WINDOWS` entry is visible in the report rather than silently fixed.
  */
@@ -451,12 +479,17 @@ function aggregateRules(sessions, parserVersion) {
  *   `subagentSessions` and under `sessions[].subagentSessions`, and how many
  *   were set aside is stated in `subagentSessionsSetAside` and per CLI in
  *   `collectors[].subagentSessions` (F-023).
+ *   A supported CLI whose collector FAILED publishes `sessions: null` and
+ *   `subagentSessions: null` with a note saying the read failed: a read that
+ *   produced nothing has no count, and 0 would be a measurement nothing made
+ *   (see `indexReadErrors`).
  */
 export function analyzeAll(collected = {}, options = {}) {
   const parserVersion = str(options?.parserVersion) || MODEL_WINDOWS_VERSION;
   const limit = num(options?.limit);
   const diagnostics = Array.isArray(collected?.diagnostics) ? collected.diagnostics : [];
   const promotions = indexPromotions(diagnostics);
+  const readErrorsByCli = indexReadErrors(diagnostics);
 
   const analyzed = [];
   const setAsideSubagents = [];
@@ -546,14 +579,31 @@ export function analyzeAll(collected = {}, options = {}) {
     setAsideSubagents.push(...subagentHealth);
     if (subagentHealth.length) setAsideByCli.push({ cli, count: subagentHealth.length, orphans: orphansHere });
 
+    // The read either failed and produced nothing, or partly failed, or worked.
+    // Only the first case may not state a count: 0 there is not a measurement.
+    const readErrors = readErrorsByCli.get(cli) ?? [];
+    const readFailed = readErrors.length > 0 && sessions.length === 0;
+
     const notes = [];
     const promotionSummary = promotionNote(promotions.byCli.get(cli), sessions.length);
     if (promotionSummary) notes.push(promotionSummary);
-    if (!ownHealth.length) {
+    if (readFailed) {
+      notes.push(
+        `reading this CLI failed: ${readErrors.length === 1 ? "an error" : `${readErrors.length} errors`} stopped the read and not one session was obtained. ` +
+        "So the session count is unknown rather than zero, and none of this says the CLI went unused — nothing here was measured. " +
+        "The error itself is shown with the collector diagnostics.",
+      );
+    } else if (!ownHealth.length) {
       notes.push(
         subagentHealth.length
           ? `every one of the ${subagentHealth.length} session${subagentHealth.length === 1 ? "" : "s"} read for this CLI is a sub-agent transcript dispatched by another session, so none of them is counted here as a session of the user's own.`
           : "this CLI is installed and was read, but no session fell inside the requested range, so there is nothing to analyze for it here.",
+      );
+    }
+    if (readErrors.length && !readFailed) {
+      notes.push(
+        `${readErrors.length === 1 ? "one error" : `${readErrors.length} errors`} were hit while reading this CLI, so the count beside it is what could be read and may be lower than the truth. ` +
+        `The ${readErrors.length === 1 ? "error is" : "errors are"} shown with the collector diagnostics.`,
       );
     }
     if (subagentHealth.length) {
@@ -568,8 +618,11 @@ export function analyzeAll(collected = {}, options = {}) {
     }
     clis.push({
       cli,
-      sessions: ownHealth.length,
-      subagentSessions: subagentHealth.length,
+      // A failed read states no count at all: null is "not recorded", which the
+      // report and the UI already render as such, and 0 would be a measurement
+      // nothing here made.
+      sessions: readFailed ? null : ownHealth.length,
+      subagentSessions: readFailed ? null : subagentHealth.length,
       support: "supported",
       note: notes.length ? notes.join(" ") : null,
     });

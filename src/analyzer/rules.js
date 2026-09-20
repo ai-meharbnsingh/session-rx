@@ -492,18 +492,19 @@ const repeatTool = {
   id: "repeat-tool",
   name: "Repeated tool work",
   description:
-    "The same tool, called with the same input, returning the same result, five or more times in one session — the session paying repeatedly for an answer it already had.",
+    "The same tool, called with the same input, returning a result of the same size, five or more times in one session — the session paying again for an answer that shows no sign of having changed.",
   threshold: {
     value: 5,
     derivation:
-      "Five occurrences of the same tool AND the same input AND the same result (BP-003.03). Four repeats of a cheap read can be ordinary re-checking during a change; the fifth identical ANSWER means nothing was learned from the previous four. " +
-      "Same input alone is deliberately not enough — a command re-run after an edit legitimately returns something new, and counting that would manufacture a finding out of correct behaviour — so where a result signature cannot be recovered this rule reports unknown instead of falling back to input-only matching (DIS-003).",
+      "Five occurrences of the same tool AND the same input AND a result of the same SIZE (BP-003.03). Four repeats of a cheap read can be ordinary re-checking during a change; a fifth call whose result is the same size again means nothing measurable changed across any of them. " +
+      "Same input alone is deliberately not enough — a command re-run after an edit usually returns an answer of a different length, and counting input alone would manufacture a finding out of correct behaviour — so where no result size can be attributed to a single call this rule reports unknown instead of falling back to input-only matching (DIS-003). " +
+      "What is matched is the result's LENGTH, not its body, because the normalized turn keeps only the length: two different results that happen to be the same size are grouped together, so an edit that leaves the length unchanged is counted as a repeat here. That is why the finding is stated as a detected repetition rather than as confirmed waste.",
   },
   severity: "warn",
   fix: "claude-batch-commands",
   plain: {
     problem:
-      "Your AI repeated the exact same tool call — same tool, same input, same result — {count} times in this session.",
+      "Your AI made the same tool call — same tool, same input, and a result of the same size — {count} times in this session.",
     why:
       "This may indicate wasted work, but repeated calls are not always unnecessary — a command can legitimately return the same answer more than once. This is a DETECTED REPETITION, not CONFIRMED WASTE: it is worth checking whether anything should have changed between those calls before assuming time was lost.",
     unmeasured: {
@@ -761,6 +762,8 @@ const longRisingContext = {
         "Nothing recorded for this session says when it began and ended, and too few of its turns carry a time for one to be worked out, so how long it ran is unknown. How long it ran is half of this check, so no result follows. Times on the turns, or a recorded start and finish, would make it measurable.",
       "too-few-context-points":
         "How long this session ran is known, but too few of its turns carry both a time and a context size for a trend to mean anything — a line drawn through one or two points is an assertion, not a measurement. Three or more turns carrying both would make the trend measurable.",
+      "context-times-identical":
+        "How long this session ran is known, and it saved enough context readings to draw a trend through, but every one of them carries the same time — so there is no gap between any two readings to measure a rise or a fall across. Readings taken at different times would make the trend measurable; readings that all share one time leave it open.",
     },
   },
   evaluate(session) {
@@ -823,7 +826,19 @@ const longRisingContext = {
       `elapsed time from ${elapsedFrom}; Theil-Sen (median of ${pairs.toLocaleString("en-US")} pairwise slopes) over (timestamp, context.inputTokens) pairs from ${used} of ${points.length} usable observations` +
       `${subsampled ? ", evenly subsampled from the full set to bound the pair count" : ""}. Both conditions are reported whether or not either is met.`;
 
-    const rising = perHour !== null && perHour > 0;
+    // A slope exists only where two observations are separated in time. When
+    // every pair spans zero time, Theil-Sen takes the median of an EMPTY set
+    // of slopes and returns null — which is not a flat trend, it is no trend
+    // at all. Half of this rule was never measured, so it cannot pass.
+    if (slope === null) {
+      return unknown(
+        `elapsed time is known (${round(elapsedHours, 2)} hours), but every one of the ${used} context observation${used === 1 ? "" : "s"} used for the trend carries the same time (${new Date(points[0].x).toISOString()}), so each pair of them spans zero time and no rate of change can be worked out from them. A trend that could not be computed is not a flat one, so no result follows.`,
+        values,
+        "context-times-identical",
+      );
+    }
+
+    const rising = perHour > 0;
     const long = elapsedHours > hoursNeeded;
     if (long && rising) return observed(values, derivation, perHour);
     return notObserved(values, derivation, perHour);
@@ -982,6 +997,7 @@ const subagentConcurrency = {
     value: 0.5,
     derivation:
       "Warn when the peak number of simultaneous sub-agents exceeds 0.50 of the number that session dispatched (BP-003.06). The ratio is against the session's OWN dispatched count rather than a fixed worker cap, because 3 running out of 4 dispatched is a deliberate fan-out while 3 out of 12 is an orderly queue. Half is the line where the work stops being staged and becomes a burst. " +
+      "The ratio is only consulted once at least TWO sub-agents were open at the same moment, because one sub-agent running alone is not concurrent with anything — yet one of one dispatched works out to the whole of it and would cross any ratio line ever drawn here. A peak of one is reported as nothing found, never as a burst. " +
       "This needs real intervals: a marker saying a turn belonged to some sub-agent, with no identity and no start or end, cannot establish what overlapped what — so where intervals are not recoverable this rule is unknown, never a zero.",
   },
   severity: "warn",
@@ -990,7 +1006,7 @@ const subagentConcurrency = {
     problem:
       "At its busiest moment, this session had sub-agents running at the same time equal to {pct} of everything it dispatched — a burst of parallel work rather than one thing at a time.",
     why:
-      "Running several sub-agents at once can be a deliberate and efficient way to fan work out. This only flags it when more than half of what was dispatched was active simultaneously, so it is worth a quick check that the burst was intentional rather than accidental.",
+      "Running several sub-agents at once can be a deliberate and efficient way to fan work out. This only flags it when at least two of them were genuinely running together AND more than half of what was dispatched was active at the same moment — one sub-agent working on its own is never flagged, whatever share of the session's dispatches it happens to be — so it is worth a quick check that the burst was intentional rather than accidental.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -1065,12 +1081,23 @@ const subagentConcurrency = {
       `swept the start and end times of the ${intervals.length} of ${dispatched} linked sub-agent sessions that carry a usable interval, taking the highest number open at once; ` +
       "an end at the same instant as a start is treated as NOT concurrent. The dispatched count is this session's own, not a global default.";
 
-    if (ratio > this.threshold.value) return observed(values, derivation, ratio);
+    // Concurrency takes TWO things at once. A peak of one is a single sub-agent
+    // running alone, which cannot overlap anything — and one of one dispatched
+    // is a ratio of 1.0, which crosses every line this rule could draw. So the
+    // ratio is consulted only once at least two were open at the same moment.
+    if (peak >= 2 && ratio > this.threshold.value) return observed(values, derivation, ratio);
     if (withoutInterval > 0) {
       return unknown(
         `peak concurrency reached ${peak} of ${dispatched} dispatched (${round(ratio)}), below the ${this.threshold.value} line — but ${withoutInterval} of those ${dispatched} sub-agent sessions carry no usable start/end, so the real peak can only be higher than the ${peak} measured here. A ceiling computed from part of the evidence is not a pass.`,
         values,
         "partial-subagent-times",
+      );
+    }
+    if (peak < 2) {
+      return notObserved(
+        values,
+        `${derivation} The most open at any one moment was ${peak} of the ${dispatched} dispatched, and a single sub-agent running on its own overlaps nothing — so there was no simultaneous work here for a share to be taken of, whatever ${peak} of ${dispatched} comes to as a fraction. Every dispatched sub-agent carried a usable start and end, so this is a complete answer rather than a gap.`,
+        ratio,
       );
     }
     return notObserved(values, derivation, ratio);

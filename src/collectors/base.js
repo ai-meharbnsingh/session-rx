@@ -40,8 +40,9 @@ export const WINDOW_SOURCES = Object.freeze([...BP002_WINDOW_SOURCES, ...OBSERVE
 //
 // `vendor` groups entries that ship the same window SIZES.  A context window is
 // a vendor property, so when observation proves the table wrong (F-008) the
-// promotion ladder is that vendor's own tiers first: a Claude session's window
-// is a Claude window, never OpenAI's 400,000.
+// promotion ladder is that vendor's own tiers and ONLY those: a Claude session's
+// window is a Claude window, never OpenAI's 400,000 — and a session past the
+// largest window its own vendor ships has an unknown window, not a borrowed one.
 //
 // `source` is per entry because BP-002 names the mechanism per CLI: Claude
 // (BP-002.01) and the Codex fallback read a versioned model-id TABLE, while
@@ -160,8 +161,12 @@ export function lookupWindow(modelId, options = {}) {
 /**
  * The window sizes this table has actually seen a vendor ship, smallest first.
  * DERIVED from MODEL_WINDOW_ENTRIES rather than written out a second time, so a
- * new entry extends the promotion ladder automatically and the two can never
- * drift apart.
+ * new entry extends the ladders automatically and the two can never drift apart.
+ *
+ * IT IS NOT THE PROMOTION LADDER.  Promotion goes by vendor
+ * (`KNOWN_WINDOW_TIERS_BY_VENDOR`); this all-vendor list answers only a
+ * `smallestKnownTierAtLeast` call that names no vendor, and it is what the
+ * per-vendor ladders are checked to be subsets of.
  */
 export const KNOWN_WINDOW_TIERS = Object.freeze(
   [...new Set(MODEL_WINDOWS.map((entry) => entry.tokens))]
@@ -219,13 +224,29 @@ export function peakContextTokens(turns) {
 /**
  * Smallest KNOWN window tier that could have held `tokens`, or null if none can.
  *
- * With a `vendor`, that vendor's own tiers are tried first and the full ladder
- * is only a fallback.  This is not a nicety: measured on real data, a
- * `claude-opus-5` session peaking at 368,963 promotes to OpenAI's 400,000 under
- * a single global ladder, reporting 0.92 of window and tripping BP-003.01 —
- * a false alarm of exactly the kind F-008 exists to remove.  Anthropic ships
- * 200,000 and 1,000,000 windows, not 400,000, so its own ladder gives
- * 1,000,000 and a truthful 0.37.
+ * With a `vendor`, ONLY that vendor's own tiers may answer.  This is not a
+ * nicety: measured on real data, a `claude-opus-5` session peaking at 368,963
+ * promotes to OpenAI's 400,000 under a single all-vendor ladder, reporting 0.92
+ * of window and tripping the BP-003.01 context alarm — a false alarm of exactly
+ * the kind F-008 exists to remove.  Anthropic ships 200,000 and 1,000,000
+ * windows, not 400,000, so its own ladder gives 1,000,000 and a truthful 0.37.
+ *
+ * EXHAUSTING THE VENDOR'S OWN LADDER IS `null`, NOT A FALL-THROUGH.  The
+ * all-vendor ladder used to answer when the vendor's own tiers ran out, which
+ * borrowed the very window this function exists to refuse: `gpt-5-codex` at an
+ * observed 500,000 was handed Anthropic's/Google's 1,000,000, and `kimi-k2` at
+ * 300,000 was handed OpenAI's 400,000.  That is worse than refusing, because a
+ * foreign tier is a plausible-looking number: a gpt-5-codex session averaging
+ * 476,667 measured 0.48 of a 1,000,000 window it does not have, i.e. an
+ * all-clear, where its own 400,000 ladder says it exceeded every window OpenAI
+ * is known to ship.  A session bigger than every tier its OWN vendor ships has
+ * an unknown window, and `resolveWindow` reports exactly that (`ladder:
+ * "none"`), so no context share is derived from another vendor's number.
+ *
+ * A named vendor the table knows no tiers for is the same case: nothing is
+ * known about what it ships, and another vendor's window is not evidence about
+ * it.  WITHOUT a vendor no claim is made about whose window it is, so the
+ * all-vendor ladder is the only knowledge there is and it still answers.
  *
  * @param {number|null} tokens observed floor
  * @param {{vendor?: string}} [options]
@@ -233,9 +254,12 @@ export function peakContextTokens(turns) {
 export function smallestKnownTierAtLeast(tokens, options = {}) {
   const floor = asObservedFloor(tokens);
   if (floor === null) return null;
-  const vendor = typeof options?.vendor === "string" ? options.vendor : null;
-  const own = vendor ? KNOWN_WINDOW_TIERS_BY_VENDOR[vendor] : null;
-  return (own?.find((tier) => tier >= floor)) ?? KNOWN_WINDOW_TIERS.find((tier) => tier >= floor) ?? null;
+  const vendor = typeof options?.vendor === "string" && options.vendor ? options.vendor : null;
+  if (vendor !== null) {
+    const own = KNOWN_WINDOW_TIERS_BY_VENDOR[vendor] ?? [];
+    return own.find((tier) => tier >= floor) ?? null;
+  }
+  return KNOWN_WINDOW_TIERS.find((tier) => tier >= floor) ?? null;
 }
 
 /** Append a promotion to a collector diagnostic, if one was supplied. */
@@ -306,8 +330,12 @@ export function resolveWindow(modelId, options = {}) {
     observedFloor,
     tokens,
     tier: tier ?? null,
-    // Which ladder supplied the tier: the model's own vendor, the full ladder,
-    // or neither (the session is bigger than every window we know of).
+    // Which ladder supplied the tier.  With a vendor known, only that vendor's
+    // own tiers can answer, so "global" is reachable only for a table entry
+    // that declares no vendor — every entry declares one today, which
+    // tests/collectors/base.test.js asserts.  "none" means the session held
+    // more than every window its vendor is known to ship: the window is
+    // unknown, and no context share is derived from it.
     ladder: tier === null ? "none" : ownTiers.includes(tier) ? "vendor" : "global",
   });
   recordWindowPromotion(options?.diagnostic, promotion);

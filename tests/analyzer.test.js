@@ -204,6 +204,17 @@ const UNMEASURED_BRANCHES = [
   ["long-rising-context", "no-turns", makeSession({ turns: [] }), {}],
   ["long-rising-context", "no-elapsed-time", noTimestamps, {}],
   ["long-rising-context", "too-few-context-points", twoObservations, {}],
+  // Three readings IS enough points, and five hours IS enough time — but every
+  // reading carries the same instant, so no pair of them spans any time at all.
+  ["long-rising-context", "context-times-identical", makeSession({
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T05:00:00Z",
+    turns: [
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+    ],
+  }), {}],
 
   ["subagent-concurrency", "codex-records-no-subagents", makeSession({ cli: "codex" }), {}],
   ["subagent-concurrency", "gemini-records-no-subagents", makeSession({ cli: "gemini" }), {}],
@@ -550,6 +561,52 @@ test("repeat-tool: identical input objects with differently ordered keys count a
   assert.equal(status("repeat-tool", session), "observed");
 });
 
+test("repeat-tool: five equal-LENGTH results still fire, and nothing claims the results themselves were identical", () => {
+  // The reproducing input: the same Read of the same path five times, each
+  // result 4,096 bytes — one character swapped in the file between calls, so
+  // the BODIES differ. The group key is tool name + input + the turn's result
+  // byte length, so this is counted, and the algorithm is deliberately left
+  // alone: the normalized turn does not retain result bodies to hash. What was
+  // wrong is the WORDING, which promised the user "same result".
+  const turns = Array.from({ length: 5 }, (_, index) => ({
+    ts: at(index + 1),
+    toolCalls: [call("Read", { file: "a.txt" })],
+    toolResultBytes: 4096,
+  }));
+  const result = verdict("repeat-tool", makeSession({ turns }));
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(result.magnitude, 5);
+  assert.equal(valueOf(result, "highest number of identical"), 5);
+  // The evidence row always disclosed the substitution; now the sentence the
+  // user reads does too, instead of contradicting it.
+  assert.match(result.evidence.derivation, /byte length stands in for the result body/i);
+  assert.match(result.plain.problem, /same size/i);
+  assert.ok(
+    !/same result/i.test(result.plain.problem),
+    `the plain sentence still tells the user the results were the same: ${result.plain.problem}`,
+  );
+});
+
+test("repeat-tool's stated rationale matches what the group key actually measures", () => {
+  // The derivation used to justify the rule with a guarantee it does not keep:
+  // that same-input-alone is not enough "because a command re-run after an edit
+  // legitimately returns something new" — while an edit that preserves the
+  // length was counted as a repeat anyway. The rationale now says what is
+  // matched, and states that cost rather than burying it.
+  const rule = ruleById("repeat-tool");
+  const claims = `${rule.description} ${rule.threshold.derivation} ${rule.plain.problem}`;
+  assert.ok(!/same result/i.test(claims), `repeat-tool still promises the result itself was the same: ${claims}`);
+  assert.match(rule.threshold.derivation, /size|length/i);
+  assert.match(
+    rule.threshold.derivation,
+    /length unchanged|same size are grouped/i,
+    "the derivation does not admit that a length-preserving edit is counted",
+  );
+  // The hedge that keeps this a DETECTED repetition, not confirmed waste, stays.
+  assert.match(rule.plain.why, /detected repetition/i);
+  assert.match(rule.plain.why, /confirmed waste/i);
+});
+
 // ===========================================================================
 // BP-003.04 large-tool-result
 // ===========================================================================
@@ -638,6 +695,50 @@ test("long-rising-context: one outlier turn cannot set the trend (Theil-Sen, not
   assert.equal(valueOf(result, "context trend"), 0);
 });
 
+test("long-rising-context: a slope that cannot exist is unknown, never a pass", () => {
+  // The reproducing input: five hours elapsed, three context readings, every
+  // one of them stamped at the same instant. Theil-Sen skips pairs spanning
+  // zero time, so it takes the median of an EMPTY set and returns null — which
+  // used to fall straight through to not-observed, a PASS on the half of this
+  // rule that was never measured.
+  const session = makeSession({
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T05:00:00Z",
+    turns: [
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+    ],
+  });
+  const result = verdict("long-rising-context", session);
+  assertUnknownWithReason(result, "the same time");
+  assert.equal(result.evidence.reasonCode, "context-times-identical");
+  // The trend row stays null. An unmeasurable slope is never rendered as a 0.
+  assert.equal(valueOf(result, "context trend"), null);
+  assert.equal(result.magnitude, null);
+  // The half that WAS measured is still reported, and the reason says so.
+  assert.equal(valueOf(result, "session elapsed"), 5);
+  assert.match(result.evidence.reason, /elapsed time is known/i);
+  assert.equal(typeof result.plain.unmeasured["context-times-identical"], "string");
+});
+
+test("long-rising-context: three readings at three DIFFERENT times still produce a slope", () => {
+  // The neighbouring behaviour the unknown above must not swallow: the minimum
+  // three points, spread in time, are still measured.
+  const session = makeSession({
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T05:00:00Z",
+    turns: [
+      { ts: "2026-01-01T01:00:00Z", inputTokens: 40000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 60000 },
+      { ts: "2026-01-01T03:00:00Z", inputTokens: 90000 },
+    ],
+  });
+  const result = verdict("long-rising-context", session);
+  assert.equal(result.evidence.status, "observed");
+  assert.ok(valueOf(result, "context trend") > 0, "a real slope over three distinct times");
+});
+
 // ===========================================================================
 // BP-003.06 subagent-concurrency
 // ===========================================================================
@@ -654,6 +755,50 @@ test("subagent-concurrency: sequential children are not concurrent, including on
   const result = verdict("subagent-concurrency", contextHeavy, { children: sequentialChildren });
   assert.equal(result.evidence.status, "not-observed");
   assert.equal(valueOf(result, "peak sub-agents"), 1);
+});
+
+test("subagent-concurrency: ONE sub-agent running alone is not concurrent with anything", () => {
+  // The reproducing input. One child with one interval: a peak of 1 out of 1
+  // dispatched is a ratio of 1.0, which crossed the 0.5 line and told the user
+  // that "100.0% of everything it dispatched" ran at the same moment. On the
+  // real machine half of this rule's positives were exactly this shape. One
+  // interval cannot overlap anything, so the ratio is not consulted at all.
+  const oneChild = [
+    { sessionId: "a", startedAt: "2026-01-01T00:00:00Z", endedAt: "2026-01-01T01:00:00Z", collected: true },
+  ];
+  const result = verdict("subagent-concurrency", contextHeavy, { children: oneChild });
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(valueOf(result, "peak sub-agents"), 1);
+  assert.equal(valueOf(result, "dispatched by this session"), 1);
+  // The ratio is still REPORTED — it is the verdict that ignores it.
+  assert.equal(valueOf(result, "share of dispatched"), 1);
+  // And the evidence says plainly why 1 of 1 is not a finding, rather than
+  // leaving a reader to wonder why a ratio of 1.0 passed.
+  assert.match(result.evidence.derivation, /overlaps nothing/i);
+  assert.match(result.evidence.derivation, /complete answer/i);
+});
+
+test("subagent-concurrency: two open together, above half of dispatched, is STILL observed", () => {
+  // The neighbouring behaviour: the floor is a floor of TWO, and it does not
+  // quietly raise the 0.5 threshold that was verified sound.
+  const twoOfThree = [
+    { sessionId: "a", startedAt: "2026-01-01T00:00:00Z", endedAt: "2026-01-01T00:30:00Z", collected: true },
+    { sessionId: "b", startedAt: "2026-01-01T00:10:00Z", endedAt: "2026-01-01T00:40:00Z", collected: true },
+    { sessionId: "c", startedAt: "2026-01-01T02:00:00Z", endedAt: "2026-01-01T02:10:00Z", collected: true },
+  ];
+  const result = verdict("subagent-concurrency", contextHeavy, { children: twoOfThree });
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "peak sub-agents"), 2);
+  assert.ok(valueOf(result, "share of dispatched") > 0.5);
+});
+
+test("subagent-concurrency: a peak under two still yields to the missing-interval unknown", () => {
+  // Branch ORDER, not just branch presence: the new not-observed claims to be a
+  // complete measurement, so it may only be reached when every dispatched
+  // sub-agent carried an interval. An incomplete one stays unknown.
+  const result = verdict("subagent-concurrency", contextHeavy, { children: childrenPartialIntervals });
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(result.evidence.reasonCode, "partial-subagent-times");
 });
 
 test("subagent-concurrency: children with no intervals is unknown — a count is not a concurrency", () => {

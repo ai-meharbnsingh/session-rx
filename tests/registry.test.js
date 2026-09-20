@@ -11,6 +11,7 @@ import {
   discoverAll,
 } from "../src/collectors/registry.js";
 import { createDiagnostic } from "../src/collectors/base.js";
+import { analyzeAll } from "../src/analyzer/health.js";
 
 const STATUSES = new Set(["supported", "detection-only", "absent"]);
 
@@ -302,4 +303,91 @@ test("detectAll never emits sessionMeta: detect() does not collect", async () =>
     fake({ id: "opencode", status: "supported", sessionMeta: new Map([["s", {}]]) }),
   ]);
   assert.equal("sessionMeta" in result.supported[0], false);
+});
+
+// ==========================================================================
+// A FAILED READ IS NOT AN EMPTY ONE
+//
+// `collectMany` contains a throwing collector and files the failure under
+// `diagnostics[].errors`, which is right — but the entry it pushes into
+// `supported` carries `sessions: []`, which is byte-identical to a healthy CLI
+// with nothing in range.  `analyzeAll` published that as a measured 0 with a
+// note asserting "this CLI is installed and was read", while the diagnostic
+// beside it said `filesScanned: 0` and carried the crash.  Both cannot be true.
+// These tests run the real relay, not a hand-built `collected` object, so the
+// two halves cannot drift: whatever `collectMany` does with a crash is what
+// `analyzeAll` is judged against.
+// ==========================================================================
+
+/** The `collectors` entry `analyzeAll` publishes for one CLI, via the real relay. */
+async function collectorsAfterAnalysis(collectorList) {
+  const collected = await collectMany(collectorList);
+  return analyzeAll(collected).collectors;
+}
+
+test("a collector that CRASHED and one that found nothing no longer report the same thing", async () => {
+  const entries = await collectorsAfterAnalysis([
+    fake({ id: "boom", collectThrows: true }),
+    fake({ id: "quiet", sessions: [] }),
+  ]);
+  const crashed = entries.find((entry) => entry.cli === "boom");
+  const empty = entries.find((entry) => entry.cli === "quiet");
+
+  // The bug, stated as an assertion: these two differed only by their name.
+  const withoutName = ({ cli, ...rest }) => rest;
+  assert.notDeepEqual(withoutName(crashed), withoutName(empty), "a crash and an empty scan are not the same result");
+
+  // The crash states no count: 0 would be a measurement nothing made.
+  assert.equal(crashed.sessions, null, "a failed read has no session count");
+  assert.equal(crashed.subagentSessions, null, "nor a sub-agent count");
+  assert.equal(crashed.support, "supported");
+  assert.match(crashed.note, /reading this CLI failed/);
+  assert.match(crashed.note, /unknown rather than zero/);
+  assert.ok(!/was read/.test(crashed.note), "it must not claim the CLI was read");
+  assert.ok(!/no session fell inside/.test(crashed.note), "nor blame the requested range");
+
+  // The healthy empty result is UNCHANGED, word for word: a genuine empty scan
+  // must not be relabelled a failure by this fix.
+  assert.equal(empty.sessions, 0);
+  assert.equal(empty.subagentSessions, 0);
+  assert.equal(
+    empty.note,
+    "this CLI is installed and was read, but no session fell inside the requested range, so there is nothing to analyze for it here.",
+  );
+});
+
+test("the crashed collector's note and its diagnostic no longer contradict each other", async () => {
+  const collected = await collectMany([fake({ id: "boom", collectThrows: true })]);
+  const analysis = analyzeAll(collected);
+  const diagnostic = analysis.diagnostics.find((entry) => entry.cli === "boom");
+  const note = analysis.collectors.find((entry) => entry.cli === "boom").note;
+
+  // The diagnostic says nothing was read...
+  assert.equal(diagnostic.filesScanned, 0);
+  assert.deepEqual(diagnostic.errors, ["boom collect exploded"]);
+  // ...and now so does the note, which points at the diagnostic for the text
+  // rather than repeating it.
+  assert.match(note, /an error stopped the read and not one session was obtained/);
+  assert.match(note, /collector diagnostics/);
+});
+
+test("a read that partly failed keeps its count and says the count may be low", async () => {
+  const entries = await collectorsAfterAnalysis([
+    fake({
+      id: "half",
+      sessions: [{ sessionId: "s1", cli: "half", startedAt: "2026-09-20T10:00:00.000Z", turns: [] }],
+      fillPassedDiagnostic(diagnostic) {
+        diagnostic.errors.push("one bad file");
+      },
+    }),
+  ]);
+  const entry = entries[0];
+
+  // One session really was read, so the count stands — it is the COMPLETENESS
+  // of the count that is in doubt, and only that is what the note qualifies.
+  assert.equal(entry.sessions, 1);
+  assert.equal(entry.subagentSessions, 0);
+  assert.match(entry.note, /one error/);
+  assert.match(entry.note, /may be lower than the truth/);
+  assert.ok(!/reading this CLI failed/.test(entry.note), "a partial read did not fail outright");
 });

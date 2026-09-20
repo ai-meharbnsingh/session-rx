@@ -246,19 +246,74 @@ test("every table entry declares a vendor, and the per-vendor ladders are derive
   }
 });
 
-test("a promotion uses the model's OWN vendor tiers before the global ladder", () => {
+// RE-AIMED, and renamed to say what changed.  It used to be "...OWN vendor tiers
+// BEFORE the global ladder", and asserted that an exhausted vendor ladder fell
+// through to the all-vendor one: `{vendor: "moonshot"}` at 300,000 -> OpenAI's
+// 400,000, `{vendor: "openai"}` at 500,000 -> Anthropic's/Google's 1,000,000.
+// "Before" WAS the defect.  The fall-through borrowed exactly the foreign window
+// the vendor ladder exists to refuse, and it did so silently: `ladder: "global"`
+// still yields a normal context share, so a session that had outgrown every
+// window its own vendor ships read as an all-clear instead of an unknown.  Those
+// two assertions are not weakened here, they are inverted: null is the answer.
+test("a promotion uses the model's own vendor tiers and NOTHING else", () => {
   const { peak } = F008_CROSS_VENDOR;
-  // Global ladder alone would borrow OpenAI's 400,000 for a Claude session.
-  assert.equal(smallestKnownTierAtLeast(peak), 400000, "precondition: the global ladder really does pick 400k");
+  // All-vendor ladder alone would borrow OpenAI's 400,000 for a Claude session.
+  assert.equal(smallestKnownTierAtLeast(peak), 400000, "precondition: the all-vendor ladder really does pick 400k");
   assert.equal(smallestKnownTierAtLeast(peak, { vendor: "anthropic" }), 1000000);
   assert.equal(smallestKnownTierAtLeast(200001, { vendor: "anthropic" }), 1000000);
-  // The vendor ladder is a preference, not a cage: when the vendor has no tier
-  // big enough, the global ladder still answers.
-  assert.equal(smallestKnownTierAtLeast(300000, { vendor: "moonshot" }), 400000);
-  assert.equal(smallestKnownTierAtLeast(500000, { vendor: "openai" }), 1000000);
-  // An unknown or absent vendor falls back to the global ladder.
-  assert.equal(smallestKnownTierAtLeast(peak, { vendor: "nobody" }), 400000);
+  // Vendor ladder exhausted IS the null case.  Moonshot ships no 400,000 window
+  // and OpenAI ships no 1,000,000 one, so neither may stand in for the other.
+  assert.equal(smallestKnownTierAtLeast(300000, { vendor: "moonshot" }), null);
+  assert.equal(smallestKnownTierAtLeast(500000, { vendor: "openai" }), null);
+  // A named vendor the table knows no tiers for is that same case: nothing is
+  // known about what it ships, and another vendor's number is not evidence.
+  assert.equal(smallestKnownTierAtLeast(peak, { vendor: "nobody" }), null);
+  // No vendor CLAIMED — a non-string is not a claim, nor is an empty one — so
+  // the all-vendor ladder is the only knowledge there is and it still answers.
   assert.equal(smallestKnownTierAtLeast(peak, { vendor: 7 }), 400000);
+  assert.equal(smallestKnownTierAtLeast(peak, { vendor: "" }), 400000);
+});
+
+/**
+ * Both inputs are the validator's, verbatim.  Before the fix each one promoted
+ * to a foreign tier and reported `ladder: "global"`, which `context-pressure`
+ * treats as a real window: it only withholds a verdict on `ladder: "none"`.
+ */
+test("a session bigger than every window its OWN vendor ships has an UNKNOWN window, not a borrowed one", () => {
+  const codex = resolveWindow("gpt-5-codex", { observedFloor: 500000 });
+  assert.equal(codex.promotion.vendor, "openai");
+  // 1,000,000 is an Anthropic/Google tier. OpenAI ships 400,000.
+  assert.equal(codex.promotion.ladder, "none");
+  assert.equal(codex.promotion.tier, null);
+  assert.notEqual(codex.tokens, 1000000, "the tier this fix refuses");
+  assert.equal(codex.tokens, 500000, "the window is the observed peak itself");
+  assert.equal(codex.observedFloor, 500000, "so every share it could produce is 1.0 and none is emitted");
+  assert.equal(codex.source, "observed-promoted");
+
+  const kimi = resolveWindow("kimi-k2", { observedFloor: 300000 });
+  assert.equal(kimi.promotion.vendor, "moonshot");
+  // 400,000 is OpenAI's GPT-5 window, handed to a Moonshot model.
+  assert.equal(kimi.promotion.ladder, "none");
+  assert.equal(kimi.promotion.tier, null);
+  assert.notEqual(kimi.tokens, 400000, "the tier this fix refuses");
+  assert.equal(kimi.tokens, 300000);
+
+  // The verdict this moves: a gpt-5-codex session averaging 476,667 read 0.48 of
+  // a 1,000,000 window it does not have — a not-observed, i.e. an all-clear.
+  // Against the 400,000 OpenAI really ships it is above 1.0, which is the
+  // window-above-known-tiers case the context rule reports as unmeasurable.
+  assert.ok(476667 / 1000000 < 0.7, "the borrowed window really did read as quiet");
+  assert.ok(476667 / 400000 > 1, "its own vendor's largest window could not have held it");
+});
+
+test("the vendor-ladder promotion that already worked is untouched", () => {
+  // Real session 82aef9a3: an Anthropic floor of 368,963 still promotes to the
+  // Anthropic 1,000,000 tier. Removing the cross-vendor fall-through must not
+  // cost the vendor-first behaviour anything.
+  const resolved = resolveWindow(F008_CROSS_VENDOR.model, { observedFloor: F008_CROSS_VENDOR.peak });
+  assert.equal(resolved.tokens, 1000000);
+  assert.equal(resolved.promotion.ladder, "vendor");
+  assert.equal(resolved.promotion.tier, 1000000);
 });
 
 test("matchWindowEntry names the winning entry, or nothing at all", () => {

@@ -301,9 +301,69 @@ test("a fix with no recorded BEFORE state says so rather than showing nothing", 
   assert.match(md, /BEFORE state not recorded — this fix cannot be audited from this report alone\./);
 });
 
-test("no fixes renders an explicit statement, not an empty section", () => {
+// RE-AIMED (F1). This test used to be the whole of section 5's coverage, and
+// the sentence it asserts was reachable two ways: a history that was READ and
+// held no apply, and a caller that never passed one at all. The second is the
+// falsehood — the report said "no fix was applied" while five had just been
+// applied — so the test now names the input that earns the sentence, and the
+// three tests below pin the shapes that must NOT produce it.
+test("a history that was read and held no apply renders the explicit sentence", () => {
+  assert.deepEqual(zeroFindingsInput.fixes, [], "precondition: the history was read and came back empty");
   const md = generateReport(zeroFindingsInput);
   assert.match(md, /## 5\. Fixes applied\n\nNo fix was applied in this period\./);
+});
+
+test("an applied fix is LISTED by id, so section 5 can say something other than 'none'", () => {
+  const md = generateReport({
+    range: { from: null, to: null },
+    clis: [],
+    rules: [],
+    fixes: [{
+      id: "claude-auto-compact",
+      name: "Enable auto-compaction",
+      target: "~/.claude/settings.json",
+      appliedAt: "2026-09-21T10:00:00.000Z",
+      status: "applied",
+      before: null,
+      undoPath: "~/.session-rx/undo/20260921T100000Z",
+    }],
+    trend: { direction: "stable" },
+  });
+  assert.match(md, /- Fix id: `claude-auto-compact`/);
+  assert.match(md, /- Applied at: 2026-09-21T10:00:00\.000Z/);
+  assert.equal(md.includes("No fix was applied in this period"), false);
+});
+
+test("L9: an ABSENT fixes key is unknown with its reason, never 'no fix was applied'", () => {
+  const md = generateReport({ range: { from: null, to: null }, clis: [], rules: [], trend: {} });
+  assert.match(md, /Applied-fix history: unknown — the applied-fix history was not supplied to the report generator/);
+  assert.match(md, /Unknown is not an empty history/);
+  assert.equal(md.includes("No fix was applied in this period"), false,
+    "an unwired input must never render as a claim about what the user applied");
+});
+
+test("L9: an unreadable history renders unknown WITH the caller's reason", () => {
+  const md = generateReport({
+    range: { from: null, to: null },
+    clis: [],
+    rules: [],
+    fixes: { status: "unknown", reason: "~/.session-rx/journal.jsonl holds 42 byte(s) but not one parseable record" },
+    trend: {},
+  });
+  assert.match(md, /Applied-fix history: unknown — ~\/\.session-rx\/journal\.jsonl holds 42 byte\(s\) but not one parseable record/);
+  assert.equal(md.includes("No fix was applied in this period"), false);
+});
+
+test("L9: a non-array history with no reason still says unknown, and says the reason is missing", () => {
+  const md = generateReport({
+    range: { from: null, to: null },
+    clis: [],
+    rules: [],
+    fixes: { status: "unknown" },
+    trend: {},
+  });
+  assert.match(md, /Applied-fix history: unknown — reason not recorded by the caller/);
+  assert.equal(md.includes("No fix was applied in this period"), false);
 });
 
 // --------------------------------------------------------------------------
@@ -346,6 +406,23 @@ test("a fixture seeded with credential-shaped values emits none of them", () => 
   }
   assert.equal(doc.redactions > 0, true, "redactions must be counted for BP-005.05");
   assert.match(doc.markdown, /\[REDACTED\]/);
+});
+
+// Section 5's unknown branch prints a REASON string that the server builds
+// from a file path and an errno. It is new text in the shareable artifact, so
+// it goes through the same redactor as every other line.
+test("the unknown-history reason is redacted like every other line of the report", () => {
+  const doc = generateReportDocument({
+    range: { from: null, to: null },
+    clis: [],
+    rules: [],
+    fixes: { status: "unknown", reason: `the journal could not be read (${SEEDED.githubPat})` },
+    trend: { direction: "unknown", reason: `the trend could not be computed (${SEEDED.awsKeyId})` },
+  });
+  assert.equal(doc.markdown.includes(SEEDED.githubPat), false, "a credential-shaped value in a fix reason must not reach the report");
+  assert.equal(doc.markdown.includes(SEEDED.awsKeyId), false, "a credential-shaped value in a trend reason must not reach the report");
+  assert.equal(doc.redactions >= 2, true);
+  assert.match(doc.markdown, /Applied-fix history: unknown — the journal could not be read \(\[REDACTED\]\)/);
 });
 
 test("redaction keeps the KEY and loses only the VALUE", () => {

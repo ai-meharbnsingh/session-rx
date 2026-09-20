@@ -45,7 +45,14 @@
  *                                     // report-worthy first; this module
  *                                     // preserves the given order and does
  *                                     // not re-rank.
- *     fixes: Array<AppliedFix>
+ *     fixes: Array<AppliedFix>        // the applied-fix history that WAS read.
+ *                                     // An empty array means the record was
+ *                                     // read and held no apply.
+ *          | { status: "unknown",     // the record could NOT be read.  A
+ *              reason?: string|null } // missing key, or any other non-array,
+ *                                     // is treated the same way: `unknown`
+ *                                     // with a reason, never "no fix was
+ *                                     // applied" (L9).
  *     trend: {
  *       direction: "improving" | "stable" | "declining" | "unknown"
  *       reason?:   string | null      // REQUIRED when direction is "unknown"
@@ -123,6 +130,11 @@
  *       number set aside is PRINTED next to the count that excludes it (F-023).
  *       Quietly leaving 106 real sessions out of a total is the same class of
  *       failure as quietly counting them in.
+ *   L9  An applied-fix history that could not be read is `unknown` WITH its
+ *       reason.  Only a history that was read and held no apply renders as "No
+ *       fix was applied in this period".  That sentence is a claim about what
+ *       the user did, and an unwired input is no evidence for it — it was the
+ *       one place this report ever asserted something outright false.
  *
  * ============================================================================
  * EXPORTS — who calls what
@@ -483,9 +495,35 @@ function renderRuleCoverage(rules) {
   return lines;
 }
 
+/**
+ * L9.  Why the history's SHAPE decides the wording: "No fix was applied in this
+ * period" is a positive claim about the user's own history, so it is reserved
+ * for the one input that evidences it — a list that was read and came back
+ * empty.  Every other shape, including the key being absent entirely, means
+ * nobody read the record, and that is `unknown`.
+ */
+function fixHistoryUnknownReason(fixes) {
+  if (fixes === undefined) {
+    return "the applied-fix history was not supplied to the report generator, so no record of what was applied was read at all";
+  }
+  const reason = str(fixes?.reason).trim();
+  if (reason) return reason;
+  const shape = fixes === null
+    ? "null"
+    : typeof fixes === "object" ? "an object with no reason field" : `a ${typeof fixes}`;
+  return `reason not recorded by the caller — the history arrived as ${shape} rather than a list of applied fixes`;
+}
+
 function renderFixes(fixes) {
-  const rows = asArray(fixes);
   const lines = ["## 5. Fixes applied", ""];
+  if (!Array.isArray(fixes)) {
+    lines.push(`Applied-fix history: unknown — ${fixHistoryUnknownReason(fixes)}`);
+    lines.push("");
+    lines.push("Unknown is not an empty history: this section accounts for nothing either way, and must not be read as though no fix had been applied.");
+    lines.push("");
+    return lines;
+  }
+  const rows = fixes;
   if (rows.length === 0) {
     lines.push("No fix was applied in this period.");
     lines.push("");

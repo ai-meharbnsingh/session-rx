@@ -589,6 +589,86 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.equal(typeof res.json.redactions, "number");
   });
 
+  // -------------------------------------------------------------------------
+  // F1 / F2 — section 5 and section 6 were structurally incapable of saying
+  // anything else, because the route passed neither `fixes` nor `trend`. F1 is
+  // the only place this product ever asserted something FALSE: five fixes
+  // applied, five journal rows on disk, and a report that said none were.
+  // -------------------------------------------------------------------------
+
+  it("BP-005.05 section 5 NAMES a fix that was applied, read from the transaction journal", async () => {
+    const running = await server();
+    // This test applies a fix, so it proves WHERE it will write before writing.
+    assert.ok(running.state.home.includes("session-rx-5a-"),
+      `refusing to run an apply outside a suite temp dir: ${running.state.home}`);
+    const applied = await running.post("/api/fixes/claude-output-hygiene/apply");
+    assert.equal(applied.status, 200);
+
+    const res = await running.get("/api/report");
+    assert.equal(res.status, 200);
+    const md = res.json.markdown;
+    assert.ok(md.includes("claude-output-hygiene"), "the applied fix id must appear in section 5");
+    assert.match(md, /- Status: applied/);
+    assert.equal(md.includes("No fix was applied in this period"), false,
+      "a fix was applied seconds ago: this sentence would be an outright falsehood");
+    // The report is a file users paste in public, so the journal's absolute
+    // paths render in the fix engine's `~/...` display form, as before.
+    assert.equal(md.includes(running.home), false, "no new absolute path enters the report");
+  });
+
+  it("BP-005.05 'No fix was applied' appears ONLY when the journal was read and held none", async () => {
+    const running = await server();
+    const journal = path.join(running.home, ".session-rx", "journal.jsonl");
+    await fs.mkdir(path.dirname(journal), { recursive: true });
+    await fs.writeFile(journal, "", "utf8");
+    const md = (await running.get("/api/report")).json.markdown;
+    assert.match(md, /## 5\. Fixes applied\n\nNo fix was applied in this period\./);
+  });
+
+  it("BP-005.05 a MISSING journal is unknown with its reason, never 'no fix was applied'", async () => {
+    const running = await server();
+    assert.equal(existsSync(path.join(running.home, ".session-rx", "journal.jsonl")), false,
+      "precondition: this home has no journal yet");
+    const md = (await running.get("/api/report")).json.markdown;
+    assert.match(md, /Applied-fix history: unknown — ~\/\.session-rx\/journal\.jsonl does not exist/);
+    assert.equal(md.includes("No fix was applied in this period"), false,
+      "an unread record is unknown, not an empty history");
+  });
+
+  it("BP-005.05 a MALFORMED journal is unknown with its reason, never 'no fix was applied'", async () => {
+    const running = await server();
+    const journal = path.join(running.home, ".session-rx", "journal.jsonl");
+    await fs.mkdir(path.dirname(journal), { recursive: true });
+    await fs.writeFile(journal, `not json at all\n{"event": truncated\n`, "utf8");
+    const md = (await running.get("/api/report")).json.markdown;
+    assert.match(md, /Applied-fix history: unknown — /);
+    assert.match(md, /not one parseable record/);
+    assert.equal(md.includes("No fix was applied in this period"), false);
+  });
+
+  it("BP-005.05 section 6 carries the SAME direction /api/trends computes (F-021: one implementation)", async () => {
+    const running = await server();
+    const trends = await running.get("/api/trends");
+    assert.equal(trends.status, 200);
+    const md = (await running.get("/api/report")).json.markdown;
+    const stated = /\nDirection: ([a-z]+)/.exec(md);
+    assert.ok(stated, "section 6 states a direction");
+    assert.equal(stated[1], trends.json.trend.direction,
+      "the report's direction is the trend builder's, not a second computation of it");
+    assert.equal(md.includes("working out a direction over time is a separate step"), false,
+      "the route now runs the trend step, so the report may no longer say it did not");
+    assert.match(md, /\nReason: .+/, "a direction always ships with the builder's reason");
+  });
+
+  it("BP-005.05 an unavailable trend builder is unknown WITH a reason, and does not fail the report", async () => {
+    const running = await server({ modules: { trends: {} } });
+    const res = await running.get("/api/report");
+    assert.equal(res.status, 200, "sections 1-5 must still be delivered");
+    const md = res.json.markdown;
+    assert.match(md, /Direction: unknown/);
+    assert.match(md, /Reason: the trend for this window could not be computed/);
+  });
+
   it("BP-005.09 /api/fixes/:fixId/check is a GET and changes nothing", async () => {
     const running = await server();
     const target = path.join(running.home, ".claude", "CLAUDE.md");
