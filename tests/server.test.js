@@ -927,12 +927,55 @@ describe("a valid POST succeeds", () => {
     assert.equal(second.json.reason, "fix_already_applied");
   });
 
-  it("a missing target file is a 409 precondition, not a 500", async () => {
+  // This test used to assert 409 TARGET_MISSING for a missing target FILE. That
+  // was the old engine contract, and BP-004.11 replaced it: measured on a clean
+  // machine, every fix refused because `~/.claude/CLAUDE.md` and
+  // `~/.claude/settings.json` had never been written, which is the normal state
+  // for most Claude Code users — the product's core loop was unreachable. A
+  // missing FILE is now a disclosed CREATE, so this asserts the create, over the
+  // same route and the same fix as before. The 409 precondition is not a lowered
+  // bar, it has MOVED to the case that genuinely is one: an absent parent
+  // DIRECTORY, asserted in the test immediately below.
+  it("a missing target file is created, and the create is disclosed in the diff", async () => {
     const running = await server();
-    await fs.rm(path.join(running.home, ".claude", "CLAUDE.md"));
+    // This test writes, so it proves WHERE it will write before writing.
+    assert.ok(running.state.home.includes("session-rx-5a-"),
+      `refusing to run an apply outside a suite temp dir: ${running.state.home}`);
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    await fs.rm(target);
+
+    const res = await running.post("/api/fixes/claude-worker-cap/preview");
+    assert.equal(res.status, 200, "a missing target file is a create, not a precondition failure");
+    assert.equal(res.json.targets[0].created, true, "preview must mark the absent target as created");
+    assert.match(res.json.diff, /^--- \/dev\/null\n/, "the old side of a created file's diff is /dev/null");
+    assert.match(res.json.description, /does not exist yet; SessionRx will create it/);
+    assert.equal(existsSync(target), false, "preview must not create the file it previews");
+
+    const applied = await running.post("/api/fixes/claude-worker-cap/apply");
+    assert.equal(applied.status, 200);
+    assert.equal(applied.json.applied, true);
+    assert.equal(existsSync(target), true, "apply must create the missing target");
+
+    const undone = await running.post("/api/fixes/claude-worker-cap/undo", {
+      body: JSON.stringify({ undoPath: applied.json.undoPath }),
+    });
+    assert.equal(undone.status, 200);
+    assert.equal(undone.json.restored, true);
+    assert.equal(existsSync(target), false, "undo of a created file removes it, not leaves an empty stub");
+  });
+
+  it("an absent ~/.claude directory is the 409 precondition, not a 500", async () => {
+    const running = await server();
+    await fs.rm(path.join(running.home, ".claude"), { recursive: true });
     const res = await running.post("/api/fixes/claude-worker-cap/preview");
     assert.equal(res.status, 409);
     assert.equal(res.json.code, "TARGET_MISSING");
+    assert.equal(res.json.reason, "fix_target_missing");
+    // The diagnostic names the DIRECTORY, because the directory is what is
+    // missing: an absent `~/.claude/` means the owning CLI is not installed, and
+    // SessionRx does not fabricate that tree.
+    assert.match(res.json.error, /does not exist; SessionRx will not create it/);
+    assert.equal(existsSync(path.join(running.home, ".claude")), false, "the refusal created the directory");
   });
 
   it("an engine-invariant failure is a 500, not a 409", async () => {

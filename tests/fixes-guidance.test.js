@@ -127,6 +127,19 @@ async function freshHome(label) {
   return home;
 }
 
+/**
+ * Like `freshHome()`, but deliberately does NOT create `.claude/` — as if the
+ * CLI that owns it were never installed. Used only by the BP-004.11 "absent
+ * parent directory" refusal test, which must stay distinguishable from the
+ * "file missing, `.claude/` already exists" case `freshHome()` covers.
+ */
+async function freshHomeNoClaudeDir(label) {
+  homeSeq += 1;
+  const home = path.join(TMP_ROOT, `${String(homeSeq).padStart(3, "0")}-${label}`);
+  await mkdir(home, { recursive: true });
+  return home;
+}
+
 /** Fixtures are copied in; nothing in this suite writes into tests/fixtures. */
 async function installClaudeMd(home, fixture) {
   const target = path.join(home, ".claude", "CLAUDE.md");
@@ -581,7 +594,18 @@ test("a fix applied after another's undo does not resurrect or duplicate anythin
 // =========================================================================
 
 for (const f of FIXES) {
-  test(`${f.slug}: a missing CLAUDE.md is refused, not created`, async () => {
+  // Previously this asserted REFUSAL: preview()/apply() rejected with
+  // TARGET_MISSING and the file was never created. BP-004.11 changed the
+  // contract — measured on a clean machine, all five fixes refused because
+  // ~/.claude/CLAUDE.md did not exist, and most Claude Code users have never
+  // hand-written that file, so the product's core loop was unreachable for
+  // them. SessionRx now CREATES an absent target whenever its parent
+  // directory (`~/.claude/`, which `freshHome()` always creates) already
+  // exists. This is the strictly stronger replacement, not a lowered bar:
+  // creation succeeds, the created file holds EXACTLY the golden section for
+  // this fix (nothing invented), and undo removes the file it created rather
+  // than leaving an empty stub behind.
+  test(`${f.slug}: a missing CLAUDE.md is created by apply, and undo removes it`, async () => {
     const home = await freshHome(`${f.slug}-missing`);
     const env = makeEnv(home);
     const fix = f.factory({ env });
@@ -592,15 +616,59 @@ for (const f of FIXES) {
     assert.equal(state.status, "unknown");
     assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
 
+    const preview = await fix.preview();
+    assert.equal(preview.targets.length, 1);
+    assert.equal(preview.targets[0].created, true, "preview must mark an absent target as created");
+    assert.match(preview.diff, /^--- \/dev\/null\n/, "a created target's diff must render the old side as /dev/null");
+    assert.match(preview.description, /does not exist yet; SessionRx will create it/);
+
+    const applied = await fix.apply();
+    assert.equal(applied.applied, true);
+
+    const after = await readFile(target);
+    const section = await golden(f.slug);
+    assert.equal(
+      after.toString("utf8"),
+      section,
+      `${f.slug}: the created file must hold exactly the golden section, nothing invented`,
+    );
+    assert.equal(`sha256:${hash(after)}`, preview.targets[0].afterHash);
+    assert.equal((await fix.check()).applied, true);
+
+    const undone = await fix.undo(applied.undoPath);
+    assert.equal(undone.restored, true);
+    assert.equal(undone.byteIdentical, true);
+    assert.equal(await exists(target), false, "undo of a created file must remove it, not leave an empty stub");
+    assert.equal((await fix.check()).status, "unknown");
+  });
+}
+
+// Coverage kept from the old contract, restated more precisely: SessionRx
+// creates a missing FILE but never fabricates a missing PARENT DIRECTORY — an
+// absent `~/.claude/` means the owning CLI is not installed at all, which is
+// not this project's job to fix. The refusal must name the directory, because
+// the directory, not the file, is what is actually missing.
+for (const f of FIXES) {
+  test(`${f.slug}: an absent .claude directory is still refused, naming the directory`, async () => {
+    const home = await freshHomeNoClaudeDir(`${f.slug}-no-dir`);
+    const env = makeEnv(home);
+    const fix = f.factory({ env });
+    const target = path.join(home, ".claude", "CLAUDE.md");
+
+    const state = await fix.check();
+    assert.equal(state.status, "unknown");
+    assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
+
     for (const call of [() => fix.preview(), () => fix.apply()]) {
       await assert.rejects(
         async () => call(),
         (error) => error instanceof FixError
           && error.code === FIX_ERROR_CODES.TARGET_MISSING
+          && /\.claude/.test(error.message)
           && /does not exist/.test(error.message),
       );
     }
-    assert.equal(await exists(target), false, "the fix created the file it was meant to refuse");
+    assert.equal(await exists(target), false, "no file may be created without its parent directory");
     assert.equal(await exists(env.stateDir), false, "a refused fix left state behind");
     assert.deepEqual(await listTransactions(env), []);
   });

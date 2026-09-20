@@ -503,22 +503,33 @@ test("fail closed: valid JSON that is not an object is refused", async () => {
   assert.equal(hash(await readFile(target)), hash(before));
 });
 
-test("fail closed: a missing target is never created", async () => {
-  const home = await freshHome("fail-missing");
+test("an absent target with an existing parent directory is created, not refused (BP-004.11)", async () => {
+  // NOTE: this test used to assert the OPPOSITE — that a missing target was
+  // always refused, never created. That was the defect: most Claude Code
+  // installs have a `~/.claude/` directory (the CLI is installed) but no
+  // hand-written CLAUDE.md or settings.json yet, and every fix refused
+  // outright, unreachable exactly when it mattered. `freshHome()` below
+  // creates `.claude/` but deliberately installs no fixture into it, so this
+  // is exactly that case.
+  const home = await freshHome("create-parent-exists");
   const env = makeEnv(home);
   const md = mdFix(env);
   const json = jsonFix(env);
 
   for (const fix of [md, json]) {
+    assert.equal(await exists(fix.target), false, "test bug: the fixture must start absent");
     const state = await fix.check();
     assert.equal(state.applied, false);
     assert.equal(state.status, "unknown");
     assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
-    await assert.rejects(() => fix.preview(), { code: FIX_ERROR_CODES.TARGET_MISSING });
-    await assert.rejects(() => fix.apply(), { code: FIX_ERROR_CODES.TARGET_MISSING });
-    assert.equal(await exists(fix.target), false, "the fix must not create its own target");
+
+    const preview = await fix.preview();
+    assert.equal(preview.targets[0].created, true, `${fix.id}: preview must mark an absent target as created`);
+
+    const applied = await fix.apply();
+    assert.equal(applied.applied, true);
+    assert.equal(await exists(fix.target), true, `${fix.id}: apply() must create its own target`);
   }
-  assert.equal(await exists(path.join(home, ".session-rx")), false);
 });
 
 test("fail closed: a read-only target is refused before anything is created", async () => {
@@ -1010,6 +1021,189 @@ test("unifiedDiff degrades to a block replace instead of hanging on huge inputs"
   assert.equal(lines.filter((l) => l.startsWith("-left ")).length, 2100);
   assert.equal(lines.filter((l) => l.startsWith("+right ")).length, 2100);
   assert.equal(lines.filter((l) => l.startsWith("@@")).length, 1);
+});
+
+// =========================================================================
+// 13. BP-004.11 — an absent target is CREATED when its parent directory
+//    exists, and undo of a created target DELETES it rather than leaving an
+//    empty stub. This is the fix for the "SessionRx refuses on a fresh
+//    machine because ~/.claude/CLAUDE.md was never hand-written" defect.
+// =========================================================================
+
+test("T1: AppendSectionFix preview on an absent target discloses creation with a /dev/null diff", async () => {
+  const home = await freshHome("create-md-preview");
+  const env = makeEnv(home);
+  const fix = mdFix(env);
+
+  assert.equal(await exists(fix.target), false);
+  const preview = await fix.preview();
+  assert.equal(preview.targets.length, 1);
+  assert.equal(preview.targets[0].created, true);
+  assert.equal(preview.targets[0].bytesBefore, 0);
+  assert.match(preview.description, /does not exist yet/, "the description must say the file is absent");
+  assert.match(preview.description, /will create it/, "the description must say SessionRx will create it");
+  assert.match(preview.diff, /^--- \/dev\/null\n/, "an absent target must render a creation diff");
+  assert.match(preview.diff, /^\+<!-- session-rx:output-hygiene:v1 -->$/m);
+  // preview() alone must write nothing.
+  assert.equal(await exists(fix.target), false);
+  assert.equal(await exists(path.join(home, ".session-rx")), false);
+});
+
+test("T2: AppendSectionFix apply creates the file with exactly the section, and check() reports applied", async () => {
+  const home = await freshHome("create-md-apply");
+  const env = makeEnv(home);
+  const fix = mdFix(env);
+
+  const applied = await fix.apply();
+  assert.equal(applied.applied, true);
+  const bytes = await readFile(fix.target);
+  assert.equal(
+    bytes.toString("utf8"),
+    BP_004_02_TEXT,
+    "a created file must hold exactly the delimited section — no invented header or title",
+  );
+
+  const state = await fix.check();
+  assert.equal(state.applied, true);
+  assert.equal(state.status, "applied");
+  assert.equal(state.drifted, false);
+});
+
+test("T3: undo of a created AppendSectionFix target removes the file entirely", async () => {
+  const home = await freshHome("create-md-undo");
+  const env = makeEnv(home);
+  const fix = mdFix(env);
+
+  const applied = await fix.apply();
+  assert.equal(await exists(fix.target), true);
+
+  const undone = await fix.undo(applied.undoPath);
+  assert.equal(undone.restored, true);
+  assert.equal(await exists(fix.target), false, "undo of a created file must remove it, not leave an empty stub");
+  const state = await fix.check();
+  assert.equal(state.status, "unknown");
+  assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
+});
+
+test("T4: undoing a created target twice is refused", async () => {
+  const home = await freshHome("create-md-undo-twice");
+  const env = makeEnv(home);
+  const fix = mdFix(env);
+  const applied = await fix.apply();
+
+  await fix.undo(applied.undoPath);
+  assert.equal(await exists(fix.target), false);
+  await assert.rejects(() => fix.undo(applied.undoPath), { code: FIX_ERROR_CODES.ALREADY_UNDONE });
+  assert.equal(await exists(fix.target), false, "a refused second undo must not recreate the file");
+});
+
+test("T5: JsonMergeFix on an absent target creates valid JSON holding exactly the merged key", async () => {
+  const home = await freshHome("create-json-apply");
+  const env = makeEnv(home);
+  const fix = jsonFix(env);
+
+  assert.equal(await exists(fix.target), false);
+  const preview = await fix.preview();
+  assert.equal(preview.targets[0].created, true);
+  assert.match(preview.diff, /^--- \/dev\/null\n/);
+  assert.match(preview.diff, /^\+ {2}"autoCompact": true$/m);
+
+  const applied = await fix.apply();
+  assert.equal(applied.applied, true);
+  const text = await readFile(fix.target, "utf8");
+  assert.equal(
+    text,
+    `${JSON.stringify({ autoCompact: true }, null, 2)}\n`,
+    "a created settings file holds exactly the merged key, two-space indented, with a trailing newline",
+  );
+  assert.deepEqual(JSON.parse(text), { autoCompact: true });
+  assert.equal((await fix.check()).applied, true);
+});
+
+test("T6: undo of a created JsonMergeFix target removes the file entirely", async () => {
+  const home = await freshHome("create-json-undo");
+  const env = makeEnv(home);
+  const fix = jsonFix(env);
+
+  const applied = await fix.apply();
+  assert.equal(await exists(fix.target), true);
+
+  const undone = await fix.undo(applied.undoPath);
+  assert.equal(undone.restored, true);
+  assert.equal(await exists(fix.target), false, "undo of a created settings file must remove it");
+  assert.equal((await fix.check()).status, "unknown");
+});
+
+test("T7: an absent parent directory is still refused, naming the missing directory", async () => {
+  // Deliberately NOT freshHome() — that helper pre-creates `.claude/`, which
+  // is exactly the case T1-T6 cover. Here `.claude/` itself does not exist,
+  // as if the CLI it belongs to were never installed.
+  const home = path.join(TMP_ROOT, "no-parent-dir");
+  assert.ok(home.startsWith(TMP_ROOT + path.sep), "test bug: home must be inside the temp root");
+  await mkdir(home, { recursive: true });
+  const env = makeEnv(home);
+  const claudeDir = path.join(home, ".claude");
+  assert.equal(await exists(claudeDir), false, "test bug: .claude must not exist for this case");
+
+  for (const fix of [mdFix(env), jsonFix(env)]) {
+    const state = await fix.check();
+    assert.equal(state.status, "unknown");
+    assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
+
+    await assert.rejects(() => fix.preview(), (error) => {
+      assert.equal(error.code, FIX_ERROR_CODES.TARGET_MISSING);
+      assert.match(error.message, /\.claude/, "the error must name the missing directory");
+      assert.match(error.message, /does not exist/);
+      return true;
+    });
+    await assert.rejects(() => fix.apply(), { code: FIX_ERROR_CODES.TARGET_MISSING });
+    assert.equal(await exists(fix.target), false, "no file may be created without its parent directory");
+    assert.equal(await exists(claudeDir), false, "SessionRx must not fabricate the parent directory either");
+  }
+  assert.equal(await exists(path.join(home, ".session-rx")), false);
+});
+
+test("T8 REGRESSION: an existing target is still appended to, prior bytes preserved, undo byte-identical", async () => {
+  const home = await freshHome("regression-existing-md");
+  const target = await installFixture(home, "claude-md/lf.md", ".claude/CLAUDE.md");
+  const before = await readFile(target);
+  const env = makeEnv(home);
+  const fix = mdFix(env);
+
+  const preview = await fix.preview();
+  assert.equal(preview.targets[0].created, false, "an existing file must never be reported as created");
+  assert.equal(
+    preview.diff.startsWith("--- /dev/null"),
+    false,
+    "an existing file's diff must not be rendered as a creation",
+  );
+
+  const applied = await fix.apply();
+  const after = await readFile(target);
+  assert.ok(after.subarray(0, before.length).equals(before), "prior bytes must be an exact prefix, byte-for-byte");
+  assert.equal(after.subarray(before.length).toString("utf8"), BP_004_02_TEXT);
+
+  await fix.undo(applied.undoPath);
+  assert.equal(hash(await readFile(target)), hash(before), "undo must restore the existing file byte-identically");
+  assert.equal(await exists(target), true, "undo of an EXISTING file's fix must never delete the file");
+});
+
+test("T9 REGRESSION: an existing settings.json keeps its other keys after merge, never reported as created", async () => {
+  const home = await freshHome("regression-existing-json");
+  const target = await installFixture(home, "settings/rich.json", ".claude/settings.json");
+  const original = JSON.parse(await readFile(target, "utf8"));
+  const fix = jsonFix(makeEnv(home));
+
+  const preview = await fix.preview();
+  assert.equal(preview.targets[0].created, false);
+
+  await fix.apply();
+  const merged = JSON.parse(await readFile(target, "utf8"));
+  for (const key of Object.keys(original)) {
+    assert.ok(Object.hasOwn(merged, key), `key ${key} was dropped`);
+    assert.deepEqual(merged[key], original[key], `key ${key} was altered`);
+  }
+  assert.equal(merged.autoCompact, true);
 });
 
 // =========================================================================

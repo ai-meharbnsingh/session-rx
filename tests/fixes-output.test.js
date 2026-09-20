@@ -300,18 +300,69 @@ test("an edited section is drift, not a second append", async () => {
 // Fail closed: no partial write, and a diagnostic that names the problem.
 // ---------------------------------------------------------------------------
 
-test("a missing CLAUDE.md is refused and is NOT created", async () => {
+// Previously this asserted REFUSAL: apply() rejected with TARGET_MISSING and
+// the file was never created. BP-004.11 changed the contract — measured on a
+// clean machine, all five fixes refused because ~/.claude/CLAUDE.md did not
+// exist, and most Claude Code users have never hand-written that file, so the
+// product's core loop was unreachable for them. SessionRx now CREATES an
+// absent target whenever its parent directory (`~/.claude/`) already exists.
+// This is the strictly stronger replacement, not a lowered bar: creation
+// succeeds, the created file holds EXACTLY the wording-locked section (no
+// invented header or title), and undo removes the file it created rather
+// than leaving an empty stub behind.
+test("a missing CLAUDE.md is created by apply, holds exactly the section, and undo removes it", async () => {
   const { env, home, claudeDir } = await scaffoldEmpty("missing");
   const fix = createOutputHygieneFix({ env });
+  const target = path.join(claudeDir, "CLAUDE.md");
+
+  const state = await fix.check();
+  assert.equal(state.status, "unknown");
+  assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
+
+  const preview = await fix.preview();
+  assert.equal(preview.targets.length, 1);
+  assert.equal(preview.targets[0].created, true, "preview must mark an absent target as created");
+  assert.match(preview.diff, /^--- \/dev\/null\n/, "a created target's diff must render the old side as /dev/null");
+  assert.match(preview.description, /does not exist yet; SessionRx will create it/);
+
+  const applied = await fix.apply();
+  assert.equal(applied.applied, true);
+
+  const after = await readFile(target);
+  assert.equal(
+    after.toString("utf8"),
+    EXPECTED_SECTION,
+    "the created file must hold exactly the section under the wording lock, nothing invented",
+  );
+  assert.equal(`sha256:${hash(after)}`, preview.targets[0].afterHash);
+  assert.equal((await fix.check()).applied, true);
+
+  const undone = await fix.undo(applied.undoPath);
+  assert.equal(undone.restored, true);
+  assert.equal(undone.byteIdentical, true);
+  assert.equal(await exists(target), false, "undo of a created file must remove it, not leave an empty stub");
+  assert.equal((await fix.check()).status, "unknown");
+});
+
+// Coverage kept from the old contract, restated more precisely: SessionRx
+// creates a missing FILE but never fabricates a missing PARENT DIRECTORY — an
+// absent `~/.claude/` means the owning CLI is not installed at all, which is
+// not this project's job to fix. The refusal must name the directory, because
+// the directory, not the file, is what is actually missing.
+test("an absent ~/.claude directory is refused, and the error names the directory", async () => {
+  const home = path.join(TMP_ROOT, `no-claude-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const env = makeEnv(home);
+  const fix = createOutputHygieneFix({ env });
+  const target = path.join(home, ".claude", "CLAUDE.md");
 
   const state = await fix.check();
   assert.equal(state.status, "unknown");
   assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
 
   const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_MISSING);
-  assert.match(error.message, /will not create it/);
-  assert.equal(await exists(path.join(claudeDir, "CLAUDE.md")), false);
-  assert.equal(await stateDirExists(home), false, "a refused apply created state");
+  assert.match(error.message, /\.claude does not exist; SessionRx will not create it/);
+  assert.equal(await exists(target), false);
+  assert.equal(await stateDirExists(home), false);
 });
 
 test("a symlinked CLAUDE.md is refused, the link survives, nothing is written", async () => {

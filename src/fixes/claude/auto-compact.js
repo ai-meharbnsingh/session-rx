@@ -39,6 +39,12 @@
  *     `not-applied`, so FVA-006 holds: the UI does not offer an apply that is
  *     going to refuse, and "no evidence" does not read as "all clear".
  *
+ * The gate applies to a settings.json that EXISTS. A developer who has never
+ * written one at all is not an unrecognised schema: BP-004.11 has wave 4A create
+ * the file when `~/.claude/` is already there, so the gate steps aside for a
+ * target being created and holds for every target that is not. Which is which is
+ * wave 4A's `created` flag, never an empty-string parse — see `computeTargets()`.
+ *
  * An explicit `"autoCompact": false` is a DIFFERENT case and is allowed. It is a
  * boolean — the schema this fix understands — and flipping it is the entire
  * point of the fix. It is not silent either: `JsonMergeFix` records it in
@@ -180,10 +186,27 @@ export class AutoCompactFix extends JsonMergeFix {
    * read guard and produces the before/after bytes; it writes nothing, so
    * throwing here refuses before a backup, a journal entry or a target write can
    * exist. `preview()` calls the same method, so it refuses identically.
+   *
+   * "NOTHING THERE YET" IS NOT "THERE IS SOMETHING THERE AND IT IS BROKEN", and
+   * the two must not share a branch. `created` is wave 4A's own verdict that the
+   * file does not exist and is about to be created (BP-004.11), so its
+   * `beforeText` is the empty string: there is no stored `autoCompact` for this
+   * gate to disagree with, and the schema check runs against an empty object so
+   * the create proceeds. Parsing that empty string instead — as this override
+   * used to, unconditionally — threw a bare `SyntaxError: Unexpected end of JSON
+   * input`, which is neither a create nor an honest refusal.
+   *
+   * The refusal is NOT weakened for a file that does exist. A target that is not
+   * `created` has already been read, parsed and proven to be a plain JSON object
+   * by `JsonMergeFix.computeTargets()`, which refuses malformed or non-object
+   * content with `TARGET_UNPARSEABLE` before this method sees it — so a broken
+   * settings.json cannot reach the empty-object branch, and a real, non-empty
+   * file holding a non-boolean `autoCompact` still fails closed below.
    */
   async computeTargets() {
     const targets = await super.computeTargets();
-    const parsed = JSON.parse(targets[0].beforeText);
+    const [target] = targets;
+    const parsed = target.created ? {} : JSON.parse(target.beforeText);
     if (Object.hasOwn(parsed, AUTO_COMPACT_KEY) && typeof parsed[AUTO_COMPACT_KEY] !== "boolean") {
       throw this.schemaRejection(parsed[AUTO_COMPACT_KEY]);
     }

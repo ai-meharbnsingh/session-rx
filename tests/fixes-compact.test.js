@@ -338,15 +338,186 @@ test("a settings.json that is valid JSON but not an object is refused", async ()
   assert.equal(await stateDirExists(home), false);
 });
 
-test("a missing settings.json is refused and is NOT created", async () => {
+// Previously this asserted REFUSAL: apply() rejected with TARGET_MISSING and
+// the file was never created. BP-004.11 changed the contract — measured on a
+// clean machine, all five fixes refused because ~/.claude/settings.json did
+// not exist, and most Claude Code users have never hand-written that file, so
+// the product's core loop was unreachable for them. SessionRx now CREATES an
+// absent target whenever its parent directory (`~/.claude/`) already exists.
+// This is the strictly stronger replacement, not a lowered bar: creation
+// succeeds, the created file holds EXACTLY the merged key as valid two-space
+// JSON, and undo removes the file it created rather than leaving an empty
+// stub behind.
+//
+// This test was RED until `AutoCompactFix.computeTargets()` stopped running its
+// DIS-008 schema gate through an unconditional `JSON.parse(beforeText)`:
+// `beforeText` is `""` for a target wave 4A has just decided to create, so the
+// parse threw a bare `SyntaxError: Unexpected end of JSON input` instead of
+// either creating the file or refusing honestly. The gate now keys on wave 4A's
+// own `created` flag, and the two regressions below prove it did not also open a
+// hole for files that DO exist and are broken.
+test("a missing settings.json is created by apply, holds exactly the merged key, and undo removes it", async () => {
   const { env, home, claudeDir } = await scaffoldEmpty("missing");
   const fix = createAutoCompactFix({ env });
+  const target = path.join(claudeDir, "settings.json");
+
   const state = await fix.check();
   assert.equal(state.status, "unknown");
   assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
+
+  const preview = await fix.preview();
+  assert.equal(preview.targets.length, 1);
+  assert.equal(preview.targets[0].created, true, "preview must mark an absent target as created");
+  assert.match(preview.diff, /^--- \/dev\/null\n/, "a created target's diff must render the old side as /dev/null");
+  assert.match(preview.description, /does not exist yet; SessionRx will create it/);
+  assert.match(preview.targets[0].note, /created the file with 1 key\(s\)/);
+  assert.equal(await exists(target), false, "preview must not create the file it previews");
+  assert.equal(await stateDirExists(home), false, "preview created undo state");
+
+  const applied = await fix.apply();
+  assert.equal(applied.applied, true);
+
+  const text = await readFile(target, "utf8");
+  assert.equal(
+    text,
+    `${JSON.stringify({ autoCompact: true }, null, 2)}\n`,
+    "a created settings file must hold exactly the merged key, two-space indented, nothing invented",
+  );
+  assert.deepEqual(JSON.parse(text), { autoCompact: true });
+  // Nothing invented: the merged key is the ONLY key in the created file.
+  assert.deepEqual(Object.keys(JSON.parse(text)), [AUTO_COMPACT_KEY]);
+  assert.ok(text.includes(`\n  ${EXPECTED_FRAGMENT}`), "two-space indentation, exactly as BP-004.09 states it");
+  assert.equal(`sha256:${hash(await readFile(target))}`, preview.targets[0].afterHash);
+
+  const afterApply = await fix.check();
+  assert.equal(afterApply.applied, true);
+  assert.equal(afterApply.status, "applied");
+  assert.equal(afterApply.reason, "keys-present");
+
+  const undone = await fix.undo(applied.undoPath);
+  assert.equal(undone.restored, true);
+  assert.equal(undone.byteIdentical, true);
+  assert.equal(await exists(target), false, "undo of a created file must remove it, not leave an empty stub");
+  assert.equal((await fix.check()).status, "unknown");
+});
+
+// ---------------------------------------------------------------------------
+// The create path did not open a hole. "Nothing there yet" is wave 4A's own
+// `created` verdict; it is NOT "there is something there and it is broken", and
+// the DIS-008 gate must still refuse the second. These three are the regressions
+// that hold the distinction in place — the coverage above proves creation works,
+// and without these that proof would be indistinguishable from a weakened gate.
+// ---------------------------------------------------------------------------
+
+test("REGRESSION: an EXISTING settings.json keeps every key through the merge, and undo restores it byte-identically", async () => {
+  const { env, target, bytes: before, beforeHash } = await scaffold("create-path-preserves", {
+    settings: "rich.json",
+  });
+  const original = JSON.parse(before.toString("utf8"));
+  const fix = createAutoCompactFix({ env });
+
+  // The file EXISTS, so the create branch must not touch it: `created` false is
+  // the flag the schema gate keys on, and the merge starts from the parsed file
+  // rather than from the empty object a create starts from.
+  const preview = await fix.preview();
+  assert.equal(preview.targets[0].created, false, "an existing file must never be reported as created");
+  assert.match(preview.diff, /^--- ~/, "an existing file's diff must not render /dev/null as its old side");
+
+  const applied = await fix.apply();
+  const merged = JSON.parse((await readFile(target)).toString("utf8"));
+  assert.deepEqual(Object.keys(merged), [...RICH_KEYS, AUTO_COMPACT_KEY], "the create path flattened an existing file");
+  for (const key of RICH_KEYS) {
+    assert.deepEqual(merged[key], original[key], `the value of "${key}" was lost`);
+  }
+  assert.equal(merged.autoCompact, true);
+
+  await fix.undo(applied.undoPath);
+  const restored = await readFile(target);
+  assert.equal(hash(restored), beforeHash, "undo of a merge into an existing file was not byte-identical");
+  assert.ok(restored.equals(before));
+});
+
+test("REGRESSION: an EXISTING non-boolean autoCompact is still refused, fail-closed, with no write", async () => {
+  const { env, home, target, bytes: before } = await scaffold("create-path-schema", {
+    settings: "schema-string.json",
+  });
+  const fix = createAutoCompactFix({ env });
+
+  // DIS-008 intact: the refusal is the schema one, not a create, and it names
+  // the shape it found.
+  const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_UNPARSEABLE);
+  assert.equal(error.details.reason, AUTO_COMPACT_SCHEMA_REASON);
+  assert.equal(error.details.foundType, "string");
+  await expectFixError(fix.preview(), FIX_ERROR_CODES.TARGET_UNPARSEABLE);
+
+  assert.ok((await readFile(target)).equals(before), "the schema refusal wrote to the file");
+  assert.notEqual(JSON.parse(before.toString("utf8")).autoCompact, true, "the fixture no longer exercises the gate");
+  assert.equal(JSON.parse((await readFile(target)).toString("utf8")).autoCompact, "always");
+  assert.equal(await stateDirExists(home), false, "the schema refusal created state");
+});
+
+test("REGRESSION: an EXISTING malformed settings.json is refused, not overwritten with the merged key", async () => {
+  const { env, home, target, bytes: before } = await scaffold("create-path-malformed", {
+    settings: "broken.json",
+  });
+  const fix = createAutoCompactFix({ env });
+
+  // A real, non-empty file that does not parse is wave 4A's refusal, reached
+  // before the schema gate: the create branch must not swallow it as "nothing
+  // there yet" and replace the developer's content with `{"autoCompact": true}`.
+  const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_UNPARSEABLE);
+  assert.match(error.message, /is not valid JSON, so SessionRx will not rewrite it/);
+  assert.notEqual(error.details.reason, AUTO_COMPACT_SCHEMA_REASON, "a malformed file is not a schema rejection");
+  await expectFixError(fix.preview(), FIX_ERROR_CODES.TARGET_UNPARSEABLE);
+
+  const after = await readFile(target);
+  assert.ok(after.equals(before), "a malformed settings.json was rewritten");
+  assert.ok(after.toString("utf8").includes("\"trailing\": true,"), "the developer's own content survived verbatim");
+  assert.equal(after.toString("utf8").includes(EXPECTED_FRAGMENT), false, "the merged key was written anyway");
+  assert.equal(await stateDirExists(home), false);
+});
+
+// An EXISTING but EMPTY settings.json is the boundary between the two cases
+// above, and it lands on the REFUSAL side: the file is there, so wave 4A reads
+// it, `JSON.parse("")` fails, and the fix declines rather than filling a file it
+// did not create. Recorded because it is the case most easily conflated with an
+// ABSENT file, and the difference is the whole point of the gate's `created`
+// branch — absent is created, present-and-unparseable is refused. Nothing is
+// written either way.
+test("an EXISTING empty settings.json is refused rather than silently filled", async () => {
+  const { env, home, claudeDir } = await scaffoldEmpty("empty-file");
+  const target = path.join(claudeDir, "settings.json");
+  await writeFile(target, "");
+  const fix = createAutoCompactFix({ env });
+
+  const state = await fix.check();
+  assert.equal(state.status, "unknown");
+  assert.equal(state.reason, FIX_ERROR_CODES.TARGET_UNPARSEABLE);
+
+  const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_UNPARSEABLE);
+  assert.match(error.message, /is not valid JSON, so SessionRx will not rewrite it/);
+  assert.equal((await readFile(target, "utf8")), "", "an empty existing file was written to");
+  assert.equal(await stateDirExists(home), false);
+});
+
+// Coverage kept from the old contract, restated more precisely: SessionRx
+// creates a missing FILE but never fabricates a missing PARENT DIRECTORY — an
+// absent `~/.claude/` means the owning CLI is not installed at all, which is
+// not this project's job to fix. The refusal must name the directory, because
+// the directory, not the file, is what is actually missing.
+test("an absent ~/.claude directory is refused, and the error names the directory", async () => {
+  const home = path.join(TMP_ROOT, `no-claude-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const env = makeEnv(home);
+  const fix = createAutoCompactFix({ env });
+  const target = path.join(home, ".claude", "settings.json");
+
+  const state = await fix.check();
+  assert.equal(state.status, "unknown");
+  assert.equal(state.reason, FIX_ERROR_CODES.TARGET_MISSING);
+
   const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_MISSING);
-  assert.match(error.message, /will not create it/);
-  assert.equal(await exists(path.join(claudeDir, "settings.json")), false);
+  assert.match(error.message, /\.claude does not exist; SessionRx will not create it/);
+  assert.equal(await exists(target), false);
   assert.equal(await stateDirExists(home), false);
 });
 

@@ -50,12 +50,13 @@ import {
   readdir,
   realpath,
   rename,
+  unlink,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 /** Bumped whenever the journal record shape or the write protocol changes. */
-export const FIX_ENGINE_VERSION = "2026-09-20.1";
+export const FIX_ENGINE_VERSION = "2026-09-20.2";
 
 export const STATE_DIR_NAME = ".session-rx";
 export const UNDO_DIR_NAME = "undo";
@@ -261,8 +262,13 @@ function renderToken(op) {
 /**
  * A git-style unified diff for one file.  Hunk counts are always written out
  * (`,1` included) so the rendered string is deterministic and comparable.
+ *
+ * `created: true` renders the old side as `/dev/null` — the git convention for
+ * "this file did not exist" — so a fix that is about to CREATE a file cannot
+ * be mistaken, on sight, for one merely appending to it (see computeTargets()
+ * on `AppendSectionFix`/`JsonMergeFix`: preview() must disclose creation).
  */
-export function unifiedDiff(displayPath, beforeText, afterText, { context = DIFF_CONTEXT } = {}) {
+export function unifiedDiff(displayPath, beforeText, afterText, { context = DIFF_CONTEXT, created = false } = {}) {
   if (beforeText === afterText) return "";
   const ops = diffOps(beforeText, afterText);
   const oldNos = [];
@@ -308,7 +314,7 @@ export function unifiedDiff(displayPath, beforeText, afterText, { context = DIFF
     ranges.push([from, to]);
     cursor = to + 1;
   }
-  const lines = [`--- ${displayPath}`, `+++ ${displayPath}`];
+  const lines = [`--- ${created ? "/dev/null" : displayPath}`, `+++ ${displayPath}`];
   for (const [from, to] of ranges) {
     const slice = ops.slice(from, to + 1);
     const oldLen = slice.filter((op) => op.type !== "+").length;
@@ -458,6 +464,42 @@ async function readTarget(env, absolute, display) {
   return { exists: true, bytes, text, mode: info.mode & 0o7777, display, path: absolute };
 }
 
+/**
+ * A fix target that does not exist is CREATED, but only inside a directory
+ * that already exists.  An absent parent (e.g. no `~/.claude/` at all) means
+ * the owning CLI is not installed, and fabricating that tree is not this
+ * project's job — the refusal names the DIRECTORY, not the file, because the
+ * directory is what is actually missing.
+ */
+async function assertParentDirExists(env, absolute, display) {
+  const dir = path.dirname(absolute);
+  const dirDisplay = env.display(dir);
+  let info;
+  try {
+    info = await lstat(dir);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new FixError(
+        FIX_ERROR_CODES.TARGET_MISSING,
+        `${dirDisplay} does not exist; SessionRx will not create it, so it cannot create ${display} either`,
+        { path: absolute, dir, home: env.home },
+      );
+    }
+    throw new FixError(
+      FIX_ERROR_CODES.TARGET_UNREADABLE,
+      `cannot stat ${dirDisplay}: ${error.code}`,
+      { path: absolute, dir, cause: error.code },
+    );
+  }
+  if (!info.isDirectory()) {
+    throw new FixError(
+      FIX_ERROR_CODES.TARGET_MISSING,
+      `${dirDisplay} is not a directory; SessionRx will not create ${display} under it`,
+      { path: absolute, dir },
+    );
+  }
+}
+
 async function assertWritable(env, absolute, display) {
   const dir = path.dirname(absolute);
   try {
@@ -521,6 +563,25 @@ async function guardedWrite(env, absolute, bytes, allowedTargets, mode) {
     );
   }
   await writeFileAtomic(absolute, bytes, mode);
+}
+
+/**
+ * The delete-side counterpart to `guardedWrite`, used only by undo() for a
+ * target SessionRx itself created (BP-004.11): restoring "absent" means
+ * removing the file, not overwriting it, but the same out-of-bounds guard
+ * applies — this never runs against a path outside the state dir or the
+ * declared targets.
+ */
+async function guardedUnlink(env, absolute, allowedTargets) {
+  const permitted = isInside(env.stateDir, absolute) || allowedTargets.includes(absolute);
+  if (!permitted) {
+    throw new FixError(
+      FIX_ERROR_CODES.WRITE_OUT_OF_BOUNDS,
+      `refusing to delete outside ${env.stateDir} and the declared targets: ${absolute}`,
+      { path: absolute, stateDir: env.stateDir, allowed: allowedTargets },
+    );
+  }
+  await unlink(absolute);
 }
 
 function stamp(date) {
@@ -731,18 +792,40 @@ export async function undoTransaction(undoPath, { env = createFixEnvironment(), 
     plans.push({ target, display, bytes: backupBytes });
   }
 
-  // PHASE 2 — restore, then prove each restoration byte-identical.
+  // PHASE 2 — restore, then prove each restoration byte-identical.  A target
+  // SessionRx CREATED (BP-004.11) has no prior bytes to restore — "restoring
+  // absent" means removing the file, never leaving an empty stub behind — so
+  // that one target is deleted instead of overwritten, and proven gone rather
+  // than proven byte-identical.
   const restored = [];
   for (const plan of plans) {
-    await guardedWrite(env, plan.target.path, plan.bytes, [plan.target.path], plan.target.mode);
-    const after = await readFile(plan.target.path);
-    const afterHash = sha256Hex(after);
-    if (afterHash !== plan.target.hashBefore) {
-      throw new FixError(
-        FIX_ERROR_CODES.RESTORE_NOT_BYTE_IDENTICAL,
-        `${plan.display} restored to ${afterHash}, not the recorded ${plan.target.hashBefore}`,
-        { path: plan.target.path, expectedHash: plan.target.hashBefore, actualHash: afterHash },
-      );
+    if (plan.target.created) {
+      await guardedUnlink(env, plan.target.path, [plan.target.path]);
+      let stillPresent = true;
+      try {
+        await lstat(plan.target.path);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        stillPresent = false;
+      }
+      if (stillPresent) {
+        throw new FixError(
+          FIX_ERROR_CODES.RESTORE_NOT_BYTE_IDENTICAL,
+          `${plan.display} still exists after undo tried to remove the file SessionRx created`,
+          { path: plan.target.path },
+        );
+      }
+    } else {
+      await guardedWrite(env, plan.target.path, plan.bytes, [plan.target.path], plan.target.mode);
+      const after = await readFile(plan.target.path);
+      const afterHash = sha256Hex(after);
+      if (afterHash !== plan.target.hashBefore) {
+        throw new FixError(
+          FIX_ERROR_CODES.RESTORE_NOT_BYTE_IDENTICAL,
+          `${plan.display} restored to ${afterHash}, not the recorded ${plan.target.hashBefore}`,
+          { path: plan.target.path, expectedHash: plan.target.hashBefore, actualHash: afterHash },
+        );
+      }
     }
     restored.push(plan.target.path);
   }
@@ -871,6 +954,7 @@ export class WritableFix extends FixBase {
     return targets
       .map((target) => unifiedDiff(target.display, target.beforeText, target.afterText, {
         context: this.diffContext,
+        created: Boolean(target.created),
       }))
       .filter(Boolean)
       .join("");
@@ -879,11 +963,20 @@ export class WritableFix extends FixBase {
   /** BP-004: `{description, diff, files_affected, reversible}` plus the proof. */
   async preview() {
     const targets = await this.computeTargets();
+    // BP-004.11 — preview MUST disclose creation, not merely allow it: a
+    // target that does not exist yet reads, unmistakably, as about to be
+    // created, in both the description and the diff (created: true above
+    // renders `--- /dev/null` rather than an ordinary append/merge header).
+    const createdTargets = targets.filter((t) => t.created);
+    const description = createdTargets.length > 0
+      ? `${this.descriptionText} ${createdTargets.map((t) => t.display).join(", ")} `
+        + "does not exist yet; SessionRx will create it."
+      : this.descriptionText;
     return {
       id: this.id,
       kind: this.kind,
       title: this.title,
-      description: this.descriptionText,
+      description,
       diff: this.renderDiffFor(targets),
       files_affected: targets.map((t) => t.path),
       reversible: true,
@@ -903,6 +996,7 @@ export class WritableFix extends FixBase {
         bytesBefore: t.bytesBefore,
         bytesAfter: t.bytesAfter,
         eol: t.eol === "\r\n" ? "crlf" : "lf",
+        created: Boolean(t.created),
         note: t.note,
       })),
       conflicts: targets.flatMap((t) => t.conflicts ?? []),
@@ -943,6 +1037,10 @@ export class WritableFix extends FixBase {
         display: target.display,
         backup,
         mode: target.mode,
+        // BP-004.11 — carried into the persisted transaction so undo() can
+        // tell "restore the backup" apart from "this target did not exist;
+        // restoring absent means deleting the file, not writing one".
+        created: Boolean(target.created),
         hashBefore: target.beforeHash,
         hashAfter: target.afterHash, // promised now, re-proven from disk below
         bytesBefore: target.bytesBefore,
@@ -967,9 +1065,22 @@ export class WritableFix extends FixBase {
     await writeTransaction(this.env, undoPath, record);
 
     // The file must still be exactly what the diff was computed from; anything
-    // else means it changed between preview and apply.
+    // else means it changed between preview and apply.  A target this fix is
+    // about to CREATE has no prior bytes to compare — its "unchanged since
+    // preview" is "still absent", so the guard is that nothing appeared where
+    // preview found nothing, not a hash match against an empty buffer.
     for (const target of targets) {
       const current = await readTarget(this.env, target.path, target.display);
+      if (target.created) {
+        if (current.exists) {
+          throw new FixError(
+            FIX_ERROR_CODES.EXTERNAL_EDIT,
+            `${target.display} was created by something else while this fix was being prepared; nothing written`,
+            { path: target.path, expectedHash: null, actualHash: sha256Hex(current.bytes) },
+          );
+        }
+        continue;
+      }
       const currentHash = current.exists ? sha256Hex(current.bytes) : null;
       if (currentHash !== target.beforeHash) {
         throw new FixError(
@@ -1153,32 +1264,36 @@ export class AppendSectionFix extends WritableFix {
   async computeTargets() {
     const file = await readTarget(this.env, this.target, this.display);
     if (!file.exists) {
-      throw new FixError(
-        FIX_ERROR_CODES.TARGET_MISSING,
-        `${this.display} does not exist; SessionRx will not create it`,
-        { path: this.target },
-      );
-    }
-    const state = await this.check();
-    if (state.drifted) {
-      throw new FixError(
-        FIX_ERROR_CODES.MARKER_DRIFT,
-        `${this.display} already carries ${this.openMarker} but it was changed `
-        + `(${state.reason}); refusing to touch the file`,
-        { path: this.target, marker: this.openMarker, reason: state.reason },
-      );
-    }
-    if (state.applied) {
-      throw new FixError(
-        FIX_ERROR_CODES.ALREADY_APPLIED,
-        `${this.display} already carries ${this.openMarker}; applying again would duplicate it`,
-        { path: this.target, marker: this.openMarker },
-      );
+      // BP-004.11 — absent is not automatically a refusal: SessionRx creates
+      // the file when its parent directory exists (the owning CLI IS
+      // installed; it simply has no CLAUDE.md yet), and keeps refusing only
+      // when even the directory is missing (the CLI is not installed at all).
+      await assertParentDirExists(this.env, this.target, this.display);
+    } else {
+      const state = await this.check();
+      if (state.drifted) {
+        throw new FixError(
+          FIX_ERROR_CODES.MARKER_DRIFT,
+          `${this.display} already carries ${this.openMarker} but it was changed `
+          + `(${state.reason}); refusing to touch the file`,
+          { path: this.target, marker: this.openMarker, reason: state.reason },
+        );
+      }
+      if (state.applied) {
+        throw new FixError(
+          FIX_ERROR_CODES.ALREADY_APPLIED,
+          `${this.display} already carries ${this.openMarker}; applying again would duplicate it`,
+          { path: this.target, marker: this.openMarker },
+        );
+      }
     }
     const eol = detectEol(file.text);
     const section = eol === "\n" ? this.section : this.section.replace(/\n/g, eol);
     // A file that does not end in a newline gets one, so the marker starts on
-    // its own line; the user's last line is still byte-for-byte intact.
+    // its own line; the user's last line is still byte-for-byte intact. A
+    // file that does not exist yet (file.text === "") takes this same "no
+    // lead" branch, so the created file holds EXACTLY `this.section` — no
+    // invented header, title, or other content.
     const lead = file.text.length === 0 || endsWithNewline(file.text) ? "" : eol;
     const appended = Buffer.from(lead + section, "utf8");
     const afterBytes = Buffer.concat([file.bytes, appended]);
@@ -1187,6 +1302,7 @@ export class AppendSectionFix extends WritableFix {
       display: this.display,
       mode: file.mode,
       eol,
+      created: !file.exists,
       beforeBytes: file.bytes,
       beforeText: file.text,
       beforeHash: sha256Hex(file.bytes),
@@ -1195,7 +1311,9 @@ export class AppendSectionFix extends WritableFix {
       afterHash: sha256Hex(afterBytes),
       bytesBefore: file.bytes.length,
       bytesAfter: afterBytes.length,
-      note: `appended ${appended.length} bytes (${eol === "\r\n" ? "crlf" : "lf"})`,
+      note: file.exists
+        ? `appended ${appended.length} bytes (${eol === "\r\n" ? "crlf" : "lf"})`
+        : `created a ${afterBytes.length}-byte file (${eol === "\r\n" ? "crlf" : "lf"})`,
     }];
   }
 }
@@ -1315,37 +1433,38 @@ export class JsonMergeFix extends WritableFix {
 
   async computeTargets() {
     const file = await readTarget(this.env, this.target, this.display);
-    if (!file.exists) {
-      throw new FixError(
-        FIX_ERROR_CODES.TARGET_MISSING,
-        `${this.display} does not exist; SessionRx will not create it`,
-        { path: this.target },
-      );
-    }
     let parsed;
-    try {
-      parsed = JSON.parse(file.text);
-    } catch (error) {
-      throw new FixError(
-        FIX_ERROR_CODES.TARGET_UNPARSEABLE,
-        `${this.display} is not valid JSON, so SessionRx will not rewrite it: ${error.message}`,
-        { path: this.target, cause: error.message },
-      );
-    }
-    if (!isPlainObject(parsed)) {
-      throw new FixError(
-        FIX_ERROR_CODES.TARGET_UNPARSEABLE,
-        `${this.display} is valid JSON but not an object; refusing to merge into it`,
-        { path: this.target },
-      );
-    }
-    const state = await this.check();
-    if (state.applied) {
-      throw new FixError(
-        FIX_ERROR_CODES.ALREADY_APPLIED,
-        `${this.display} already has ${this.marker}`,
-        { path: this.target, marker: this.marker },
-      );
+    if (!file.exists) {
+      // BP-004.11 — same rule as AppendSectionFix: absent is created when its
+      // directory exists, refused only when the directory itself is missing.
+      // There is nothing to merge INTO, so the starting object is empty.
+      await assertParentDirExists(this.env, this.target, this.display);
+      parsed = {};
+    } else {
+      try {
+        parsed = JSON.parse(file.text);
+      } catch (error) {
+        throw new FixError(
+          FIX_ERROR_CODES.TARGET_UNPARSEABLE,
+          `${this.display} is not valid JSON, so SessionRx will not rewrite it: ${error.message}`,
+          { path: this.target, cause: error.message },
+        );
+      }
+      if (!isPlainObject(parsed)) {
+        throw new FixError(
+          FIX_ERROR_CODES.TARGET_UNPARSEABLE,
+          `${this.display} is valid JSON but not an object; refusing to merge into it`,
+          { path: this.target },
+        );
+      }
+      const state = await this.check();
+      if (state.applied) {
+        throw new FixError(
+          FIX_ERROR_CODES.ALREADY_APPLIED,
+          `${this.display} already has ${this.marker}`,
+          { path: this.target, marker: this.marker },
+        );
+      }
     }
     // Spread first: insertion order is preserved, so existing keys stay exactly
     // where they were and only genuinely new keys land at the end.
@@ -1357,16 +1476,20 @@ export class JsonMergeFix extends WritableFix {
       }
       next[key] = this.merge[key];
     }
-    const eol = detectEol(file.text);
+    const eol = file.exists ? detectEol(file.text) : "\n";
     let json = JSON.stringify(next, null, this.indent);
     if (eol !== "\n") json = json.replace(/\n/g, eol);
-    const afterText = endsWithNewline(file.text) ? json + eol : json;
+    // A created file gets the trailing newline a hand-written or tool-written
+    // settings.json conventionally ends with; an EXISTING file keeps whatever
+    // it already had, trailing newline or not (BP-004.09 — never reformatted).
+    const afterText = !file.exists || endsWithNewline(file.text) ? json + eol : json;
     const afterBytes = Buffer.from(afterText, "utf8");
     return [{
       path: this.target,
       display: this.display,
       mode: file.mode,
       eol,
+      created: !file.exists,
       beforeBytes: file.bytes,
       beforeText: file.text,
       beforeHash: sha256Hex(file.bytes),
@@ -1376,9 +1499,11 @@ export class JsonMergeFix extends WritableFix {
       bytesBefore: file.bytes.length,
       bytesAfter: afterBytes.length,
       conflicts,
-      note: conflicts.length > 0
-        ? `replaces ${conflicts.length} existing value(s); undo restores them`
-        : `adds ${this.keys.length} key(s)`,
+      note: !file.exists
+        ? `created the file with ${this.keys.length} key(s)`
+        : conflicts.length > 0
+          ? `replaces ${conflicts.length} existing value(s); undo restores them`
+          : `adds ${this.keys.length} key(s)`,
     }];
   }
 }
