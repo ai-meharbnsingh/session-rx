@@ -235,7 +235,7 @@ function promotionNote(promotions, sessionCount) {
     .join("; ");
   const more = shapes.size > listed.length ? ` and ${shapes.size - listed.length} other model/window combination${shapes.size - listed.length === 1 ? "" : "s"}` : "";
   return (
-    `${promotions.length} of ${sessionCount} collected session${sessionCount === 1 ? "" : "s"} held more context than the model-id table allows for their model, so the window was resolved by observation instead (BP-002.17): ` +
+    `${promotions.length} of ${sessionCount} collected session${sessionCount === 1 ? "" : "s"} held more context than the model-id table allows for their model, so the window was worked out from what was observed instead: ` +
     `${described}${more}. The table entry is stale for these models; the promotion is reported rather than applied silently.`
   );
 }
@@ -315,8 +315,8 @@ export function buildReportInput(input = {}) {
     trend: input?.trend ?? {
       direction: "unknown",
       reason:
-        "no trend was computed here: the series and the activity heatmap belong to src/analyzer/trends.js (BP-001.13). " +
-        "An unknown direction is reported rather than a stable-looking default, because 'stable' would be a claim about data this module never looked at.",
+        "no trend was computed here: working out a direction over time is a separate step, and it did not run. " +
+        "An unknown direction is reported rather than a stable-looking default, because 'stable' would be a claim about history nothing here looked at.",
     },
   };
 }
@@ -373,7 +373,7 @@ function aggregateRules(sessions, parserVersion) {
     if (total === 0) {
       status = "unknown";
       reason =
-        "no session was analyzed for this rule, so there is no evidence either way. An empty corpus is not a clean corpus.";
+        "no session was analyzed for this rule, so there is no evidence either way. Having nothing to check is not the same as finding nothing wrong.";
     } else if (observedResults.length) {
       status = "observed";
     } else if (unknownResults.length) {
@@ -405,7 +405,7 @@ function aggregateRules(sessions, parserVersion) {
     const derivation =
       `aggregated over ${total} session${total === 1 ? "" : "s"}: ${observedResults.length} observed, ${notObservedCount} measured and not met, ${unknownResults.length} not measurable. ` +
       `The rule is reported as observed when at least one session observed it, and the unmeasurable count travels with the verdict so it cannot be hidden by it. ` +
-      `The rows below the counts come from the ${representatives.length} highest-magnitude session${representatives.length === 1 ? "" : "s"} of that group` +
+      `The rows below the counts come from the ${representatives.length} worst-affected session${representatives.length === 1 ? "" : "s"} of that group` +
       `${representatives[0]?.evidence?.derivation ? `, computed as follows — ${representatives[0].evidence.derivation}` : ""}`;
 
     aggregates.push({
@@ -583,7 +583,7 @@ export function analyzeAll(collected = {}, options = {}) {
       support: "detection-only",
       note:
         "detected on this machine, but it exposes no session transcript to read, so nothing about its usage is measured here. " +
-        "No sessions were parsed, which is not the same as no usage (DIS-007).",
+        "No sessions were read, which is not the same as no usage.",
     });
   }
 

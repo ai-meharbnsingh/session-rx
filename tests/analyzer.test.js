@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
 
 import { RULES, evaluateRule, EVIDENCE_STATUSES } from "../src/analyzer/rules.js";
 import { analyzeSession, analyzeAll, buildReportInput } from "../src/analyzer/health.js";
@@ -110,6 +111,245 @@ test("every threshold derivation explains the choice in words, not as a bare num
     assert.ok(derivation.split(/\s+/).length >= 40, `${rule.id} derivation is ${derivation.split(/\s+/).length} words, too short to explain anything: ${derivation}`);
     assert.ok(/because|rather than|so that|since|which is why|deliberately/i.test(derivation), `${rule.id} derivation gives no reasoning: ${derivation}`);
   }
+});
+
+test("every rule declares non-empty plain-language text, in ordinary English, beside its threshold", () => {
+  // The health page's compact-cards wave (BP-001.24) renders THIS text instead
+  // of keeping a second copy of the wording — so if it is thin, absent, or
+  // full of the analyzer's own jargon, the plain-language rewrite the brief
+  // asked for never actually reaches a reader. One catalogue, checked here.
+  const jargon = [
+    "tool_use", "toolresultbytes", "cacheread", "cachecreate", "sessionid",
+    "isSidechain".toLowerCase(), "inputtokens",
+  ];
+  // A bare identifier-shaped snake_case token (two+ lowercase runs joined by
+  // `_`), not an English contraction or a stray underscore in prose.
+  const snakeCase = /\b[a-z]+_[a-z][a-z_]*\b/;
+  for (const rule of RULES) {
+    assert.ok(rule.plain && typeof rule.plain === "object", `${rule.id} has no plain field`);
+    for (const field of ["problem", "why"]) {
+      const text = rule.plain[field];
+      assert.equal(typeof text, "string", `${rule.id}.plain.${field}`);
+      assert.ok(text.length > 20, `${rule.id}.plain.${field} is too thin to read as a sentence: ${JSON.stringify(text)}`);
+      const lower = text.toLowerCase();
+      for (const term of jargon) {
+        assert.ok(!lower.includes(term), `${rule.id}.plain.${field} leaks the identifier "${term}": ${text}`);
+      }
+      assert.ok(!snakeCase.test(text), `${rule.id}.plain.${field} looks like it names a raw field (snake_case): ${text}`);
+    }
+  }
+});
+
+test("repeat-tool's plain text hedges: a detected repetition, never an asserted waste", () => {
+  // The product owner's explicit honesty point: repeated calls are NOT always
+  // unnecessary, so this rule may never state waste as settled fact.
+  const rule = ruleById("repeat-tool");
+  const combined = `${rule.plain.problem} ${rule.plain.why}`;
+  assert.match(combined, /may indicate/i, "the problem sentence must hedge, not assert");
+  assert.match(combined, /detected repetition/i);
+  assert.match(combined, /confirmed waste/i);
+  assert.ok(
+    !/\bis wasted work\b/i.test(combined) && !/\bwas wasted\b/i.test(combined),
+    `repeat-tool's plain text asserts waste as fact rather than hedging it: ${combined}`,
+  );
+});
+
+test("evaluateRule carries `plain` through to the RuleResult, unfilled — the template, not a rendering", () => {
+  // Filling `{count}`/`{pct}` from the session's own magnitude is the
+  // RENDERER's job (public/js/pages/health.js `fillPlainTemplate`), so the
+  // analyzer must hand the template across untouched.
+  const result = verdict("cache-hit", cacheLow);
+  assert.ok(result.plain, "cache-hit RuleResult carries no plain field");
+  assert.equal(result.plain.problem, ruleById("cache-hit").plain.problem);
+  assert.equal(result.plain.why, ruleById("cache-hit").plain.why);
+});
+
+// ---------------------------------------------------------------------------
+// plain.unmeasured — the COULD-NOT-BE-MEASURED sentence, one per CAUSE
+// ---------------------------------------------------------------------------
+
+/**
+ * Every unmeasured branch a rule can actually reach, with the reason class it
+ * emits. The point is not the mapping for its own sake: a class with no
+ * sentence behind it renders as the engineering prose the product owner could
+ * not read, so this table is what stops a branch shipping without one.
+ *
+ * @type {Array<[string, string, object, object]>} rule id, expected code, session, ctx
+ */
+const UNMEASURED_BRANCHES = [
+  ["context-pressure", "no-turns", makeSession({ turns: [] }), {}],
+  ["context-pressure", "no-context-readings", makeSession({ turns: [{ ts: at(1) }] }), {}],
+  ["context-pressure", "native-fraction-out-of-range", kimiFractionAboveOne, {}],
+  ["context-pressure", "window-is-observed-peak", contextObservedFloor, {}],
+  ["context-pressure", "window-above-known-tiers", contextPromotedNoLadder, { promotion: { ladder: "none" } }],
+  ["context-pressure", "window-size-unknown", contextNoWindowNoFraction, {}],
+  ["context-pressure", "window-source-unsupported", makeSession({ window: { tokens: 123456, source: "heuristic" }, turns: [{ ts: at(1), inputTokens: 100 }] }), {}],
+
+  ["cache-hit", "no-turns", makeSession({ turns: [] }), {}],
+  ["cache-hit", "no-cache-counters", makeSession({ turns: [{ ts: at(1) }] }), {}],
+  ["cache-hit", "no-cache-creation-counter", cacheReadsOnly, {}],
+  ["cache-hit", "no-cache-read-counter", cacheCreatesOnly, {}],
+  ["cache-hit", "no-cache-traffic", cacheAllZero, {}],
+
+  ["repeat-tool", "no-turns", makeSession({ turns: [] }), {}],
+  ["repeat-tool", "no-tool-calls-anywhere", noToolCalls, {}],
+  ["repeat-tool", "no-attributable-results", geminiToolCallsNoBytes, {}],
+  ["repeat-tool", "partial-result-coverage", repeatPartialCoverage, {}],
+
+  ["large-tool-result", "no-turns", makeSession({ turns: [] }), {}],
+  ["large-tool-result", "no-tool-calls-anywhere", noToolCalls, {}],
+  ["large-tool-result", "no-result-sizes", geminiToolCallsNoBytes, {}],
+  ["large-tool-result", "partial-result-sizes", bigResultsPartialCoverage, {}],
+
+  ["long-rising-context", "no-turns", makeSession({ turns: [] }), {}],
+  ["long-rising-context", "no-elapsed-time", noTimestamps, {}],
+  ["long-rising-context", "too-few-context-points", twoObservations, {}],
+
+  ["subagent-concurrency", "codex-records-no-subagents", makeSession({ cli: "codex" }), {}],
+  ["subagent-concurrency", "gemini-records-no-subagents", makeSession({ cli: "gemini" }), {}],
+  ["subagent-concurrency", "cli-records-no-subagents", makeSession({ cli: "droid" }), {}],
+  ["subagent-concurrency", "subagent-reading-off", makeSession({}), { sessionMeta: { subagentSessionIds: null } }],
+  ["subagent-concurrency", "scan-bounded", makeSession({}), { sessionMeta: { subagentSessionIds: [] }, corpusComplete: false }],
+  ["subagent-concurrency", "no-subagent-collected", makeSession({}), { sessionMeta: { subagentSessionIds: [] }, corpusComplete: true }],
+  ["subagent-concurrency", "no-subagent-collected", makeSession({ cli: "opencode" }), { corpusComplete: true }],
+  ["subagent-concurrency", "no-subagent-times", makeSession({}), { children: childrenWithoutIntervals }],
+  ["subagent-concurrency", "partial-subagent-times", makeSession({}), { children: childrenPartialIntervals }],
+];
+
+/** Every plain-language string a rule declares, labelled by where it lives. */
+function plainStrings(rule) {
+  const out = [];
+  for (const field of ["problem", "why"]) {
+    if (typeof rule?.plain?.[field] === "string") out.push([`plain.${field}`, rule.plain[field]]);
+  }
+  const unmeasured = rule?.plain?.unmeasured ?? {};
+  for (const key of Object.keys(unmeasured)) out.push([`plain.unmeasured.${key}`, unmeasured[key]]);
+  return out;
+}
+
+test("every rule declares a plain-English sentence for every cause it can go unmeasured for, and a default", () => {
+  // `unknown` is the MAJORITY verdict on the real corpus, so this text is the
+  // one a user reads most. A rule with no sentence for its own cause falls back
+  // to the engineering `reason` on the card face — which is the thing the
+  // product owner read and could not understand.
+  for (const rule of RULES) {
+    const unmeasured = rule.plain?.unmeasured;
+    assert.ok(unmeasured && typeof unmeasured === "object", `${rule.id} has no plain.unmeasured catalogue`);
+    assert.equal(typeof unmeasured.default, "string", `${rule.id}.plain.unmeasured.default`);
+    for (const [where, textValue] of plainStrings(rule)) {
+      assert.equal(typeof textValue, "string", `${rule.id}.${where}`);
+      assert.ok(textValue.length > 60, `${rule.id}.${where} is too thin to explain anything: ${JSON.stringify(textValue)}`);
+      assert.ok(/[.!]$/.test(textValue.trim()), `${rule.id}.${where} is not a finished sentence: ${textValue}`);
+    }
+    // An unmeasured sentence must never read as reassurance: this is the
+    // fourth-state failure the honesty contract exists to prevent.
+    for (const [where, textValue] of plainStrings(rule).filter(([key]) => key.startsWith("plain.unmeasured"))) {
+      assert.ok(
+        !/nothing to worry about|all clear|no cause for concern|looks fine|seems fine/i.test(textValue),
+        `${rule.id}.${where} reads as reassurance, but an unmeasured check is NOT a pass: ${textValue}`,
+      );
+    }
+  }
+});
+
+test("no plain-language string anywhere leaks an internal id or the analyzer's own vocabulary", () => {
+  // Iterated over EVERY rule and EVERY plain.* value rather than asserted rule
+  // by rule, so a rule or a cause added later cannot slip a DIS-00n or a
+  // `sidechain` past this file by simply not being named in it.
+  const leaks = [
+    /DIS-\d/i, /BP-\d/i, /\bF-\d/i, /\bsidechain/i, /\blinkage/i,
+    /\bcorpus/i, /\bdenominator/i, /\bnumerator/i, /\bmagnitude/i, /\bverdict/i,
+  ];
+  let checked = 0;
+  for (const rule of RULES) {
+    for (const [where, textValue] of plainStrings(rule)) {
+      checked += 1;
+      for (const leak of leaks) {
+        assert.ok(!leak.test(textValue), `${rule.id}.${where} leaks ${leak} into user-facing text: ${textValue}`);
+      }
+    }
+  }
+  assert.ok(checked >= 40, `only ${checked} plain strings were checked — the sweep is not reaching the catalogues`);
+});
+
+test("every unmeasured branch a rule can reach names a cause that rule has a sentence for", () => {
+  for (const [id, expectedCode, session, ctx] of UNMEASURED_BRANCHES) {
+    const rule = ruleById(id);
+    const result = evaluateRule(rule, session, ctx);
+    assert.equal(result.evidence.status, "unknown", `${id}/${expectedCode} is no longer an unknown branch`);
+    assert.equal(result.evidence.reasonCode, expectedCode, `${id} emitted ${result.evidence.reasonCode}`);
+    assert.ok(
+      expectedCode === "default" || Object.hasOwn(rule.plain.unmeasured, expectedCode),
+      `${id} emits reason class "${expectedCode}" with no sentence declared for it`,
+    );
+    // The prose stays too: the class is an ADDITION beside the evidence of
+    // record, never a replacement for it.
+    assert.ok(result.evidence.reason.length > 40, `${id}/${expectedCode} lost its prose reason`);
+  }
+  // Every catalogue entry except the two raised outside a rule body is reachable.
+  const raisedOutsideARule = new Set(["default", "rule-threw"]);
+  const reached = new Set(UNMEASURED_BRANCHES.map(([id, code]) => `${id}::${code}`));
+  for (const rule of RULES) {
+    for (const key of Object.keys(rule.plain.unmeasured)) {
+      if (raisedOutsideARule.has(key)) continue;
+      assert.ok(reached.has(`${rule.id}::${key}`), `${rule.id}.plain.unmeasured.${key} is a sentence for a cause no branch above reaches`);
+    }
+  }
+});
+
+test("every reason class written into the analyzer's source has a sentence behind it", () => {
+  // A static sweep, so a branch nobody wrote a test case for still cannot ship
+  // without its sentence. It sees the codes passed to `unknown()` as literals;
+  // the two computed ones (`windowDenominator`'s and `subagentReasonCode`'s)
+  // are covered by UNMEASURED_BRANCHES above, which exercises them for real.
+  const source = readFileSync(new URL("../src/analyzer/rules.js", import.meta.url), "utf8");
+  const literals = new Set([
+    ...[...source.matchAll(/^\s*"([a-z][a-z0-9-]*)",\s*$/gm)].map((m) => m[1]),
+    ...[...source.matchAll(/,\s*"([a-z][a-z0-9-]*)"\s*\)/g)].map((m) => m[1]),
+  ]);
+  assert.ok(literals.size >= 16, `only ${literals.size} reason-class literals found — the sweep has stopped matching`);
+  const known = new Set(RULES.flatMap((rule) => Object.keys(rule.plain.unmeasured)));
+  for (const code of literals) {
+    assert.ok(known.has(code), `the source passes reason class "${code}" that no rule has a sentence for`);
+  }
+});
+
+test("a rule body that throws is unmeasured with a cause of its own, never a pass", () => {
+  const thrower = { ...ruleById("cache-hit"), evaluate() { throw new Error("boom"); } };
+  const result = evaluateRule(thrower, cacheLow, {});
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(result.evidence.reasonCode, "rule-threw");
+  assert.ok(Object.hasOwn(result.plain.unmeasured, "rule-threw"), "a crash has no sentence to render");
+});
+
+test("an unrecognised or absent reason class falls back to `default`, which every rule answers", () => {
+  const vague = { ...ruleById("cache-hit"), evaluate() { return { status: "unknown", reason: "x".repeat(60), values: [] }; } };
+  assert.equal(evaluateRule(vague, cacheLow, {}).evidence.reasonCode, "default");
+  for (const rule of RULES) assert.equal(typeof rule.plain.unmeasured.default, "string", `${rule.id} cannot answer the fallback`);
+});
+
+test("evaluateRule carries plain.unmeasured through to the RuleResult untouched", () => {
+  const result = verdict("subagent-concurrency", makeSession({ cli: "codex" }), {});
+  assert.equal(result.plain.unmeasured, ruleById("subagent-concurrency").plain.unmeasured);
+  assert.equal(result.evidence.reasonCode, "codex-records-no-subagents");
+  // A measured result carries no reason and no class, so nothing can look one
+  // up and render a could-not-be-measured sentence over a real finding.
+  const measured = verdict("cache-hit", cacheLow, {});
+  assert.equal(measured.evidence.reason, null);
+  assert.equal(measured.evidence.reasonCode, null);
+});
+
+test("the Codex sub-agent reason is unchanged — the plain sentence was added beside it, not swapped in", () => {
+  // The prose is the evidence of record. A wave that "improves the wording"
+  // rewrites history; this pins the exact string the analyzer has always
+  // emitted, so the plain-language work can only ever be additive.
+  const CODEX_REASON =
+    "Nothing in Codex's rollout records establishes a sub-agent interval: there is no sidechain marker and no parent/child session linkage to overlap (DIS-004).";
+  const result = verdict("subagent-concurrency", makeSession({ cli: "codex" }), {});
+  assert.equal(result.evidence.reason, CODEX_REASON);
+  const GEMINI_REASON =
+    "Nothing in Gemini's history records establishes a sub-agent interval: there is no sidechain marker and no parent/child session linkage to overlap (DIS-004).";
+  assert.equal(verdict("subagent-concurrency", makeSession({ cli: "gemini" }), {}).evidence.reason, GEMINI_REASON);
 });
 
 test("the five BP-004 fix ids are the only ones any rule points at", () => {
@@ -679,7 +919,10 @@ test("analyzeAll analyzes every supported session and reports every collector", 
 test("analyzeAll surfaces windowPromotions in the per-CLI note, rather than silently correcting the table", () => {
   const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
   const claude = out.collectors.find((entry) => entry.cli === "claude");
-  assert.ok(claude.note.includes("BP-002.17"), claude.note);
+  // RE-AIMED (wave WJARG): the note no longer quotes the id at the user, so the
+  // claim under test is the same one in plain words — the promotion is SURFACED.
+  assert.ok(claude.note.includes("worked out from what was observed instead"), claude.note);
+  assert.ok(!/BP-\d/.test(claude.note), `the note must not quote an internal id at the user: ${claude.note}`);
   assert.ok(claude.note.includes("200,000"), claude.note);
   assert.ok(claude.note.includes("1,000,000"), claude.note);
   assert.ok(claude.note.includes("stale"), claude.note);
@@ -744,7 +987,18 @@ test("an empty corpus is unknown on all six rules, never six passes", () => {
   assert.equal(out.reportInput.rules.length, 6);
   for (const rule of out.reportInput.rules) {
     assert.equal(rule.evidence.status, "unknown", rule.id);
-    assert.ok(rule.evidence.reason.includes("not a clean corpus"), rule.evidence.reason);
+    // RE-AIMED (wave WJARG): "an empty corpus is not a clean corpus" said this in
+    // the analyzer's own vocabulary. The rewrite must still refuse to read as a
+    // pass, so that refusal is what is asserted — in the new wording, and by
+    // rejecting the reassurance an empty run must never offer.
+    assert.ok(
+      rule.evidence.reason.includes("not the same as finding nothing wrong"),
+      rule.evidence.reason,
+    );
+    assert.ok(
+      !/all clear|nothing to worry about|looks fine|no problems found/i.test(rule.evidence.reason),
+      `an empty run must not read as a pass: ${rule.evidence.reason}`,
+    );
   }
 });
 
@@ -1021,4 +1275,167 @@ test("the range comes from the sessions themselves and is null when they carry n
   const undated = buildReportInput({ sessions: [{ startedAt: null, endedAt: null, rules: [] }] });
   assert.equal(undated.range.from, null);
   assert.equal(undated.range.to, null);
+});
+
+// ==========================================================================
+// The plain-language guard, widened from the catalogues to the FILES.
+//
+// The `plain.*` sweep above reads the rule catalogues in memory. It could not
+// see a sentence assembled anywhere else, and that is exactly how 22 user-facing
+// strings across five files kept their internal ids long after the catalogues
+// were clean. A guard that covers part of a surface is how this class of defect
+// persists, so this one reads the analyzer's SOURCE: a module added later is
+// swept without being named here. Its twin over public/js lives in
+// tests/frontend-contract.test.js.
+// ==========================================================================
+
+/** Internal ids and analyzer vocabulary that must never reach a user. */
+const USER_TEXT_LEAKS = [
+  /DIS-\d/i, /BP-\d/i, /\bF-\d/i, /\bsidechain/i, /\blinkage/i,
+  /\bdenominator/i, /\bcorpus/i, /\bmagnitude/i,
+];
+
+/**
+ * Every user-facing string literal in one JS source, as `[line, text]` pairs.
+ *
+ * LINE RULE: a line is a candidate only when it carries a quote character and is
+ * not itself a comment (it does not begin with `*`, `//` or a slash-star). Prose
+ * ABOUT a banned word — the comment you are reading — must not fail the guard.
+ *
+ * LITERAL RULE: within a candidate line, the CONTENTS of each '', "" and
+ * backtick literal, with `${...}` interpolations dropped. What an interpolation
+ * holds is code, not text: `${round(shiftPoints, 2)}` is an identifier no user
+ * ever sees, while the prose around it is text every user does see. That is why
+ * a finding names the STRING rather than the whole line.
+ *
+ * LIMITS, STATED: it reads one line at a time, so a literal split across lines
+ * is scanned per line rather than as a whole sentence — enough to catch a banned
+ * word, not enough to judge the sentence. An identifier is never a finding, so
+ * `fillPlainTemplate(template, magnitude)` — a parameter named after the
+ * `rule.magnitude` contract field — does not trip it.
+ */
+function userFacingStrings(source) {
+  const found = [];
+  source.split("\n").forEach((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("*") || trimmed.startsWith("//") || trimmed.startsWith("/*")) return;
+    if (!/['"`]/.test(line)) return;
+    let i = 0;
+    let quote = "";
+    let buf = "";
+    let depth = 0;
+    const keep = () => { if (buf.trim()) found.push([index + 1, buf]); };
+    while (i < line.length) {
+      const ch = line[i];
+      const next = line[i + 1];
+      if (!quote) {
+        if (ch === "'" || ch === '"' || ch === "`") { quote = ch; buf = ""; }
+        i += 1;
+        continue;
+      }
+      if (ch === "\\") { buf += next ?? ""; i += 2; continue; }
+      if (quote === "`" && ch === "$" && next === "{") { depth += 1; i += 2; continue; }
+      if (depth > 0) {
+        if (ch === "{") depth += 1;
+        else if (ch === "}") depth -= 1;
+        i += 1;
+        continue;
+      }
+      if (ch === quote) { keep(); quote = ""; buf = ""; i += 1; continue; }
+      buf += ch;
+      i += 1;
+    }
+    keep();
+  });
+  return found;
+}
+
+/**
+ * The one file the FILE sweep does not read, and why.
+ *
+ * `rules.js` holds two different kinds of text. Its user-facing kind — `name`
+ * and the `plain.*` catalogues — is swept in memory by the two tests below, over
+ * every rule, so nothing there is unguarded. Its other kind is `reason` and
+ * `derivation`: the evidence OF RECORD, which the honesty contract requires to
+ * be traceable, which the product renders only inside collapsed evidence, and
+ * which sibling tests in this file assert by id (`assertUnknownWithReason(result,
+ * "DIS-004")`). Those two demands cannot both be met by one file-wide sweep, so
+ * the split is by ROLE and is stated here rather than hidden in a regex.
+ *
+ * This is deliberately ONE file, asserted below, so the carve-out cannot quietly
+ * grow into the hole this guard exists to close.
+ */
+const EVIDENCE_OF_RECORD_FILES = new Set(["rules.js"]);
+
+/** `userFacingStrings` itself, so a parser that quietly reads nothing cannot turn this green. */
+test("userFacingStrings reads literal text, skips comments, and drops interpolations", () => {
+  const sample = [
+    "// a comment naming BP-002.18 is not a finding",
+    " * nor is a jsdoc line naming DIS-004",
+    'const a = "plain text";',
+    "const b = `a ${round(magnitude, 2)}-point shift`;",
+    'const c = "leaks BP-002.18 at the user";',
+  ].join("\n");
+  const texts = userFacingStrings(sample).map(([, textValue]) => textValue);
+  assert.ok(texts.includes("plain text"), `literal text must be read: ${JSON.stringify(texts)}`);
+  assert.ok(texts.includes("a -point shift"), `an interpolation must be dropped, keeping its prose: ${JSON.stringify(texts)}`);
+  assert.ok(texts.some((t) => t.includes("leaks BP-002.18")), "a literal carrying an id must be read");
+  assert.ok(!texts.some((t) => t.includes("a comment naming")), "a line comment is not user-facing text");
+  assert.ok(!texts.some((t) => t.includes("nor is a jsdoc")), "a jsdoc line is not user-facing text");
+  assert.ok(!texts.some((t) => /\bmagnitude/.test(t)), "an identifier inside `${}` must not reach the scan");
+  assert.equal(userFacingStrings("const x = 1;").length, 0, "a line with no quote yields nothing");
+});
+
+test("no user-facing string in an analyzer module leaks an internal id or the analyzer's own vocabulary", () => {
+  // Read from the DIRECTORY rather than a hand-kept list, so a module added later
+  // is swept without being named here.
+  const dir = new URL("../src/analyzer/", import.meta.url);
+  const names = readdirSync(dir).filter((name) => name.endsWith(".js"));
+  assert.ok(names.includes("rules.js"), "the analyzer directory is not where this guard thinks it is");
+  assert.deepEqual(
+    [...EVIDENCE_OF_RECORD_FILES].filter((name) => !names.includes(name)),
+    [],
+    "EVIDENCE_OF_RECORD_FILES names a file that no longer exists — re-read the carve-out before trusting it",
+  );
+  assert.equal(EVIDENCE_OF_RECORD_FILES.size, 1, "the carve-out is one file by design; widening it reopens the hole this guard closes");
+
+  const swept = names.filter((name) => !EVIDENCE_OF_RECORD_FILES.has(name));
+  assert.ok(swept.length >= 2, `only ${swept.length} analyzer modules are swept — the sweep is not reaching src/analyzer`);
+
+  const findings = [];
+  let checked = 0;
+  for (const name of swept) {
+    const source = readFileSync(new URL(`../src/analyzer/${name}`, import.meta.url), "utf8");
+    for (const [line, textValue] of userFacingStrings(source)) {
+      checked += 1;
+      for (const leak of USER_TEXT_LEAKS) {
+        if (leak.test(textValue)) findings.push(`src/analyzer/${name}:${line} leaks ${leak} -> ${JSON.stringify(textValue)}`);
+      }
+    }
+  }
+  assert.ok(checked >= 100, `only ${checked} string literals were scanned — the sweep is not reaching the analyzer modules`);
+  assert.deepEqual(
+    findings,
+    [],
+    `user-facing text must name the thing, not the ticket:\n  ${findings.join("\n  ")}\n`
+    + "Rewrite the sentence in plain English. Do NOT shrink USER_TEXT_LEAKS to get green.",
+  );
+});
+
+test("rules.js is carved out of the file sweep only because its user-facing fields are swept in memory", () => {
+  // The other half of the carve-out above: `name` joins `plain.*` under the same
+  // leak list, so every field of rules.js that reaches a card face IS guarded.
+  // Without this test the carve-out would be an unguarded file.
+  let checked = 0;
+  for (const rule of RULES) {
+    const fields = [["name", rule.name], ...plainStrings(rule)];
+    for (const [where, textValue] of fields) {
+      if (typeof textValue !== "string") continue;
+      checked += 1;
+      for (const leak of USER_TEXT_LEAKS) {
+        assert.ok(!leak.test(textValue), `${rule.id}.${where} leaks ${leak} into user-facing text: ${textValue}`);
+      }
+    }
+  }
+  assert.ok(checked >= RULES.length * 2, `only ${checked} user-facing rule fields were checked across ${RULES.length} rules`);
 });

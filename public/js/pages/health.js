@@ -14,7 +14,13 @@
  *   2. its own glyph `?` where pass is `✓` and a problem is `!`
  *   3. its own words — "COULD NOT BE MEASURED", never "OK"
  *   4. the sentence "This is NOT a pass" in plain text, not a tooltip
- *   5. `evidence.reason` rendered verbatim, so the user reads WHY
+ *   5. a plain-English sentence saying WHAT could not be worked out and WHY,
+ *      leading the row; the engineering `evidence.reason` that sentence stands
+ *      in for keeps its every word, one click away inside the evidence
+ *      `<details>`.  Where a rule has no plain sentence for its cause, the
+ *      engineering reason stays on the card face — it is then all a reader has,
+ *      and an unknown with no stated cause would be a worse honesty failure
+ *      than a jargon-heavy one.
  * plus `data-status="unknown"` for any styling or test that wants to assert it.
  *
  * The score bar is three segments — passed, observed, unknown — so the unknown
@@ -22,13 +28,26 @@
  * alongside "N/6 checks passed" unconditionally.  "4/6" can never stand alone
  * and hide two checks that never ran.
  *
- * DEFAULT STATE (F-024)
- * ---------------------
- * Each rule is ONE line by default, the shape the brief specified:
+ * DEFAULT STATE (F-024, extended by the plain-language wave)
+ * ------------------------------------------------------------
+ * Each rule is ONE line by default, the shape the brief specified, and an
+ * OBSERVED finding leads with a plain-English sentence above that line — the
+ * jargon (rule name, id, raw metric) stays exactly where it was, one line,
+ * not deleted, just no longer the FIRST thing a reader sees:
  *
- *   ! Repeated tool work   identical call+input+result: 5   repeat-tool · warn
+ *   ! Your AI repeated the same tool operation 6 times. This may indicate
+ *     wasted work — [...] a DETECTED REPETITION, not CONFIRMED WASTE.
+ *     Repeated tool work   identical call+input+result: 6   repeat-tool · warn
  *     → Output hygiene instruction        [Preview] [Apply] [Skip]
  *   ✓ Low cache hit        cache hit rate: 100.0%           cache-hit · warn
+ *
+ * The plain sentence is a template declared on the RULE, in
+ * `src/analyzer/rules.js` (`plain.problem` / `plain.why` for a finding,
+ * `plain.unmeasured` — keyed by `evidence.reasonCode` — for a check that could
+ * not run, all beside `name` and `threshold`, BP-005.19-style: one catalogue),
+ * not a second copy of the wording kept here; this file only fills its
+ * `{count}`/`{pct}` token from the rule's own `magnitude`
+ * (`fillPlainTemplate`) and looks the unmeasured sentence up by its cause.
  *
  * Nothing is deleted to get there.  The threshold derivation, the computation
  * note, the raw evidence numbers and the evidence citation move behind a native
@@ -37,8 +56,9 @@
  *
  * What is NEVER behind that click, because it is the honesty surface: the score
  * headline, the three-segment bar, the sentence that an unknown is not a pass,
- * each unknown rule's reason, every `— not measured`, the lower-bound
- * rendering and its note, and the [Preview] [Apply] [Skip] buttons.
+ * each unknown rule's cause in plain English, every `— not measured`, the
+ * lower-bound rendering and its note, and the [Preview] [Apply] [Skip]
+ * buttons.
  *
  * A `null` number renders as `.not-measured` ("— not measured"), never as 0.
  * A window whose source is `observed-promoted` or `observed-floor` carries an
@@ -85,8 +105,8 @@ export const WINDOW_SOURCE = Object.freeze({
   native: 'the CLI stated this window itself',
   'model-table': 'read from the versioned model-id table',
   'model-map': 'read from the model-id map',
-  'observed-promoted': 'inferred: the model table was too small for this session, so the window was promoted (BP-002.14)',
-  'observed-floor': 'a lower bound: the largest context actually seen. Not a measured window (BP-002.15)',
+  'observed-promoted': 'inferred: our table of model sizes said this model was smaller than the context this session actually held, so a larger size was assumed',
+  'observed-floor': 'a lower bound: the largest amount of context this session was actually seen holding. That is not a measured window — nothing recorded how big it could have been',
   unknown: 'no window could be resolved for this session',
 });
 
@@ -241,7 +261,7 @@ export function evidenceValueNode(value) {
   }
 
   if (isShare && source === FLOOR_SOURCE) {
-    fragment.append(notMeasured('no honest share exists: the denominator is the observed peak itself, not a window (BP-002.18)'));
+    fragment.append(notMeasured('no honest percentage exists: the only figure to divide by is the peak this session was seen holding, which is not the size of its window'));
     fragment.append(inferredTag(source));
     return fragment;
   }
@@ -274,7 +294,7 @@ function isSuppressedShare(value) {
 const FLOOR_SHARE_NOTE =
   'No share of the window is shown for this session: its window is only a lower bound — the largest context actually '
   + 'seen — so dividing by it yields 1.0 by construction. That is an artifact of having no upper bound, not a '
-  + 'measurement (BP-002.18).';
+  + 'measurement.';
 
 /**
  * The evidence numbers behind one verdict, as `.verdict-values` plus any note.
@@ -300,6 +320,94 @@ export function evidenceValuesNode(values, { withNote = true } = {}) {
   fragment.append(list);
   if (withNote && rows.some(isSuppressedShare)) fragment.append(el('p', 'note', FLOOR_SHARE_NOTE));
   return fragment;
+}
+
+/**
+ * Fill a rule's plain-language template with its OWN measured number.
+ *
+ * `rule.plain.problem` (declared in `src/analyzer/rules.js`, beside `name` and
+ * `threshold` — one catalogue, BP-005.19-style) may carry `{count}` or `{pct}`
+ * exactly once. Both are filled from `rule.magnitude` — the same "how bad"
+ * number the analyzer ranks sessions by for this rule — never from a number
+ * this page invents. A magnitude that is not a finite number renders as an em
+ * dash, the same rule this page follows everywhere else: absence is never 0.
+ *
+ * @param {string|null|undefined} template
+ * @param {number|null|undefined} magnitude
+ * @returns {string|null}
+ */
+export function fillPlainTemplate(template, magnitude) {
+  if (typeof template !== 'string' || !template.length) return null;
+  const finite = typeof magnitude === 'number' && Number.isFinite(magnitude);
+  const count = finite ? groupInt(Math.round(magnitude)) : '—';
+  const pct = finite ? `${(magnitude * 100).toFixed(1)}%` : '—';
+  return template.replace(/\{count\}/g, count).replace(/\{pct\}/g, pct);
+}
+
+/**
+ * The plain-English problem sentence for an OBSERVED finding, leading the
+ * row per the product brief: the rule's name, id and raw metric stay on the
+ * summary line below this, this is what a reader sees FIRST.
+ *
+ * Renders nothing when the rule carries no `plain.problem` — including every
+ * fixture in `tests/frontend-contract.test.js`, none of which declares one —
+ * so a rule result with no catalogue entry degrades to exactly today's
+ * behaviour rather than to a blank or a thrown error.
+ *
+ * @param {object} rule a `RuleResult`
+ * @returns {HTMLElement|null}
+ */
+export function plainProblemNode(rule) {
+  const problem = fillPlainTemplate(rule?.plain?.problem, rule?.magnitude);
+  if (!problem) return null;
+  const node = el('p', 'verdict-plain');
+  node.append(text(problem));
+  const why = typeof rule?.plain?.why === 'string' && rule.plain.why.length ? rule.plain.why : null;
+  if (why) node.append(text(' '), el('span', 'verdict-plain-why', why));
+  return node;
+}
+
+/**
+ * The plain-English sentence for a check that COULD NOT BE MEASURED, as a
+ * STRING.  This is the ONE lookup: everything that needs the sentence goes
+ * through here — `plainUnmeasuredNode` for the lead paragraph on the card face,
+ * `subagentTurnsNode` for a tooltip.  A second copy of this lookup is how F-021
+ * happened, so there is not one.
+ *
+ * `plain.unmeasured` (declared on the rule in `src/analyzer/rules.js`) is a MAP
+ * from reason class to sentence, because one rule goes unmeasured for several
+ * different causes and a single sentence would be false for the others. The
+ * class is `evidence.reasonCode`, which the analyzer emits beside the prose
+ * `evidence.reason`; an unrecognised or absent class falls back to `default`,
+ * so a cause added later still reads as English rather than as nothing.
+ *
+ * @param {object} rule a `RuleResult`
+ * @returns {string|null} null when the rule declares no `plain.unmeasured` at all
+ */
+export function plainUnmeasuredSentence(rule) {
+  const catalogue = rule?.plain?.unmeasured;
+  if (!catalogue || typeof catalogue !== 'object') return null;
+  const code = typeof rule?.evidence?.reasonCode === 'string' ? rule.evidence.reasonCode : 'default';
+  const template = typeof catalogue[code] === 'string' ? catalogue[code] : catalogue.default;
+  return fillPlainTemplate(template, rule?.magnitude);
+}
+
+/**
+ * The plain-English unmeasured sentence as the card's lead paragraph.
+ *
+ * Renders nothing when the rule carries no `plain.unmeasured` at all — the same
+ * silent degradation as `plainProblemNode`, and the reason the verbatim
+ * engineering text stays on the card face in that case.
+ *
+ * @param {object} rule a `RuleResult`
+ * @returns {HTMLElement|null}
+ */
+export function plainUnmeasuredNode(rule) {
+  const sentence = plainUnmeasuredSentence(rule);
+  if (!sentence) return null;
+  const node = el('p', 'verdict-plain');
+  node.append(text(sentence));
+  return node;
 }
 
 /**
@@ -339,9 +447,13 @@ export function ruleById(session, id) {
 export function subagentTurnsNode(session) {
   const rule = ruleById(session, 'subagent-concurrency');
   if (rule?.evidence?.status === 'unknown') {
+    // NEVER `evidence.reason` here.  That string is the engineering evidence of
+    // record and belongs in the collapsed evidence fold, where it still is; this
+    // span's `title` and `aria-label` are read by an ordinary user hovering a
+    // dash and by a screen reader, neither of whom opened the fold.
     return notMeasured(
-      rule.evidence.reason
-        || 'this CLI exposes no sub-agent marker, so the count is unknown rather than zero (DIS-004)',
+      plainUnmeasuredSentence(rule)
+        || "this tool's logs don't identify sub-agents, so the count is unknown — not zero",
     );
   }
   const count = Number.isFinite(session?.subagentTurns) ? session.subagentTurns : null;
@@ -383,8 +495,8 @@ function promotionCallout(promotion) {
     `The model table says ${table} tokens for ${promotion?.modelId ?? 'this model'}; this session held more, ` +
     `so ${used} tokens was used as the window instead.` +
     (promotion?.ladder === 'none'
-      ? ' No known tier fits, so that number is the observed peak itself and no context share is derived from it (BP-002.18).'
-      : ` That is a known ${promotion?.ladder ?? 'vendor'} tier, so shares derived from it are permitted (BP-002.14).`);
+      ? ' No known model size fits, so that number is only the peak this session was seen holding, and no context share is derived from it.'
+      : ` That is a known ${promotion?.ladder ?? 'vendor'} tier, so shares derived from it are permitted.`);
   return callout('unknown', 'Window inferred, not read', 'The model-id table is stale for this session.', detail);
 }
 
@@ -528,6 +640,19 @@ export function verdictSummary(rule, meta, critical) {
 }
 
 /**
+ * The analyzer's own words for why a check could not run.
+ *
+ * An unknown with no recorded reason is itself an unmeasured thing and says so,
+ * rather than rendering as an empty paragraph that reads like nothing was wrong.
+ *
+ * @param {object} rule a `RuleResult`
+ * @returns {string}
+ */
+function unknownReasonText(rule) {
+  return rule?.evidence?.reason || 'the analyzer recorded no reason, which is itself unmeasured.';
+}
+
+/**
  * One rule verdict as a `.verdict` row — one line, expandable.
  *
  * WHAT IS BEHIND THE DISCLOSURE: the threshold and its derivation, every
@@ -536,9 +661,17 @@ export function verdictSummary(rule, meta, critical) {
  * wave 5E is only that they are no longer the default state (F-024).
  *
  * WHAT IS NOT, EVER: an `unknown`'s row class, glyph, badge, the sentence that
- * it is not a pass, and `evidence.reason` verbatim; the note explaining a
- * suppressed percentage; and the fix offer.  An unknown is offered no fix,
- * because there is no finding to fix and offering one would imply one was found.
+ * it is not a pass, and the plain-English statement of what could not be worked
+ * out and why; the note explaining a suppressed percentage; and the fix offer.
+ * An unknown is offered no fix, because there is no finding to fix and offering
+ * one would imply one was found.
+ *
+ * The verbatim `evidence.reason` — written for whoever has to fix the gap, not
+ * for the person reading the screen — moves behind the disclosure ONCE a plain
+ * sentence has taken its place on the card face.  It is never dropped, and it
+ * stays on the face for a rule that has no plain sentence for its cause: an
+ * unknown with no stated cause at all would be a worse failure than a
+ * jargon-heavy one.
  *
  * @param {object} session the analyzed session
  * @param {object} rule a `RuleResult`
@@ -562,10 +695,27 @@ export function verdictNode(session, rule, api = null, rerender = null) {
 
   const body = el('div', 'verdict-body');
 
+  // Leads the row, per the product brief: plain English first, the rule's
+  // own name/id/raw-metric technical line (below, in the summary) second.
+  // An unknown leads the same way — with what could not be worked out and why,
+  // never with the engineering prose a reader cannot parse.
+  let unmeasuredPlain = null;
+  if (status === 'observed') {
+    const plain = plainProblemNode(rule);
+    if (plain) body.append(plain);
+  } else if (status === 'unknown') {
+    unmeasuredPlain = plainUnmeasuredNode(rule);
+    if (unmeasuredPlain) body.append(unmeasuredPlain);
+  }
+
   const details = el('details', 'verdict-why');
   details.append(verdictSummary(rule, meta, critical));
 
   const more = el('div', 'verdict-more');
+  // The engineering reason, in full and unedited, first behind the disclosure —
+  // it is the most specific thing this rule recorded about why it could not
+  // run. It is only here when a plain sentence is leading the row in its place.
+  if (unmeasuredPlain) more.append(el('p', 'verdict-detail', unknownReasonText(rule)));
   const threshold = el('p', 'verdict-detail');
   threshold.append(text(`Threshold ${String(rule?.threshold?.value ?? 'not recorded')}`));
   if (rule?.threshold?.derivation) threshold.append(text(` — ${rule.threshold.derivation}`));
@@ -586,7 +736,7 @@ export function verdictNode(session, rule, api = null, rerender = null) {
     // behind the disclosure — a reader must see this without clicking.
     const reason = el('p', 'verdict-reason');
     reason.append(el('strong', null, 'Not measured. This is NOT a pass — the check could not run here. '));
-    reason.append(text(rule?.evidence?.reason || 'the analyzer recorded no reason, which is itself unmeasured.'));
+    if (!unmeasuredPlain) reason.append(text(unknownReasonText(rule)));
     body.append(reason);
   }
 
@@ -829,7 +979,7 @@ export function collectorsPanel(collectors) {
     const item = el('div', 'cli-item');
     item.append(el('span', 'cli-name', row.cli ?? 'unknown'));
     const status = el('span', 'cli-status badge badge-sm badge-unknown', 'Detected — support coming soon');
-    status.setAttribute('title', row?.note ?? 'detected, but it exposes no session transcript to read (DIS-007)');
+    status.setAttribute('title', row?.note ?? 'this tool is installed, but it keeps no session transcript that can be read, so nothing about its usage is measured here');
     item.append(status);
     list.append(item);
   }
@@ -870,6 +1020,106 @@ function newestFirst(sessions) {
     if (!rightOk) return -1;
     return right - left;
   });
+}
+
+/**
+ * Index into `shown` of the first session carrying an OBSERVED, fixable
+ * finding, in the same newest-first order the cards render in — or `-1`
+ * when none does.  Drives the summary's "Review fixes" jump: it must point
+ * at a card that actually offers `[Preview] [Apply] [Skip]` (BP item 1),
+ * never merely the first problem regardless of whether a fix exists for it.
+ *
+ * @param {Array<object>} shown
+ * @returns {number}
+ */
+export function firstActionableIndex(shown) {
+  const sessions = Array.isArray(shown) ? shown : [];
+  for (let index = 0; index < sessions.length; index += 1) {
+    const rules = Array.isArray(sessions[index]?.rules) ? sessions[index].rules : [];
+    if (rules.some((rule) => rule?.evidence?.status === 'observed' && rule?.fix)) return index;
+  }
+  return -1;
+}
+
+/**
+ * BRIEF ITEM 1 — the compact summary at the top of the page: four counts a
+ * reader can take in before opening a single card, plus one action that
+ * jumps straight to the first card with something to fix.
+ *
+ * Every count is taken over the SAME `shown` sessions the cards below
+ * render.  That is deliberate, not a shortcut: `/api/health` sends only the
+ * newest `HEALTH_CARD_LIMIT` sessions' rule results at all (BP-005.01), so
+ * `shown` is the entire rule evidence this page ever has — counting over
+ * anything wider would either be fabricated or require a second request this
+ * wave does not add. It also keeps the four numbers here in permanent
+ * agreement with the cards printed right below them.
+ *
+ * "Sessions analyzed" is a real, always-known count — `shown.length` — so it
+ * is never an em dash, including when it is honestly 0. The other three
+ * depend on rule data existing at all: if not ONE session in `shown` carries
+ * a `rules` array, nothing was actually evaluated, and reporting 0 would be
+ * exactly the false all-clear this product exists to refuse — so all three
+ * render as an em dash together, never as a 0 that never happened.
+ *
+ * @param {Array<object>} shown the sessions about to be rendered as cards
+ * @param {number} actionableIndex from `firstActionableIndex`
+ * @returns {HTMLElement}
+ */
+export function healthSummaryNode(shown, actionableIndex) {
+  const sessions = Array.isArray(shown) ? shown : [];
+  let sawRules = false;
+  let problems = 0;
+  let fixable = 0;
+  let unmeasured = 0;
+  for (const session of sessions) {
+    const rules = Array.isArray(session?.rules) ? session.rules : null;
+    if (!rules) continue;
+    sawRules = true;
+    for (const rule of rules) {
+      const st = rule?.evidence?.status;
+      if (st === 'observed') {
+        problems += 1;
+        if (rule?.fix) fixable += 1;
+      } else if (st === 'unknown') {
+        unmeasured += 1;
+      }
+    }
+  }
+  const noEvidence = 'no rule result was published for any session shown here, so nothing could be counted — that is an absence of evidence, not a zero';
+
+  const wrap = el('section', 'health-summary');
+  const stats = el('div', 'summary-stats');
+  const stat = (label, value, why) => {
+    const cell = el('div', 'summary-stat');
+    const valueNode = el('span', 'summary-stat-value');
+    if (value === null) valueNode.append(notMeasured(why));
+    else valueNode.append(text(groupInt(value)));
+    cell.append(valueNode, el('span', 'summary-stat-label', label));
+    return cell;
+  };
+  stats.append(stat('Sessions analyzed', sessions.length, 'no session fell inside this scan'));
+  stats.append(stat('Problems found', sawRules ? problems : null, noEvidence));
+  stats.append(stat('Fixes available', sawRules ? fixable : null, noEvidence));
+  stats.append(stat('Checks not measured', sawRules ? unmeasured : null, noEvidence));
+  wrap.append(stats);
+
+  const action = el('button', 'button button-primary summary-action', 'Review fixes');
+  action.type = 'button';
+  if (actionableIndex >= 0) {
+    action.setAttribute('aria-label', 'Review fixes: jump to the first session with an actionable problem');
+    action.addEventListener('click', () => {
+      const target = document.getElementById(`health-card-${actionableIndex}`);
+      if (!target) return;
+      if (typeof target.scrollIntoView === 'function') target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (typeof target.focus === 'function') target.focus();
+    });
+  } else {
+    action.disabled = true;
+    action.setAttribute('aria-disabled', 'true');
+    action.setAttribute('title', 'no session shown here has an actionable problem to review');
+  }
+  wrap.append(action);
+  return wrap;
 }
 
 /** Collector diagnostics, folded away but never dropped (BP-002.08). */
@@ -919,6 +1169,10 @@ export function renderHealth(mount, data, ctx = {}) {
   // fallback, not 0.
   const sessionsTotal = Number.isFinite(data?.sessionsTotal) ? data.sessionsTotal : sessions.length;
 
+  // BRIEF ITEM 1: before any card, so a reader knows whether there is
+  // anything to act on before opening one.
+  stack.append(healthSummaryNode(shown, firstActionableIndex(shown)));
+
   stack.append(
     el(
       'p',
@@ -944,7 +1198,13 @@ export function renderHealth(mount, data, ctx = {}) {
     return;
   }
 
-  for (const session of shown) stack.append(sessionCard(session, api, rerender));
+  // Indexed so the summary's "Review fixes" button (`firstActionableIndex`)
+  // has a stable element to jump to.
+  shown.forEach((session, index) => {
+    const card = sessionCard(session, api, rerender);
+    card.id = `health-card-${index}`;
+    stack.append(card);
+  });
 
   const diagnostics = diagnosticsNode(data?.diagnostics);
   if (diagnostics) stack.append(diagnostics);

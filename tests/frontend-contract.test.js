@@ -893,9 +893,13 @@ test("observed-promoted is labelled inferred, and a `none` ladder derives no sha
   }));
   assert.match(noLadder.textContent, /512,345/);
   assert.match(noLadder.textContent, /inferred/);
-  // BP-002.18: ladder `none` means the denominator IS the numerator, so the
-  // card must say no share is derived rather than print a 100%.
-  assert.match(noLadder.textContent, /no context share is derived from it \(BP-002\.18\)/);
+  // BP-002.18: ladder `none` means there is nothing honest to divide by, so the
+  // card must say no share is derived rather than print a 100%. RE-AIMED (wave
+  // WJARG): the sentence no longer quotes the id at the user, so the id lives in
+  // this comment and the assertion checks the plain wording AND its absence.
+  assert.match(noLadder.textContent, /only the peak this session was seen holding/);
+  assert.match(noLadder.textContent, /no context share is derived from it/);
+  assert.ok(!/BP-002/.test(noLadder.textContent), "the card must not quote an internal id at the user");
   assert.ok(!/%/.test(noLadder.textContent), "and it prints no percentage at all");
 });
 
@@ -1440,4 +1444,124 @@ test("the stale-nonce error carries the server body as `cause`, so nothing is lo
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+// ==========================================================================
+// C. The plain-language guard over every page and component.
+//
+// WHY IT READS FILES: the sibling sweep in tests/analyzer.test.js iterates the
+// rule catalogues (`plain.*`) in memory. It therefore could not see a sentence
+// assembled anywhere else, and 22 user-facing strings across five files kept
+// their internal ids long after those catalogues were clean. A guard that
+// covers part of a surface is how this class of defect persists, so this one
+// reads the shipped SOURCE of every page and component — a page added later is
+// covered without being named here.
+// ==========================================================================
+
+/** Internal ids and analyzer vocabulary that must never reach a user. */
+const USER_TEXT_LEAKS = [
+  /DIS-\d/i, /BP-\d/i, /\bF-\d/i, /\bsidechain/i, /\blinkage/i,
+  /\bdenominator/i, /\bcorpus/i, /\bmagnitude/i,
+];
+
+/**
+ * Every user-facing string literal in one JS source, as `[line, text]` pairs.
+ *
+ * LINE RULE: a line is a candidate only when it carries a quote character and is
+ * not itself a comment (it does not begin with `*`, `//` or a slash-star). Prose
+ * ABOUT a banned word — the comment you are reading — must not fail the guard.
+ *
+ * LITERAL RULE: within a candidate line, the CONTENTS of each '', "" and
+ * backtick literal, with `${...}` interpolations dropped. What an interpolation
+ * holds is code, not text: `${round(shiftPoints, 2)}` is an identifier no user
+ * ever sees, while the prose around it is text every user does see. That is why
+ * a finding names the STRING rather than the whole line.
+ *
+ * LIMITS, STATED: it reads one line at a time, so a literal split across lines
+ * is scanned per line rather than as a whole sentence — enough to catch a banned
+ * word, not enough to judge the sentence. An identifier is never a finding, so a
+ * variable named after a contract field (`rule.magnitude`) does not trip it.
+ */
+function userFacingStrings(source) {
+  const found = [];
+  source.split("\n").forEach((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("*") || trimmed.startsWith("//") || trimmed.startsWith("/*")) return;
+    if (!/['"`]/.test(line)) return;
+    let i = 0;
+    let quote = "";
+    let buf = "";
+    let depth = 0;
+    const keep = () => { if (buf.trim()) found.push([index + 1, buf]); };
+    while (i < line.length) {
+      const ch = line[i];
+      const next = line[i + 1];
+      if (!quote) {
+        if (ch === "'" || ch === '"' || ch === "`") { quote = ch; buf = ""; }
+        i += 1;
+        continue;
+      }
+      if (ch === "\\") { buf += next ?? ""; i += 2; continue; }
+      if (quote === "`" && ch === "$" && next === "{") { depth += 1; i += 2; continue; }
+      if (depth > 0) {
+        if (ch === "{") depth += 1;
+        else if (ch === "}") depth -= 1;
+        i += 1;
+        continue;
+      }
+      if (ch === quote) { keep(); quote = ""; buf = ""; i += 1; continue; }
+      buf += ch;
+      i += 1;
+    }
+    keep();
+  });
+  return found;
+}
+
+/** `userFacingStrings` itself, so a parser that quietly reads nothing cannot turn this green. */
+test("userFacingStrings reads literal text, skips comments, and drops interpolations", () => {
+  const sample = [
+    "// a comment naming BP-002.18 is not a finding",
+    " * nor is a jsdoc line naming DIS-004",
+    "const a = 'plain text';",
+    "const b = `a ${round(magnitude, 2)}-point shift`;",
+    "const c = \"leaks BP-002.18 at the user\";",
+    "const d = notMeasured('it is unknown \\u2014 not zero');",
+  ].join("\n");
+  const got = userFacingStrings(sample);
+  const texts = got.map(([, textValue]) => textValue);
+  assert.ok(texts.includes("plain text"), `literal text must be read: ${JSON.stringify(texts)}`);
+  assert.ok(texts.includes("a -point shift"), `an interpolation must be dropped, keeping its prose: ${JSON.stringify(texts)}`);
+  assert.ok(texts.some((t) => t.includes("leaks BP-002.18")), "a literal carrying an id must be read");
+  assert.ok(!texts.some((t) => t.includes("a comment naming")), "a line comment is not user-facing text");
+  assert.ok(!texts.some((t) => t.includes("nor is a jsdoc")), "a jsdoc line is not user-facing text");
+  // The interpolation is dropped, so the identifier inside it is invisible here.
+  assert.ok(!texts.some((t) => /\bmagnitude/.test(t)), "an identifier inside `${}` must not reach the scan");
+  assert.equal(userFacingStrings("const x = 1;").length, 0, "a line with no quote yields nothing");
+});
+
+test("no user-facing string in a page or component leaks an internal id or the analyzer's own vocabulary", () => {
+  // Read from disk, and from the DIRECTORY rather than a hand-kept list, so a
+  // page or component added later is swept without being named here.
+  const dirs = [path.join(PUBLIC, "js", "pages"), COMPONENTS];
+  const files = dirs.flatMap((dir) => readdirSync(dir).filter((name) => name.endsWith(".js")).map((name) => path.join(dir, name)));
+  assert.ok(files.length >= 5, `only ${files.length} page/component files found — the sweep is not reaching public/js`);
+
+  const findings = [];
+  let checked = 0;
+  for (const file of files) {
+    for (const [line, textValue] of userFacingStrings(read(file))) {
+      checked += 1;
+      for (const leak of USER_TEXT_LEAKS) {
+        if (leak.test(textValue)) findings.push(`${rel(file)}:${line} leaks ${leak} -> ${JSON.stringify(textValue)}`);
+      }
+    }
+  }
+  assert.ok(checked >= 800, `only ${checked} string literals were scanned — the sweep is not reaching the page modules`);
+  assert.deepEqual(
+    findings,
+    [],
+    `user-facing text must name the thing, not the ticket:\n  ${findings.join("\n  ")}\n`
+    + "Rewrite the sentence in plain English. Do NOT shrink USER_TEXT_LEAKS to get green.",
+  );
 });

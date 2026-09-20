@@ -546,6 +546,71 @@ test("trend.metrics matches the report generator's TrendMetric contract exactly"
 });
 
 // --------------------------------------------------------------------------
+// trend.summary — the plain-language sentence the UI renders as its lead.
+// One source of truth (BP-005.19): this file computes the wording, the page
+// only displays `trend.summary` verbatim.
+// --------------------------------------------------------------------------
+
+test("every direction the analyzer can produce carries a non-empty plain-language summary", () => {
+  const scenarios = {
+    improving: improvingInput,
+    declining: decliningInput,
+    stable: stableInput,
+    "mixed (metrics disagree)": conflictingInput,
+    "flat but primary unmeasured": cacheOnlyFlatInput,
+    "declining, rests on secondary alone": cacheOnlyDecliningInput,
+    "insufficient data (sparse)": sparseInput,
+    "insufficient data (empty)": EMPTY_INPUT,
+  };
+  for (const [label, input] of Object.entries(scenarios)) {
+    const t = trends(input);
+    assert.equal(typeof t.trend.summary, "string", `${label}: summary must be a string`);
+    assert.ok(t.trend.summary.trim().length > 0, `${label}: summary must not be empty`);
+  }
+});
+
+test("the mixed/disagreeing summary never claims an overall improvement", () => {
+  const t = trends(conflictingInput);
+  assert.equal(t.trend.direction, "unknown");
+  assert.doesNotMatch(t.trend.summary, /\b(improved|better|faster)\b/i);
+  assert.match(t.trend.summary, /disagree/);
+  // Both metrics named, described by their own raw movement, not a verdict.
+  assert.match(t.trend.summary, /context pressure/i);
+  assert.match(t.trend.summary, /cache reuse/i);
+});
+
+test("flat and both kinds of insufficient-evidence summary are distinguishable, never each other", () => {
+  const flatSummary = trends(stableInput).trend.summary;
+  const sparseSummary = trends(sparseInput).trend.summary;
+  const emptySummary = trends(EMPTY_INPUT).trend.summary;
+  const incompleteSummary = trends(cacheOnlyFlatInput).trend.summary;
+
+  // "nothing changed" (flat) is never the same sentence as "we could not
+  // tell" (insufficient data), even though both may be reachable from a
+  // trend.direction of "stable"/"unknown" respectively.
+  assert.notEqual(flatSummary, sparseSummary);
+  assert.notEqual(flatSummary, incompleteSummary);
+  // The two ways of having "not enough data" read the same when NOTHING at
+  // all could be measured (sparse vs. empty), but both differ from the case
+  // where the SECONDARY metric was measured and flat while the primary was
+  // the only thing missing.
+  assert.equal(sparseSummary, emptySummary);
+  assert.notEqual(sparseSummary, incompleteSummary);
+  assert.match(flatSummary, /held steady/);
+  assert.match(sparseSummary, /not enough measured days/i);
+  assert.match(incompleteSummary, /held steady/);
+  assert.match(incompleteSummary, /not enough data/i);
+});
+
+test("a single-direction summary that rests on one metric alone says so", () => {
+  const t = trends(cacheOnlyDecliningInput);
+  assert.equal(t.trend.direction, "declining");
+  assert.match(t.trend.summary, /cache reuse/i);
+  assert.match(t.trend.summary, /declined/i);
+  assert.match(t.trend.summary, /not enough data on context pressure/i);
+});
+
+// --------------------------------------------------------------------------
 // input shapes, filtering, determinism
 // --------------------------------------------------------------------------
 

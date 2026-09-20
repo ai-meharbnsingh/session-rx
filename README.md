@@ -19,7 +19,7 @@ checks against each recent session, and offers a local fix for the ones that
 fail. The six checks are context pressure, cache hit rate, repeated tool work,
 large tool results, long rising context, and sub-agent concurrency.
 
-![The Health page: one card per session, one line per check](docs/assets/screenshot-health.png)
+![The Health page: summary counts, Review fixes button, compact cards with plain-English verdicts and collapsed evidence](docs/assets/screenshot-health.png)
 
 ### Every check returns one of three answers
 

@@ -579,11 +579,20 @@ test("the app boots in process, registers all four routes, and renders real DOM"
       // An unknown verdict, with its reason, is visible on a real boot.
       assert.match(rendered, /This is NOT a pass — the check could not run here/);
       assert.match(rendered, /no sub-agent marker/);
-      // And the observed finding offers the three actions.
+      // And the observed finding offers the three per-fix actions, plus
+      // "Review fixes" — a prominent summary action the product owner asked
+      // for at the top of the Health page (UX wave); it is additive, not a
+      // replacement for Apply/Preview/Skip below.
       const buttons = nodesOf(mount)
         .filter((node) => node.tagName === "BUTTON")
         .map((node) => node.textContent.trim());
-      assert.deepEqual([...buttons].sort(), ["Apply", "Preview", "Skip"]);
+      assert.deepEqual([...buttons].sort(), ["Apply", "Preview", "Review fixes", "Skip"]);
+      // Each per-fix action asserted independently: a future removal of any
+      // ONE of these must fail loudly here even if the overall label set
+      // changes again (e.g. another summary action joins it later).
+      assert.ok(buttons.includes("Preview"), "the Preview action survives");
+      assert.ok(buttons.includes("Apply"), "the Apply action survives");
+      assert.ok(buttons.includes("Skip"), "the Skip action survives");
 
       // The shell's own regions were filled by app.js, not left on their
       // placeholder text.

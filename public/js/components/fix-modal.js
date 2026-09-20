@@ -32,6 +32,19 @@
  *
  * 5. MUTATIONS GO THROUGH app.js's `api.post`, which attaches the startup
  *    X-CSRF-Token (BP-005.13). This module never calls `fetch` itself.
+ *
+ * 6. LIMITATIONS ARE STATED, NOT BURIED. Every writable fix here is one thing:
+ *    an instruction appended or merged into a config file the AGENT reads.
+ *    That is guidance, not an enforced constraint — writing it does not prove
+ *    the agent's behaviour changes, and nothing here checks compliance after
+ *    the fact. The "Limitations" callout says this plainly, before the diff,
+ *    on both Preview and Applied, because overselling a fix that might do
+ *    nothing is worse than not fixing it. Alongside it: an explicit
+ *    "expected effect" (the engine's `rationale` — why this section exists —
+ *    read from `preview()`/`GET /api/fixes` and rendered honestly absent when
+ *    neither has one), and a call-out when a target does not exist yet
+ *    (`targets[].created`, or the `--- /dev/null` convention in the raw diff
+ *    text as a fallback) so a newly-created file is never a surprise.
  */
 
 import { api as appApi } from "../app.js";
@@ -166,20 +179,142 @@ function factRow(label, valueNode) {
   return cell;
 }
 
-function fileList(files) {
+/**
+ * The home-relative `~/...` spelling of an absolute target path — matching
+ * what the diff header and the "does not exist yet" notice already show.
+ * `files_affected` always comes back absolute from the engine; showing that
+ * raw form next to a `~/...` diff header in the same panel reads as two
+ * different files, not one.
+ *
+ * Preferred source: `targets[].display`, exact because the engine set it
+ * from the real home directory. Fallback, for a payload that carries
+ * `files_affected` and a `diff` but no `targets` at all (an `apply()`
+ * response, or a minimal caller/double): read the `~/...` form straight off
+ * the diff's own `---`/`+++` lines and accept it only if it is a genuine
+ * suffix of the absolute path. No match either way -> shown unchanged;
+ * never a guessed or fabricated path.
+ */
+function displayFor(absolute, payload) {
+  const targets = Array.isArray(payload?.targets) ? payload.targets : [];
+  const matched = targets.find((target) => str(target?.path) === absolute);
+  const fromTarget = str(matched?.display);
+  if (fromTarget) return fromTarget;
+
+  const diff = str(payload?.diff);
+  const tildePaths = [...diff.matchAll(/^(?:---|\+\+\+) (~\/\S.*)$/gm)].map((match) => match[1].trim());
+  const home = tildePaths.find((tilde) => tilde.length > 2 && absolute.endsWith(tilde.slice(2)));
+  return home || absolute;
+}
+
+/**
+ * Renders `files` as the `~/...` form `displayFor` resolves, plus a
+ * `.callout-detail` line naming the absolute path for any entry whose
+ * display was abbreviated — `.file-list li` is single-line and ellipsised
+ * (see its own rule below), so the full path goes below the list rather
+ * than inside it, and stays reachable (also as the `<li>`'s `title`)
+ * instead of being hidden.
+ */
+function fileList(files, payload) {
   const paths = Array.isArray(files) ? files.filter((path) => typeof path === "string" && path) : [];
   if (!paths.length) {
     const empty = el("p", "not-measured");
     empty.append(el("span", "dash", "—"), document.createTextNode(" no files reported"));
-    return empty;
+    return [empty];
   }
   const list = el("ul", "file-list");
+  const hints = [];
   paths.forEach((path) => {
-    const item = el("li", null, path);
+    const display = displayFor(path, payload);
+    const item = el("li", null, display);
     item.title = path;
     list.append(item);
+    if (display !== path) hints.push(el("p", "callout-detail", `${display} is the full path ${path}`));
   });
-  return list;
+  return [list, ...hints];
+}
+
+/**
+ * "This is guidance, not a guarantee" — shown on every writable fix, first,
+ * before any diff. `kind` comes from the payload the caller has in hand
+ * (`preview.kind`); a `recommendation` fix writes nothing, so it gets the
+ * narrower, honest claim instead of the write-specific one.
+ */
+function limitationsCallout(kind) {
+  if (kind === "recommendation") {
+    return callout(
+      "warn",
+      "Limitations",
+      "This is a suggestion, not something SessionRx writes anywhere: nothing changes on disk, "
+      + "and nothing here checks whether the habit is actually followed.",
+    );
+  }
+  return callout(
+    "warn",
+    "Limitations",
+    "This writes an instruction into a config file the AGENT reads as guidance, not an enforced "
+    + "constraint. Adding it does not guarantee the agent's behaviour changes — nothing checks "
+    + "compliance after the fact, and the agent can still repeat what this was meant to stop. "
+    + "Treat Apply as worth trying, not as a verified fix.",
+  );
+}
+
+/** An ALREADY_APPLIED refusal is a healthy state, not a failure — render it that way. */
+function alreadyAppliedCallout(error) {
+  const message = str(error?.message) || "This fix is already in place.";
+  return callout(
+    "ok",
+    "Already applied",
+    message,
+    { detail: "Nothing was written. This fix is not offered again while it is in place — Undo removes it." },
+  );
+}
+
+/**
+ * Targets the engine reports as about to be CREATED, by name.
+ *
+ * Primary source: `targets[].created` (BP-004.11) — set by `preview()`/
+ * `apply()` from the actual file-existence check, so it is exact. Fallback:
+ * the diff's own `--- /dev/null` convention (git's for "no prior file"),
+ * read straight off `diff` text, for a payload that carries a diff but no
+ * `targets` array (e.g. an `apply()` response, or a minimal test double).
+ */
+function targetsBeingCreated(payload) {
+  const targets = Array.isArray(payload?.targets) ? payload.targets : [];
+  const named = targets
+    .filter((target) => target?.created === true)
+    .map((target) => str(target?.display) || str(target?.path))
+    .filter(Boolean);
+  if (named.length) return named;
+  const diff = str(payload?.diff);
+  if (!/^--- \/dev\/null$/m.test(diff)) return [];
+  const match = diff.match(/^\+\+\+ (.+)$/m);
+  return [match ? match[1].trim() : "the target file"];
+}
+
+/** Per-target detail of exactly what would be written — bytes appended, keys added. */
+function targetNotes(preview) {
+  const targets = Array.isArray(preview?.targets) ? preview.targets : [];
+  return targets
+    .map((target) => {
+      const label = str(target?.display) || str(target?.path);
+      const note = str(target?.note);
+      return label && note ? `${label}: ${note}` : "";
+    })
+    .filter(Boolean);
+}
+
+/** "expected effect" — the engine's `rationale`, or an honest admission it has none. */
+function effectSection(rationale) {
+  const section = el("div", "modal-section");
+  section.append(el("h4", null, "expected effect"));
+  if (rationale) {
+    section.append(el("p", null, rationale));
+  } else {
+    const notStated = el("p", "not-measured");
+    notStated.append(el("span", "dash", "—"), document.createTextNode(" the engine did not report an expected effect for this fix"));
+    section.append(notStated);
+  }
+  return section;
 }
 
 /** The engine's error, verbatim, plus optional guidance keyed off its code. */
@@ -251,6 +386,11 @@ export function openFixModal(fixId, options = {}) {
     busy: false,
     closed: false,
     undoPath: null,
+    // The catalogue entry (GET /api/fixes) for this fix id, carrying
+    // `rationale` — the "expected effect" text — for the writable fix kinds
+    // whose own preview()/apply() payload does not include it. Best-effort:
+    // stays null if the fetch fails, and the UI says so rather than guessing.
+    catalogEntry: null,
   };
 
   // ---- chrome
@@ -371,9 +511,25 @@ export function openFixModal(fixId, options = {}) {
   function renderPreview(preview) {
     const sections = [];
 
+    // Prominent and first: what this can and cannot promise, before a single
+    // byte of diff. See header comment point 6.
+    sections.push(limitationsCallout(str(preview?.kind)));
+
+    const creating = targetsBeingCreated(preview);
+    if (creating.length) {
+      sections.push(callout(
+        "info",
+        creating.length > 1 ? "These files do not exist yet" : "This file does not exist yet",
+        `SessionRx will CREATE ${creating.join(", ")}. This is a new file, not an edit to `
+        + "something already there — check the path above is the one you expect.",
+      ));
+    }
+
     if (str(preview?.description)) {
       sections.push(el("p", null, preview.description));
     }
+
+    sections.push(effectSection(str(preview?.rationale) || str(state.catalogEntry?.rationale)));
 
     const facts = el("dl", "modal-facts");
     facts.append(factRow(
@@ -395,7 +551,11 @@ export function openFixModal(fixId, options = {}) {
 
     const filesSection = el("div", "modal-section");
     filesSection.append(el("h4", null, "files affected"));
-    filesSection.append(fileList(preview?.files_affected));
+    filesSection.append(...fileList(preview?.files_affected, preview));
+    // Exactly what would be written per target — bytes appended, keys added —
+    // as `.callout-detail` text (wraps), never inside `.file-list li` (which
+    // is single-line, ellipsised, and would clip anything longer than a path).
+    targetNotes(preview).forEach((note) => filesSection.append(el("p", "callout-detail", note)));
     sections.push(filesSection);
 
     if (preview?.sensitive === true) {
@@ -403,8 +563,8 @@ export function openFixModal(fixId, options = {}) {
         "warn",
         "This diff contains your own configuration",
         "The context lines around the change are bytes from your own file, which can "
-        + "include token-shaped values. It is shown byte-for-byte because the diff must "
-        + "equal what Apply writes (BP-004.06) — read it before sharing a screenshot.",
+        + "include token-shaped values. It is shown exactly as written because the preview "
+        + "must equal what Apply writes, byte for byte — read it before sharing a screenshot.",
       ));
     }
 
@@ -439,8 +599,20 @@ export function openFixModal(fixId, options = {}) {
       + "changed since.",
       { code: str(applied?.undoPath) ? `undo record: ${applied.undoPath}` : "" },
     ));
+    // The promise made before Apply still holds after it: this is guidance
+    // written into a config file, not a verified behaviour change.
+    sections.push(limitationsCallout(str(applied?.kind)));
+    const created = targetsBeingCreated(applied);
+    if (created.length) {
+      sections.push(callout(
+        "info",
+        created.length > 1 ? "These files were created" : "This file was created",
+        `SessionRx created ${created.join(", ")} — it did not exist before this Apply.`,
+      ));
+    }
+    sections.push(effectSection(str(applied?.rationale) || str(state.catalogEntry?.rationale)));
     const filesSection = el("div", "modal-section");
-    filesSection.append(el("h4", null, "files written"), fileList(applied?.files_affected));
+    filesSection.append(el("h4", null, "files written"), ...fileList(applied?.files_affected, applied));
     sections.push(filesSection);
     const diffSection = el("div", "modal-section");
     diffSection.append(el("h4", null, "diff written"), renderDiff(applied?.diff));
@@ -471,6 +643,23 @@ export function openFixModal(fixId, options = {}) {
     return true;
   }
 
+  /**
+   * `GET /api/fixes` for this fix's `rationale` (BP-005.20's shipped shape,
+   * not its stale blueprint row) — the "expected effect" text that
+   * `preview()`/`apply()` do not carry for a writable fix. Runs alongside
+   * `loadCheck()`, never blocks it, and leaves `catalogEntry` null on any
+   * failure: this is a nicety, not a precondition for Preview/Apply/Undo.
+   */
+  async function loadCatalog() {
+    try {
+      const listing = await api.get("/api/fixes");
+      const entries = Array.isArray(listing?.fixes) ? listing.fixes : [];
+      state.catalogEntry = entries.find((entry) => str(entry?.id) === id) || null;
+    } catch {
+      state.catalogEntry = null;
+    }
+  }
+
   async function loadPreview() {
     setBusy(true, "Generating the exact diff Apply would write…");
     try {
@@ -481,6 +670,12 @@ export function openFixModal(fixId, options = {}) {
     } catch (error) {
       state.preview = null;
       setBusy(false);
+      if (classifyError(error) === "ALREADY_APPLIED") {
+        // A race with another tab/apply since loadCheck() ran: not a failure.
+        state.checked = { ...(state.checked || {}), applied: true };
+        show([alreadyAppliedCallout(error)]);
+        return;
+      }
       show([renderCheckState(state.checked), errorCallout(error, "Preview")]);
       return;
     }
@@ -500,6 +695,12 @@ export function openFixModal(fixId, options = {}) {
     } catch (error) {
       state.applied = null;
       setBusy(false);
+      if (classifyError(error) === "ALREADY_APPLIED") {
+        // Another tab applied it between Preview and this click: not a failure.
+        state.checked = { ...(state.checked || {}), applied: true };
+        show([alreadyAppliedCallout(error)]);
+        return;
+      }
       show([errorCallout(error, "Apply"), ...(state.preview ? renderPreview(state.preview) : [])]);
       return;
     }
@@ -517,7 +718,12 @@ export function openFixModal(fixId, options = {}) {
       state.applied = null;
       state.preview = null;
       state.undoPath = null;
-      setBusy(false);
+      // Refresh applied-status BEFORE rendering the confirmation: loadCheck()
+      // runs its own busy spinner (setBusy(true, "Checking…") replaces body),
+      // and only re-renders on failure — calling it after `show()` would
+      // silently clobber the "Undone" message with that spinner and never
+      // put the message back. `show()` below is what must render last.
+      await loadCheck();
       show([callout(
         "ok",
         "Undone",
@@ -528,8 +734,6 @@ export function openFixModal(fixId, options = {}) {
       )]);
       if (typeof opts.onUndone === "function") opts.onUndone(restored, id);
       settled({ phase: "undo", result: restored, fixId: id });
-      await loadCheck();
-      syncActions();
     } catch (error) {
       setBusy(false);
       show([errorCallout(error, "Undo")]);
@@ -554,7 +758,7 @@ export function openFixModal(fixId, options = {}) {
       show([callout("error", "No fix id", "The modal was opened without a fix id, so there is nothing to preview.")]);
       return;
     }
-    const ok = await loadCheck();
+    const [ok] = await Promise.all([loadCheck(), loadCatalog()]);
     if (!ok || state.closed) return;
     if (state.checked?.applied === true) {
       // Previewing here would throw ALREADY_APPLIED and read as a failure.

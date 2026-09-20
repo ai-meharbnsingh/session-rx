@@ -18,7 +18,11 @@
  *   - the number of turns excluded from G1 for having no computable fraction is
  *     printed next to G1, so its denominator is visibly honest;
  *   - `trend.direction === 'unknown'` renders as its own third state with the
- *     analyzer's `reason`, never as "stable".
+ *     analyzer's `reason`, never as "stable";
+ *   - the verdict's plain-language lead is `trend.summary`, written once by
+ *     `src/analyzer/trends.js` and rendered here VERBATIM — this file keeps
+ *     no second copy of that wording (BP-005.19; F-021 is what happens when a
+ *     page keeps its own catalogue of analyzer text instead).
  *
  * Charts are drawn by wave 5C's wrapper (BP-001.30), which owns the vendored
  * Chart.js instance.  Every chart ALSO ships a `<details>` data table built
@@ -294,7 +298,7 @@ function contextChart(trends) {
     `${groupInt(excludedFraction)} turn${excludedFraction === 1 ? '' : 's'} measured context the window could not divide, `
     + `and ${groupInt(excludedNoContext)} reported no context at all. `
     + `All of them are excluded from BOTH sides of the "above ${threshold}%" ratio — not counted as low — so the `
-    + 'denominator is only the turns that actually had a computable fraction.';
+    + 'percentage is worked out only from the turns that did have a share we could compute.';
 
   return chartCard({
     id: 'g1-context',
@@ -620,24 +624,42 @@ function heatmapCard(trends) {
 // ---------------------------------------------------------------------------
 
 /**
- * The one verdict the page states, with its reason.  `unknown` is a third
- * state here as much as it is on a rule: it renders as `.callout-unknown`, it
- * says it is not "stable", and it carries the analyzer's reason verbatim.
+ * The one verdict the page states.  `unknown` is a third state here as much
+ * as it is on a rule: it renders as `.callout-unknown`, it says it is not
+ * "stable", and its statistical detail carries the analyzer's reason
+ * verbatim.
+ *
+ * The lead is `trend.summary` — one plain-English sentence written by
+ * `src/analyzer/trends.js`, next to the verdict it describes.  This page
+ * renders it as-is and builds NO second copy of the wording: BP-005.19
+ * records what happened the last time a page kept its own catalogue of
+ * analyzer text (F-021), and the fix there is the rule here too. Everything
+ * that follows — the direction badge, the analyzer's own `reason`, and the
+ * per-metric table — is the statistical evidence FOR that sentence, kept
+ * available but out of the way in a native `<details>`.
  */
 function verdictCard(trends) {
   const trend = trends?.trend ?? {};
   const direction = typeof trend?.direction === 'string' ? trend.direction : 'unknown';
   const kind = DIRECTION_KIND[direction] ?? 'unknown';
+  const summary =
+    typeof trend?.summary === 'string' && trend.summary.trim()
+      ? trend.summary.trim()
+      : 'The analyzer recorded no plain-language summary for this window.';
 
   const card = el('section', 'card card-pad');
   card.dataset.direction = direction;
   card.append(el('div', 'section-kicker', 'Verdict'));
+  card.append(callout(kind, summary));
+
+  const details = el('details', 'verdict-statistical-detail');
+  details.append(el('summary', null, 'Show the statistical detail'));
 
   const headline =
     direction === 'unknown'
       ? 'Direction could not be determined — this is NOT "stable"'
       : `Direction: ${direction}`;
-  card.append(
+  details.append(
     callout(
       kind,
       headline,
@@ -678,7 +700,7 @@ function verdictCard(trends) {
       tr.append(el('td', null, assessment?.detail ?? ''));
       return tr;
     });
-    card.append(
+    details.append(
       dataTable(
         [
           { label: 'Metric' },
@@ -693,6 +715,7 @@ function verdictCard(trends) {
       ),
     );
   }
+  card.append(details);
   return card;
 }
 

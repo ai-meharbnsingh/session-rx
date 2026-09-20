@@ -79,6 +79,17 @@ export const MATERIALITY_POINTS = 1;
 const CONTEXT_METRIC = "turns above 70% of window";
 const CACHE_METRIC = "cache hit rate";
 
+// Plain-English names and verbs for `buildSummary` below. Wording only — they
+// do not feed the statistics, the thresholds, or `direction` itself.
+const PLAIN_METRIC_NAME = Object.freeze({
+  [CONTEXT_METRIC]: "context pressure",
+  [CACHE_METRIC]: "cache reuse",
+});
+const METRIC_VERB = Object.freeze({
+  [CONTEXT_METRIC]: { improving: "eased", declining: "worsened" },
+  [CACHE_METRIC]: { improving: "improved", declining: "declined" },
+});
+
 // --------------------------------------------------------------------------
 // small numeric helpers — every one of them treats absence as absence
 // --------------------------------------------------------------------------
@@ -557,17 +568,17 @@ function assessMetric({ label, values, betterWhen, unit, windowSource }) {
   const from = mean(earlier);
   const to = mean(later);
   const diff = to - from;
-  const magnitude = Math.abs(diff);
+  const shiftPoints = Math.abs(diff);
   const standardError = Math.sqrt(variance(earlier) / earlier.length + variance(later) / later.length);
-  const material = magnitude >= MATERIALITY_POINTS;
-  const aboveNoise = magnitude > standardError;
+  const material = shiftPoints >= MATERIALITY_POINTS;
+  const aboveNoise = shiftPoints > standardError;
   const moved = material && aboveNoise;
   const better = betterWhen === "lower" ? diff < 0 : diff > 0;
   const direction = moved ? (better ? "improving" : "declining") : "flat";
   const movement = `${round(from, 2)} -> ${round(to, 2)} ${unit ?? ""}`.trim();
   const detail = moved
-    ? `${label} moved ${movement} across the window's two halves (${earlier.length} measured days each; the ${round(magnitude, 2)}-point shift clears both the ${MATERIALITY_POINTS}-point materiality floor and the ${round(standardError, 2)}-point day-to-day standard error)`
-    : `${label} held steady (${movement}; the ${round(magnitude, 2)}-point shift does not clear ${!material ? `the ${MATERIALITY_POINTS}-point materiality floor` : `the ${round(standardError, 2)}-point day-to-day standard error`})`;
+    ? `${label} moved ${movement} across the window's two halves (${earlier.length} measured days each; the ${round(shiftPoints, 2)}-point shift clears both the ${MATERIALITY_POINTS}-point materiality floor and the ${round(standardError, 2)}-point day-to-day standard error)`
+    : `${label} held steady (${movement}; the ${round(shiftPoints, 2)}-point shift does not clear ${!material ? `the ${MATERIALITY_POINTS}-point materiality floor` : `the ${round(standardError, 2)}-point day-to-day standard error`})`;
   return {
     ...base,
     decidable: true,
@@ -586,6 +597,83 @@ function assessMetric({ label, values, betterWhen, unit, windowSource }) {
 
 function seriesValues(rows, key) {
   return rows.map((row) => row[key]).filter(finite);
+}
+
+// --------------------------------------------------------------------------
+// plain-English verdict sentence — the ONE copy of this wording (BP-005.19:
+// a page that keeps its own copy of analyzer text is how F-021 happened).
+// `public/js/pages/trends.js` renders `trend.summary` verbatim; it must not
+// reconstruct or duplicate it from `direction` on its own.
+// --------------------------------------------------------------------------
+
+function plainName(label) {
+  return PLAIN_METRIC_NAME[label] ?? label;
+}
+
+/** The metric's OWN raw movement — "rose" or "fell" — never a judgement of
+ * whether that movement was good or bad for this particular metric. Used only
+ * where two metrics disagree, so neither clause can be read as a claim. */
+function plainMovement(assessment) {
+  return finite(assessment.diff) && assessment.diff > 0 ? "rose" : "fell";
+}
+
+/** The metric's better/worse verb for a direction both metrics agree on. */
+function verbFor(label, direction) {
+  return METRIC_VERB[label]?.[direction] ?? (direction === "improving" ? "improved" : "declined");
+}
+
+function capitalize(value) {
+  return typeof value === "string" && value.length > 0 ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function joinAnd(list, sep = " and ") {
+  if (list.length === 0) return "";
+  if (list.length === 1) return list[0];
+  return `${list.slice(0, -1).join(", ")}${sep}${list[list.length - 1]}`;
+}
+
+/**
+ * ONE plain-language sentence for `trend.direction`, built from the SAME
+ * assessments `buildDirection` already computed — no new statistic, no new
+ * threshold, no change to `direction` itself.  Each branch below mirrors the
+ * matching branch in `buildDirection`:
+ *
+ *  - EMPTY (`decidable.length === 0`): the only sentence with nothing to
+ *    describe — "not enough data", not "flat".
+ *  - MIXED (two metrics disagree): describes each metric's raw movement
+ *    (rose/fell), never "improved"/"declined", and explicitly refuses to
+ *    claim an overall change. This is the sentence that must never read as a
+ *    confirmed improvement.
+ *  - SINGLE DIRECTION (both agree, or only one could be measured): names
+ *    what moved and how, using that metric's own sense of better/worse, and
+ *    flags it when the primary metric could not weigh in.
+ *  - FLAT (primary decidable, nothing moved): a plain "held steady".
+ *  - FLAT-BUT-INCOMPLETE (nothing moved among what COULD be measured, but the
+ *    primary metric could not be): distinct from both FLAT and EMPTY — it
+ *    names what did hold steady and says that is not a clean bill of health.
+ */
+function buildSummary({ decidable, moving, flat, primary, directions }) {
+  if (decidable.length === 0) {
+    return "Not enough measured days this window to tell whether efficiency moved in either direction.";
+  }
+  if (directions.size > 1) {
+    const clauses = moving.map((a) => `${plainName(a.label)} ${plainMovement(a)}`);
+    return `${capitalize(joinAnd(clauses, ", while "))}. The two signals disagree, so no overall efficiency change is confirmed.`;
+  }
+  if (directions.size === 1) {
+    const [direction] = directions;
+    const clauses = moving.map((a) => `${plainName(a.label)} ${verbFor(a.label, direction)}`);
+    let sentence = `${capitalize(joinAnd(clauses))} this window.`;
+    if (!primary.decidable) {
+      sentence += ` There was not enough data on ${plainName(primary.label)} — the primary signal — to weigh in directly.`;
+    }
+    return sentence;
+  }
+  if (primary.decidable) {
+    return "No metric moved enough this window to call it a change — efficiency held steady.";
+  }
+  const steady = flat.map((a) => plainName(a.label));
+  return `${capitalize(joinAnd(steady))} held steady, but there was not enough data on ${plainName(primary.label)} — the primary signal — to call the window stable overall.`;
 }
 
 /**
@@ -676,7 +764,8 @@ function buildDirection({ context, cache, fractionWindowSources }) {
     parts.push(...flat.map((a) => a.detail));
   }
   parts.push(...undecided.map((a) => a.detail));
-  return { direction, reason: parts.join("; "), metrics, assessments };
+  const summary = buildSummary({ decidable, moving, flat, primary, directions });
+  return { direction, reason: parts.join("; "), summary, metrics, assessments };
 }
 
 // --------------------------------------------------------------------------
@@ -702,7 +791,7 @@ function buildUnknowns(dayKeys, buckets, excluded, missingFractionBySource) {
     unknowns.push({
       code: "turns-without-computable-fraction",
       count: excluded.turnsWithoutComputableFraction,
-      detail: `excluded from the "% of turns above 70% of window" numerator AND denominator because no honest fraction exists for them (${breakdown}); an observed-floor window yields floor/floor = 1.0 by construction, which is an artifact and not a measurement (F-014)`,
+      detail: `excluded from BOTH sides of the "% of turns above 70% of window" figure — not counted as low — because no honest share exists for them (${breakdown}); when the window is only a lower bound, dividing it by itself gives 1.0 every time, which is an artifact and not a measurement`,
     });
   }
   if (excluded.turnsWithoutContextReading > 0) {
@@ -716,7 +805,7 @@ function buildUnknowns(dayKeys, buckets, excluded, missingFractionBySource) {
     unknowns.push({
       code: "turns-with-impossible-fraction",
       count: excluded.turnsWithImpossibleFraction,
-      detail: "reported a context fraction above 1.0, which is a window-table defect and not a reading (F-008); excluded rather than counted as high context",
+      detail: "reported a context share above 1.0 — more context than its whole window holds — which means our table of model sizes is wrong for that model, not that the session really did that; excluded rather than counted as high context",
     });
   }
   if (excluded.turnsWithoutTimestamp > 0) {

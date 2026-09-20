@@ -3,9 +3,16 @@
  *
  * Every rule is an object carrying its own threshold, the WORDS that explain
  * how that threshold was chosen (the UI displays the derivation, so a bare
- * `0.70` is not an answer), its severity, its fix id, and an `evaluate`
- * function.  `evaluateRule` wraps a rule's raw verdict into the `RuleResult`
- * shape that `src/report/generator.js` consumes.
+ * `0.70` is not an answer), its severity, its fix id, a `plain` block in
+ * ordinary English (BP-005.19-style: one catalogue, so the health page renders
+ * this text rather than keeping a second copy of it), and an `evaluate`
+ * function.  The `plain` block has three parts: `problem` and `why` for a
+ * finding, and `unmeasured` — a MAP from reason class to sentence — for a check
+ * that could not run.  It is a map, not one string, because a rule goes
+ * unmeasured for several different causes and one sentence would be false for
+ * the others; `evaluate` names the cause it hit as `reasonCode`, which travels
+ * beside the prose `reason` and is what the page looks the sentence up by.  `evaluateRule` wraps a rule's raw verdict into the
+ * `RuleResult` shape that `src/report/generator.js` consumes.
  *
  * THE HONESTY CONTRACT — the reason this module exists
  * ----------------------------------------------------
@@ -127,9 +134,26 @@ function notObserved(values, derivation, magnitude = null) {
   return { status: "not-observed", reason: null, values, derivation, magnitude };
 }
 
-function unknown(reason, values = [], derivation = null) {
-  return { status: "unknown", reason, values, derivation, magnitude: null };
+/**
+ * `reason` is the prose evidence of record and is never reworded to suit a
+ * renderer.  `reasonCode` travels BESIDE it as a stable class name for the
+ * SAME cause, so the health page can look up a plain-English sentence for it
+ * (`plain.unmeasured[reasonCode]`) without parsing the prose.  A cause with no
+ * class of its own is `"default"`, which every rule's catalogue answers.
+ */
+function unknown(reason, values = [], reasonCode = "default", derivation = null) {
+  return { status: "unknown", reason, reasonCode, values, derivation, magnitude: null };
 }
+
+/**
+ * Unmeasured causes that belong to no single rule, spread into every rule's
+ * `plain.unmeasured` so the lookup never falls through to a sentence about
+ * something else.  `rule-threw` is raised by `evaluateRule`, not by a rule.
+ */
+const SHARED_UNMEASURED = Object.freeze({
+  "rule-threw":
+    "This check itself stopped part-way through and never reached an answer about this session. A check that failed to finish is reported as unmeasured, never as a pass.",
+});
 
 /** `count` sessions/turns/whatever as an evidence row. */
 function countValue(label, value) {
@@ -182,6 +206,7 @@ function windowDenominator(session, ctx) {
       usable: false,
       source,
       tokens,
+      code: "window-is-observed-peak",
       reason:
         `the window for this session is not a measured window: no model-id table entry matched ${str(session?.model) || "this model"}, ` +
         `so the only evidence available is the session's own observed peak (${tokens === null ? "unknown" : `at least ${tokens.toLocaleString("en-US")} tokens`}). ` +
@@ -193,6 +218,7 @@ function windowDenominator(session, ctx) {
       usable: false,
       source,
       tokens,
+      code: "window-above-known-tiers",
       reason:
         "this session's observed peak exceeds every window tier known to the model table, so the window was set to the observed peak itself rather than to a real vendor tier " +
         "(promotion ladder `none`). The denominator is therefore the numerator again and BP-002.18 applies exactly as it does to `observed-floor`.",
@@ -203,6 +229,7 @@ function windowDenominator(session, ctx) {
       usable: false,
       source,
       tokens: null,
+      code: "window-size-unknown",
       reason: `no absolute context window is known for this session (window.source "${source}", window.tokens ${tokens === null ? "null" : tokens}).`,
     };
   }
@@ -211,10 +238,11 @@ function windowDenominator(session, ctx) {
       usable: false,
       source,
       tokens,
+      code: "window-source-unsupported",
       reason: `window.source "${source}" is not one of the sources BP-002.11-BP-002.14 permit a threshold verdict from.`,
     };
   }
-  return { usable: true, source, tokens };
+  return { usable: true, source, tokens, code: null };
 }
 
 const contextPressure = {
@@ -231,9 +259,42 @@ const contextPressure = {
   },
   severity: "warn",
   fix: "claude-auto-compact",
+  // BP-005.19-style single catalogue, now for wording: the plain-language text
+  // lives HERE, not in public/js/pages/health.js, so there is one place that
+  // knows what this rule means in words. `{pct}`/`{count}` are the only
+  // tokens the page substitutes, filled from this RuleResult's own
+  // `magnitude` — never a number invented on the client.
+  plain: {
+    problem:
+      "Your AI's context has been averaging {pct} of its available window in this session. When context runs this high, older parts of the conversation are more likely to get pushed out, summarized, or dropped before they should be.",
+    why:
+      "This is a warning about headroom, not proof that anything went wrong — a big task can legitimately use a lot of context. It flags sessions where compacting the conversation, or splitting the task into smaller pieces, would likely help.",
+    // One sentence per CAUSE, because this rule goes unmeasured for several
+    // different reasons and a single sentence would be false for the others.
+    // The renderer picks by `evidence.reasonCode` and falls back to `default`.
+    unmeasured: {
+      ...SHARED_UNMEASURED,
+      default:
+        "There was no honest way to express this session's context as a share of the window it had, so how close it ran to its limit is not known. That is an open question about this session, not a clean result.",
+      "no-turns":
+        "This tool saved no per-turn record for the session, so nothing says how much context any turn was carrying. The context question stays open — it is not answered in the session's favour.",
+      "no-context-readings":
+        "The size of this session's window is known, but not one of its turns recorded how much context it was actually holding, so there is no number to compare against that window. A tool that reports context usage turn by turn would make this measurable.",
+      "native-fraction-out-of-range":
+        "The only context figure this tool reported is not on a nought-to-one scale, so it cannot be read as a share of the window, and rescaling it would mean guessing what it counts. The reading is left alone rather than bent into an answer, which leaves the question of how full this session ran open.",
+      "window-is-observed-peak":
+        "No published window size was found for the model this session ran on, so the largest amount of context it was seen holding is all there is to go on. Comparing that peak against itself would say \"100% of the window\" for every session, large or small, so no share is worked out at all. Adding this model to the built-in table of window sizes would make it measurable.",
+      "window-above-known-tiers":
+        "This session held more context than any window size known for its model, so the largest amount it was seen holding had to stand in for the window itself. That makes the comparison a number divided by itself, which would read as completely full for every such session, so no share is worked out. An up-to-date window size for this model would make it measurable.",
+      "window-size-unknown":
+        "Nothing recorded for this session says how large its context window was, and the tool reported no share of its own either, so there is no way to say how full it ran. A recorded window size, or a share the tool reports itself, would make this measurable.",
+      "window-source-unsupported":
+        "The window size on record for this session came from a source that is not trusted to carry a threshold judgement, so it is not used as the basis for one. Until the window is read from the tool itself, or matched to a published size for the model, how full this session ran stays unknown.",
+    },
+  },
   evaluate(session, ctx) {
     const turns = turnsOf(session);
-    if (!turns.length) return unknown(noTurnsReason(session));
+    if (!turns.length) return unknown(noTurnsReason(session), [], "no-turns");
 
     const sessionId = str(session?.sessionId) || null;
     const tokenReadings = [];
@@ -253,6 +314,7 @@ const contextPressure = {
         return unknown(
           `the window is known (${denominator.tokens.toLocaleString("en-US")} tokens, source "${denominator.source}") but not one turn in this session carried a context reading, so there is no numerator.`,
           [{ label: "context window", value: denominator.tokens, unit: "tokens", windowSource: denominator.source, sessionId }],
+          "no-context-readings",
         );
       }
       const avg = mean(tokenReadings);
@@ -283,6 +345,7 @@ const contextPressure = {
         return unknown(
           `this CLI's own context fraction reads ${round(peak)} — above 1.0 — so it is not a share of the window on the 0-1 scale this rule compares against. It is neither rescaled nor clamped, because guessing its units would invent the reading. ${denominator.reason}`,
           [{ label: "highest native context fraction reported by the CLI", value: round(peak), unit: "fraction", windowSource: "native", sessionId }],
+          "native-fraction-out-of-range",
         );
       }
       const values = [
@@ -313,6 +376,7 @@ const contextPressure = {
     return unknown(
       `${denominator.reason} This CLI also reported no native context fraction for the session, so there is no honest way to express context as a share of the window.`,
       values,
+      denominator.code ?? "default",
     );
   },
 };
@@ -334,9 +398,30 @@ const cacheHit = {
   },
   severity: "warn",
   fix: "claude-output-hygiene",
+  plain: {
+    problem:
+      "About {pct} of this session's reusable prompt content had to be rebuilt from scratch instead of being read back from cache.",
+    why:
+      "A low cache hit rate usually means the reusable part of the prompt — system instructions, tool descriptions, file contents — kept changing between calls, or caching could not take advantage of a stable prefix. It is not a sign that the task itself was done wrong.",
+    unmeasured: {
+      ...SHARED_UNMEASURED,
+      default:
+        "How much of this session's reusable prompt content was reused rather than rebuilt could not be worked out from what the tool recorded, so whether it kept paying to rebuild the same content is still an open question.",
+      "no-turns":
+        "This tool saved no per-turn record for the session, so nothing says how much prompt content was read back from cache and how much was built again from scratch. The question stays open rather than answered.",
+      "no-cache-counters":
+        "This tool recorded neither how much prompt content was read back from cache nor how much was built fresh, so there is no reuse rate to work out. A figure that was never recorded is not a hit and not a miss. A tool that reports both cache numbers would make this measurable.",
+      "no-cache-creation-counter":
+        "This tool recorded how much prompt content was read back from cache but never how much was built fresh, so there is nothing to compare those reads against. Scoring reads against reads alone would report flawless reuse out of a number that was never recorded, so no rate is given.",
+      "no-cache-read-counter":
+        "This tool recorded how much prompt content was built fresh but never how much was read back from cache, so a reuse rate cannot be formed. Treating the missing reads as zero would flag this session on a number that was never recorded, so no rate is given.",
+      "no-cache-traffic":
+        "Both cache numbers were recorded for this session and both are zero on every turn, so there was no cache activity to rate at all. No cache traffic is not a good cache result and is not scored as one.",
+    },
+  },
   evaluate(session) {
     const turns = turnsOf(session);
-    if (!turns.length) return unknown(noTurnsReason(session));
+    if (!turns.length) return unknown(noTurnsReason(session), [], "no-turns");
     const sessionId = str(session?.sessionId) || null;
 
     let readSum = 0;
@@ -352,18 +437,24 @@ const cacheHit = {
 
     const cli = str(session?.cli) || "this CLI";
     if (!readTurns && !createTurns) {
-      return unknown(`${cli} recorded neither a cache-read nor a cache-creation count for any turn of this session, so a hit rate cannot be formed. An absent counter is not a cache miss and is not a cache hit.`);
+      return unknown(
+        `${cli} recorded neither a cache-read nor a cache-creation count for any turn of this session, so a hit rate cannot be formed. An absent counter is not a cache miss and is not a cache hit.`,
+        [],
+        "no-cache-counters",
+      );
     }
     if (!createTurns) {
       return unknown(
         `${cli} recorded cache READS (${readSum.toLocaleString("en-US")} tokens over ${readTurns} turns) but no cache-CREATION count for any turn. Rating reads against reads alone would report a perfect 1.00 hit rate out of a missing field, which is exactly the false all-clear this rule refuses to produce.`,
         [{ label: "cache reads", value: readSum, unit: "tokens", sessionId }],
+        "no-cache-creation-counter",
       );
     }
     if (!readTurns) {
       return unknown(
         `${cli} recorded cache CREATIONS (${createSum.toLocaleString("en-US")} tokens over ${createTurns} turns) but no cache-read count for any turn. Treating the missing reads as zero would report a 0.00 hit rate and flag the session on a field that was never recorded.`,
         [{ label: "cache creations", value: createSum, unit: "tokens", sessionId }],
+        "no-cache-read-counter",
       );
     }
 
@@ -372,6 +463,7 @@ const cacheHit = {
       return unknown(
         "both cache counters are present and both are zero for every turn, so there is no cache traffic to rate. 0/0 is not a hit rate, and no cache activity is not a cache problem.",
         [countValue("turns carrying cache counters", Math.max(readTurns, createTurns))],
+        "no-cache-traffic",
       );
     }
 
@@ -409,9 +501,28 @@ const repeatTool = {
   },
   severity: "warn",
   fix: "claude-batch-commands",
+  plain: {
+    problem:
+      "Your AI repeated the exact same tool call — same tool, same input, same result — {count} times in this session.",
+    why:
+      "This may indicate wasted work, but repeated calls are not always unnecessary — a command can legitimately return the same answer more than once. This is a DETECTED REPETITION, not CONFIRMED WASTE: it is worth checking whether anything should have changed between those calls before assuming time was lost.",
+    unmeasured: {
+      ...SHARED_UNMEASURED,
+      default:
+        "Whether this session kept redoing the same piece of work could not be worked out from what was recorded, so that question is still open about this session.",
+      "no-turns":
+        "This tool saved no per-turn record for the session, so there is no list of what it did and nothing that could be checked for repeats. That leaves the question open rather than settling it.",
+      "no-tool-calls-anywhere":
+        "No tool call was recorded on any turn of this session, and none was recorded for any other session read from this tool either — so a session that genuinely used no tools and a reader that cannot see tool calls look exactly the same from here. Reading more sessions from this tool settles which it is.",
+      "no-attributable-results":
+        "Tool calls were recorded for this session, but no result could be tied to one specific call: either the size of each result is missing, or several calls share a turn and the single figure recorded for that turn cannot be split between them. The same command with an unknown answer is not proof of a repeat, so nothing is counted rather than counting the commands alone.",
+      "partial-result-coverage":
+        "Nothing repeated often enough to flag among the calls whose results could be matched up, but some calls shared a turn with another and their results cannot be told apart. Those unchecked calls are exactly where a repeat would be hiding, so this is left open rather than reported as clean.",
+    },
+  },
   evaluate(session, ctx) {
     const turns = turnsOf(session);
-    if (!turns.length) return unknown(noTurnsReason(session));
+    if (!turns.length) return unknown(noTurnsReason(session), [], "no-turns");
     const sessionId = str(session?.sessionId) || null;
     const cli = str(session?.cli) || "this CLI";
 
@@ -437,7 +548,7 @@ const repeatTool = {
     }
 
     if (totalCalls === 0) {
-      if (ctx?.toolCallsRecorded !== true) return unknown(zeroToolCallsReason(cli));
+      if (ctx?.toolCallsRecorded !== true) return unknown(zeroToolCallsReason(cli), [], "no-tool-calls-anywhere");
       return notObserved(
         [countValue("tool calls recorded in this session", 0), countValue("turns", turns.length)],
         `${cli} recorded no tool call across ${turns.length} turns of this session, while other sessions collected from ${cli} in this run did carry tool calls — so the zero is this session's own and not a gap in the parser. No tool work can repeat when none happened.`,
@@ -448,6 +559,7 @@ const repeatTool = {
       return unknown(
         `${cli} recorded ${totalCalls} tool call${totalCalls === 1 ? "" : "s"} for this session but no result signature that can be attributed to any single one of them — either the per-turn result byte length is absent (DIS-006) or every turn made more than one call, so its one byte total cannot be split between them. Same input with an unknown result is not a repeat, so this rule reports unknown rather than counting inputs alone (DIS-003).`,
         [countValue("tool calls recorded", totalCalls), countValue("calls with an attributable result signature", 0)],
+        "no-attributable-results",
       );
     }
 
@@ -475,6 +587,7 @@ const repeatTool = {
       return unknown(
         `no group of identical tool call + input + result reached ${this.threshold.value} among the ${attributableCalls} of ${totalCalls} calls whose result could be attributed to a single call (the highest was ${worst.count}). The remaining ${totalCalls - attributableCalls} call${totalCalls - attributableCalls === 1 ? "" : "s"} shared a turn with another call, so their results cannot be separated — and unmeasured calls are exactly where a repeat would hide, so this is not reported as a clean result.`,
         values,
+        "partial-result-coverage",
       );
     }
     return notObserved(values, derivation, worst.count);
@@ -498,9 +611,28 @@ const largeToolResult = {
   },
   severity: "warn",
   fix: "claude-output-hygiene",
+  plain: {
+    problem:
+      "This session pulled in an unusually large tool result {count} separate times, each one big enough on its own to crowd out other context.",
+    why:
+      "One large result answering one real question is normal. Several large results in one session usually means a whole file or a whole log was read in rather than just the part that was needed.",
+    unmeasured: {
+      ...SHARED_UNMEASURED,
+      default:
+        "How much this session pulled in from the things it read could not be worked out from what was recorded, so whether oversized results were a habit here is still an open question.",
+      "no-turns":
+        "This tool saved no per-turn record for the session, so nothing says how much anything it read returned. The size of what came back is unknown rather than counted as small.",
+      "no-tool-calls-anywhere":
+        "No tool call was recorded on any turn of this session, and none was recorded for any other session read from this tool either — so a session that genuinely used no tools and a reader that cannot see tool calls look exactly the same from here. Reading more sessions from this tool settles which it is.",
+      "no-result-sizes":
+        "This session did read things, but the size of what came back was never recorded for any of them, so oversized results cannot be counted. A result of unrecorded size is not treated as a small one and is not counted at all, which leaves this open.",
+      "partial-result-sizes":
+        "Too few oversized results were found to flag this session, but some of the things it read have no recorded result size at all, so the count is incomplete. An unmeasured result is the likeliest place for a large one to be hiding, so this is left open rather than reported as clean.",
+    },
+  },
   evaluate(session, ctx) {
     const turns = turnsOf(session);
-    if (!turns.length) return unknown(noTurnsReason(session));
+    if (!turns.length) return unknown(noTurnsReason(session), [], "no-turns");
     const sessionId = str(session?.sessionId) || null;
     const cli = str(session?.cli) || "this CLI";
     const limit = this.threshold.value;
@@ -536,7 +668,7 @@ const largeToolResult = {
       "The normalized turn records one byte total per turn rather than one per tool result, so an occurrence is a turn, not a single result; for a turn with one call the two are the same.";
 
     if (turnsWithTools === 0 && measured === 0) {
-      if (ctx?.toolCallsRecorded !== true) return unknown(zeroToolCallsReason(cli));
+      if (ctx?.toolCallsRecorded !== true) return unknown(zeroToolCallsReason(cli), [], "no-tool-calls-anywhere");
       return notObserved(
         [countValue("turns that made at least one tool call", 0), countValue("turns", turns.length)],
         `${cli} recorded no tool call and no result bytes across ${turns.length} turns of this session, while other sessions collected from ${cli} in this run did carry tool calls — so the zero is this session's own and not a gap in the parser. No tool result exists to be large.`,
@@ -547,6 +679,7 @@ const largeToolResult = {
       return unknown(
         `${cli} recorded ${turnsWithTools} turn${turnsWithTools === 1 ? "" : "s"} with tool calls for this session but no result byte length for any of them, so result size cannot be measured. A missing byte count is not a small result (DIS-006); it is not counted at all.`,
         [countValue("turns that made at least one tool call", turnsWithTools), countValue("turns with a recorded result byte length", 0)],
+        "no-result-sizes",
       );
     }
     if (oversized >= occurrencesNeeded) {
@@ -556,6 +689,7 @@ const largeToolResult = {
       return unknown(
         `only ${oversized} turn${oversized === 1 ? "" : "s"} exceeded ${limit.toLocaleString("en-US")} bytes, short of the ${occurrencesNeeded} needed — but ${turnsWithTools - measured} of the ${turnsWithTools} turns that made tool calls carry no result byte length at all, so the count is incomplete. An unmeasured result is the most likely place for a large one to hide, so this is not reported as a clean result.`,
         values,
+        "partial-result-sizes",
       );
     }
     return notObserved(values, derivation, oversized);
@@ -612,9 +746,26 @@ const longRisingContext = {
   },
   severity: "critical",
   fix: "claude-compact-contract",
+  plain: {
+    problem:
+      "This session has been running for more than four hours, and its context size keeps climbing rather than levelling off or shrinking.",
+    why:
+      "A long session is fine by itself if it periodically compacts its context. This only fires when BOTH the length and the upward trend hold together — a session that runs long but stays flat is not flagged, and a session that spikes briefly and then compacts is not flagged either.",
+    unmeasured: {
+      ...SHARED_UNMEASURED,
+      default:
+        "Whether this session both ran long AND kept piling up context could not be worked out from what was recorded, so that pairing is still an open question here.",
+      "no-turns":
+        "This tool saved no per-turn record for the session, so there is neither a timeline nor a series of context sizes to look at. Both halves of this check are missing, so it stays open.",
+      "no-elapsed-time":
+        "Nothing recorded for this session says when it began and ended, and too few of its turns carry a time for one to be worked out, so how long it ran is unknown. How long it ran is half of this check, so no result follows. Times on the turns, or a recorded start and finish, would make it measurable.",
+      "too-few-context-points":
+        "How long this session ran is known, but too few of its turns carry both a time and a context size for a trend to mean anything — a line drawn through one or two points is an assertion, not a measurement. Three or more turns carrying both would make the trend measurable.",
+    },
+  },
   evaluate(session) {
     const turns = turnsOf(session);
-    if (!turns.length) return unknown(noTurnsReason(session));
+    if (!turns.length) return unknown(noTurnsReason(session), [], "no-turns");
     const sessionId = str(session?.sessionId) || null;
     const minimumPoints = 3;
     const hoursNeeded = 4;
@@ -645,6 +796,7 @@ const longRisingContext = {
       return unknown(
         `this session carries no usable elapsed time: startedAt is ${session?.startedAt === undefined ? "absent" : JSON.stringify(session?.startedAt ?? null)}, endedAt is ${JSON.stringify(session?.endedAt ?? null)}, and ${stamps.length} of ${turns.length} turns carry a timestamp — fewer than the two needed to span an interval. Duration is half of this rule, so no verdict follows.`,
         points.length ? [countValue("context observations available", points.length)] : [],
+        "no-elapsed-time",
       );
     }
     if (points.length < minimumPoints) {
@@ -654,6 +806,7 @@ const longRisingContext = {
           { label: "session elapsed", value: round(elapsedHours, 2), unit: "hours", sessionId },
           countValue("turns carrying both a timestamp and a context reading", points.length),
         ],
+        "too-few-context-points",
       );
     }
 
@@ -717,6 +870,23 @@ function scanWidthClause(ctx) {
 }
 
 /**
+ * The reason CLASS behind `scanWidthClause`, branch for branch.
+ *
+ * Kept as a separate function rather than folded into the clause builder so
+ * that the prose above stays byte-identical: it is the evidence of record, and
+ * this is only a lookup key for the plain-English sentence beside it.
+ *
+ * @returns {string} a key of `subagentConcurrency.plain.unmeasured`
+ */
+function scanWidthCode(ctx) {
+  const meta = ctx?.sessionMeta;
+  const ids = meta && typeof meta === "object" ? meta.subagentSessionIds : undefined;
+  if (ids === null) return "subagent-reading-off";
+  if (ctx?.corpusComplete !== true) return "scan-bounded";
+  return "no-subagent-collected";
+}
+
+/**
  * Why this CLI cannot establish sub-agent intervals for this session.
  *
  * Each reason names the specific missing thing, because "unknown" without a
@@ -759,6 +929,31 @@ function subagentReason(session, ctx) {
   }
 }
 
+/**
+ * The reason CLASS behind `subagentReason`, branch for branch.
+ *
+ * Codex and Gemini get one each rather than sharing the structural class,
+ * because the plain-English sentence names the tool and `plain.unmeasured` is
+ * static data that cannot interpolate one.
+ *
+ * @returns {string} a key of `subagentConcurrency.plain.unmeasured`
+ */
+function subagentReasonCode(session, ctx) {
+  switch (str(session?.cli)) {
+    case "claude":
+    case "kimi":
+      return scanWidthCode(ctx);
+    case "opencode":
+      return "no-subagent-collected";
+    case "codex":
+      return "codex-records-no-subagents";
+    case "gemini":
+      return "gemini-records-no-subagents";
+    default:
+      return "cli-records-no-subagents";
+  }
+}
+
 /** Peak simultaneous intervals, by sweeping starts and ends in time order. */
 function peakOverlap(intervals) {
   const events = [];
@@ -791,6 +986,33 @@ const subagentConcurrency = {
   },
   severity: "warn",
   fix: "claude-worker-cap",
+  plain: {
+    problem:
+      "At its busiest moment, this session had sub-agents running at the same time equal to {pct} of everything it dispatched — a burst of parallel work rather than one thing at a time.",
+    why:
+      "Running several sub-agents at once can be a deliberate and efficient way to fan work out. This only flags it when more than half of what was dispatched was active simultaneously, so it is worth a quick check that the burst was intentional rather than accidental.",
+    unmeasured: {
+      ...SHARED_UNMEASURED,
+      default:
+        "Whether this session had several sub-agents running at the same moment could not be worked out from what was recorded, so that question is still open about this session.",
+      "codex-records-no-subagents":
+        "Codex's logs don't record which turns belonged to a sub-agent or which parent started them, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
+      "gemini-records-no-subagents":
+        "Gemini's history files don't record which turns belonged to a sub-agent or which parent started them, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
+      "cli-records-no-subagents":
+        "Nothing this tool records identifies a sub-agent, or says when one started and finished, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
+      "subagent-reading-off":
+        "Sub-agent records were not read on this run, so nothing was looked for alongside this session. Not having looked is a gap in what was collected, not a finding about the session, and it is not a statement that no sub-agents ran. Running again with sub-agent reading switched on settles it.",
+      "scan-bounded":
+        "Only part of this tool's sessions were read on this run, so a sub-agent belonging to this session may simply have fallen outside what was looked at. An unread sub-agent is not an absent one, so this is not a statement that none ran. Reading more sessions settles it.",
+      "no-subagent-collected":
+        "No sub-agent record was found alongside this session, and nothing in what was read ties a sub-agent back to it, so an empty list cannot be treated as a real zero. This is not a statement that no sub-agents ran.",
+      "no-subagent-times":
+        "Sub-agents are known to belong to this session, but not one of them recorded when it started and finished, so there is no way to work out which of them were running together. How many ran is known; how many ran at once is not. A start and finish time recorded for each sub-agent would make it measurable.",
+      "partial-subagent-times":
+        "The highest number of sub-agents seen running together came out under the line, but some of this session's sub-agents recorded no start or finish time, so the true peak can only be higher than the one measured. A peak worked out from part of the evidence is not a pass.",
+    },
+  },
   evaluate(session, ctx) {
     const sessionId = str(session?.sessionId) || null;
     const children = Array.isArray(ctx?.children) ? ctx.children : [];
@@ -807,7 +1029,11 @@ const subagentConcurrency = {
           0,
         );
       }
-      return unknown(subagentReason(session, ctx), ctx?.sidechainTurns ? [countValue("turns marked as belonging to a sub-agent", ctx.sidechainTurns)] : []);
+      return unknown(
+        subagentReason(session, ctx),
+        ctx?.sidechainTurns ? [countValue("turns marked as belonging to a sub-agent", ctx.sidechainTurns)] : [],
+        subagentReasonCode(session, ctx),
+      );
     }
 
     const intervals = [];
@@ -823,6 +1049,7 @@ const subagentConcurrency = {
       return unknown(
         `${dispatched} sub-agent session${dispatched === 1 ? " is" : "s are"} linked to this session, but not one of them carries both a start and an end time, so nothing can be overlapped. The dispatched count alone says how many ran, never how many ran at once.`,
         [countValue("sub-agent sessions linked to this session", dispatched), countValue("linked sub-agent sessions with a usable interval", 0)],
+        "no-subagent-times",
       );
     }
 
@@ -843,6 +1070,7 @@ const subagentConcurrency = {
       return unknown(
         `peak concurrency reached ${peak} of ${dispatched} dispatched (${round(ratio)}), below the ${this.threshold.value} line — but ${withoutInterval} of those ${dispatched} sub-agent sessions carry no usable start/end, so the real peak can only be higher than the ${peak} measured here. A ceiling computed from part of the evidence is not a pass.`,
         values,
+        "partial-subagent-times",
       );
     }
     return notObserved(values, derivation, ratio);
@@ -903,6 +1131,7 @@ export function evaluateRule(rule, session, ctx = {}) {
     raw = {
       status: "unknown",
       reason: `evaluating this rule threw: ${error instanceof Error ? error.message : String(error)}. A rule that could not finish is reported as unmeasurable, never as a pass.`,
+      reasonCode: "rule-threw",
       values: [],
       derivation: null,
       magnitude: null,
@@ -911,11 +1140,34 @@ export function evaluateRule(rule, session, ctx = {}) {
 
   const status = STATUS_SET.has(raw?.status) ? raw.status : "unknown";
   let reason = status === "unknown" ? str(raw?.reason).trim() : "";
+  // The class of the cause, beside the prose rather than parsed out of it.
+  // An unrecognised or absent class becomes `default`, which every rule's
+  // `plain.unmeasured` catalogue answers, so the renderer always has a
+  // sentence even for a cause added later and not yet written up.
+  const reasonCode = status === "unknown" ? str(raw?.reasonCode).trim() || "default" : null;
   if (status === "unknown" && !reason) {
     reason = STATUS_SET.has(raw?.status)
       ? "this rule returned unknown without recording a reason; it could not be evaluated and is NOT a pass."
       : `this rule returned the unrecognised status ${JSON.stringify(raw?.status ?? null)}, which is not one of observed / not-observed / unknown, so it is treated as unmeasurable rather than trusted.`;
   }
+
+  // `plain` is declared beside `name`/`threshold` on the rule itself (DATA,
+  // never derived from the session), so it is the SAME text for every
+  // session this rule ever evaluates. The `{count}`/`{pct}` tokens it may
+  // carry are filled in by the renderer from THIS RuleResult's own
+  // `magnitude`, never invented client-side — see health.js `fillPlainTemplate`.
+  const plainProblem = str(rule?.plain?.problem);
+  const plainWhy = str(rule?.plain?.why);
+  // `unmeasured` is a MAP from reason class to sentence, not one string: a
+  // rule goes unmeasured for several different causes and one sentence would
+  // be false for the others. It travels whole, the same way `problem` and
+  // `why` travel as templates, and the renderer looks up `evidence.reasonCode`.
+  const plainUnmeasured =
+    rule?.plain?.unmeasured && typeof rule.plain.unmeasured === "object" ? rule.plain.unmeasured : null;
+  const plain =
+    plainProblem || plainWhy || plainUnmeasured
+      ? { problem: plainProblem || null, why: plainWhy || null, unmeasured: plainUnmeasured }
+      : null;
 
   return {
     id: rule.id,
@@ -924,9 +1176,11 @@ export function evaluateRule(rule, session, ctx = {}) {
     fix: rule.fix ?? null,
     threshold: { value: rule.threshold.value, derivation: rule.threshold.derivation },
     magnitude: num(raw?.magnitude),
+    plain,
     evidence: {
       status,
       reason: status === "unknown" ? reason : null,
+      reasonCode,
       values: Array.isArray(raw?.values) ? raw.values : [],
       sources,
       derivation: str(raw?.derivation) || null,

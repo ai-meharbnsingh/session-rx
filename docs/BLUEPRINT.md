@@ -259,6 +259,9 @@ Fix = {
 | `tests/package.test.js` | packed artifact contains declared files and excludes fixtures/secrets | `GATE-FACTORY` |
 | `tests/integration.test.js` | WIRING: index.html loads every page module that exists; imports resolve on disk; no dangling imports to retired modules; no remote URLs outside vendor/. BOOT: modules load in order, DOMContentLoaded fires, routes register and render into their mounts (F-022) | `GATE-OFFLINE` |
 | `tests/registry.test.js` | Collector detection splits into supported/detection-only/absent; collection isolation and error containment; diagnostic aggregation from collect() and published properties; sessionMeta relay as plain objects; edge cases (non-array returns, empty/absent/copied meta) | `GATE-COLLECT` |
+| `tests/ui-health.test.js` | summary strip counts (analyzed/found/available/unmeasured); plain-English leads per check; three verdicts preserved; NOT-a-pass on unknowns; metrics/evidence in collapsed sections | `GATE-COLLECT` |
+| `tests/ui-trends.test.js` | plain-English verdict verbatim from analyzer; statistical evidence in collapsed section; mixed/undecidable never presented as confirmed improvement | `GATE-COLLECT` |
+| `tests/ui-fixmodal.test.js` | proposed change exact; expected effect and limitations; limitations state guidance-not-constraint; Apply/Undo round-trip; second Apply refused | `GATE-FIX` |
 
 ## BP-008 Disagreements
 
