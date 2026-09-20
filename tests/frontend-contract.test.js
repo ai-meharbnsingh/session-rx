@@ -283,6 +283,7 @@ const healthPage = await import("../public/js/pages/health.js");
 const trendsPage = await import("../public/js/pages/trends.js");
 const fixModal = await import("../public/js/components/fix-modal.js");
 const chart = await import("../public/js/components/chart.js");
+const app = await import("../public/js/app.js");
 
 /** The shipping card, under its real signature. */
 const renderCard = (session, api = null, rerender = null) => healthPage.sessionCard(session, api, rerender);
@@ -1228,4 +1229,89 @@ test("the heatmap reports an absent grid instead of rendering an empty frame", (
   assert.ok(wrap, "the G4 card must still be there, saying what is missing");
   assert.match(wrap.textContent, /No activity grid was built for this window/);
   assert.equal(withClass(wrap, "heatmap-cell").length, 0, "no cells are drawn for an absent grid");
+});
+
+// ==========================================================================
+// C. The server-not-running contract (app.js `request()`)
+//
+// SessionRx is local-only: `npx session-rx` serves 127.0.0.1:7331 and the tab
+// talks to it. Its most likely failure is that the server process is gone
+// (closed terminal, Ctrl+C, sleep) while the tab is still open — at which
+// point `fetch()` rejects with a bare TypeError("Failed to fetch") that told
+// a real user nothing. These tests drive `app.js`'s `api` through a
+// substitute `globalThis.fetch`, restored in a `finally` so no test leaks its
+// mock into the next one.
+// ==========================================================================
+
+test("a network-level fetch rejection is reported as the server not responding, not the raw browser string", async () => {
+  const saved = globalThis.fetch;
+  const networkError = new TypeError("Failed to fetch");
+  globalThis.fetch = () => Promise.reject(networkError);
+  try {
+    await assert.rejects(app.api.get("/api/health"), (error) => {
+      assert.notEqual(error.message, "Failed to fetch", "the bare TypeError message must not reach the user verbatim");
+      assert.match(error.message, /server/i, "must name the server as the subject");
+      assert.match(error.message, /not responding|no longer running/i, "must say the server looks down");
+      assert.match(error.message, /npx session-rx/, "must give the concrete next step: restart it");
+      assert.ok(!/[!]/.test(error.message), "no exclamation marks");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("an HTTP error response keeps its server-supplied message unchanged (not conflated with 'server down')", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(
+    new Response(JSON.stringify({ error: "Session store is corrupted" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  try {
+    await assert.rejects(app.api.get("/api/health"), (error) => {
+      assert.equal(
+        error.message,
+        "Session store is corrupted",
+        "a real HTTP error (the request DID reach the server) must surface the server's own message, unchanged",
+      );
+      assert.ok(
+        !/not responding|no longer running/i.test(error.message),
+        "a 503 that reached the server must not be reported as the server being down",
+      );
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("the original network error is kept as `cause`, so nothing is lost", async () => {
+  const saved = globalThis.fetch;
+  const networkError = new TypeError("Failed to fetch");
+  globalThis.fetch = () => Promise.reject(networkError);
+  try {
+    await assert.rejects(app.api.get("/api/trends"), (error) => {
+      assert.equal(error.cause, networkError, "the rewritten error must carry the original as `cause`");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("an aborted request is not rewritten as 'server not running'", async () => {
+  const saved = globalThis.fetch;
+  const abortError = Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+  globalThis.fetch = () => Promise.reject(abortError);
+  try {
+    await assert.rejects(app.api.get("/api/report"), (error) => {
+      assert.equal(error, abortError, "an AbortError must pass through unchanged, not be rewrapped");
+      assert.ok(!/not responding|no longer running/i.test(error.message));
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
 });

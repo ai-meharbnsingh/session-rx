@@ -27,7 +27,17 @@ const request = async (path, options = {}) => {
     const token = csrfToken();
     if (token) headers.set('X-CSRF-Token', token);
   }
-  const response = await fetch(path, { ...options, method, headers });
+  let response;
+  try {
+    response = await fetch(path, { ...options, method, headers });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    const host = globalThis.location?.host ? ` at ${globalThis.location.host}` : '';
+    throw new Error(
+      `The SessionRx server${host} is not responding — it is probably no longer running; restart it with npx session-rx and reload this page.`,
+      { cause: error },
+    );
+  }
   let body;
   try { body = await response.json(); } catch { body = null; }
   if (!response.ok) {

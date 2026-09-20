@@ -117,6 +117,20 @@ const MAX_LIMIT = 5000;
  * capped count is never presented as a corpus total.
  */
 export const DEFAULT_SCAN_LIMIT = 250;
+
+/**
+ * Sessions actually SERIALIZED by `/api/health`, as opposed to analyzed.
+ *
+ * Mirrors `SESSION_LIMIT` in `public/js/pages/health.js`: the health page
+ * only ever renders the newest 10 cards, so sending the full analyzed corpus
+ * on the wire is pure waste — measured on a heavy real corpus (2026-09-20,
+ * this machine) at 1,236 sessions / 18.2MB / 6.5s for a page that renders 10.
+ * The SCAN behind the analysis is untouched by this constant (it is bounded
+ * separately by `DEFAULT_SCAN_LIMIT`/`?limit=`, and `corpusComplete` in the
+ * analyzer must keep depending on THAT bound, never on this one) — only how
+ * many of the already-analyzed sessions get put in the response body.
+ */
+export const HEALTH_CARD_LIMIT = 10;
 const BODY_LIMIT = "256kb";
 const SORT_FIELDS = new Set(["startedAt", "endedAt", "score", "turnCount", "cli", "project", "sessionId"]);
 
@@ -679,8 +693,21 @@ export function createApp(options = {}) {
     };
     const result = await analyzeFor(res, query);
     if (!result) return;
+    // The scan and analysis above are untouched by what follows — every
+    // verdict, `corpusComplete` included, is computed over the FULL analyzed
+    // corpus. Only the SERIALIZED `sessions` array is narrowed, to the same
+    // newest-first slice the health page renders (`HEALTH_CARD_LIMIT`, which
+    // mirrors the page's own `SESSION_LIMIT`) — so the payload shrinks
+    // without the scan shrinking with it.
+    const allSessions = Array.isArray(result.analysis.sessions) ? result.analysis.sessions : [];
+    const cardSessions = sortSessions(allSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
     await sendJson(res, 200, {
-      sessions: result.analysis.sessions,
+      sessions: cardSessions,
+      // The true count over the FULL analysis, so the health page's "N of
+      // TOTAL sessions" sentence never misreports a narrowed response as the
+      // whole corpus. `null`, not 0, when the analyzer published no sessions
+      // array — an absent count is not a measured zero.
+      sessionsTotal: Array.isArray(result.analysis.sessions) ? result.analysis.sessions.length : null,
       collectors: result.analysis.collectors,
       // F-023/F-025: how many sessions were set aside as sub-agents of another
       // session. `sessions` above is the user's OWN sessions only, so without

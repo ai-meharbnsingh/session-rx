@@ -36,6 +36,7 @@ import { collectMany, detectMany } from "../src/collectors/registry.js";
 import {
   DEFAULT_SCAN_LIMIT,
   FIX_CATALOG,
+  HEALTH_CARD_LIMIT,
   LOOPBACK_HOST,
   createApp,
   csrfFailure,
@@ -589,6 +590,89 @@ describe("GET routes return 200 with the BP-005 shape", () => {
       const res = await running.get(target);
       assert.equal(res.status, 400, `${target} → 400`);
       assert.ok(res.json.error.length > 0);
+    }
+  });
+});
+
+describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions", () => {
+  // Measured 2026-09-20: a 1,236-session real corpus serialized in full is
+  // 18.2MB / 6.5s for a page that renders 10 cards. This fixture only needs
+  // to clear HEALTH_CARD_LIMIT, not reproduce that scale.
+  const TOTAL = HEALTH_CARD_LIMIT + 2;
+
+  /**
+   * `TOTAL` independent sessions, one per day, each declaring itself
+   * top-level (`parentSessionId: null`) so `childLinkageAvailable` is true
+   * for the CLI and rule 6 (`subagent-concurrency`) can report a MEASURED
+   * zero instead of `unknown` — the exact verdict T4 checks survives the fix.
+   */
+  function manyCollector() {
+    const sessions = [];
+    const meta = {};
+    for (let day = 1; day <= TOTAL; day += 1) {
+      const sessionId = `dddddddd-0000-4000-8000-${String(day).padStart(12, "0")}`;
+      sessions.push(testSession({ sessionId, startedAt: ISO(day, 9), endedAt: ISO(day, 11) }));
+      meta[sessionId] = { parentSessionId: null };
+    }
+    const claude = new FakeCollector("claude", sessions);
+    claude.sessionMeta = meta;
+    return claude;
+  }
+
+  it("T1: returns at most HEALTH_CARD_LIMIT sessions", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    assert.ok(
+      res.json.sessions.length <= HEALTH_CARD_LIMIT,
+      `sessions.length (${res.json.sessions.length}) must not exceed HEALTH_CARD_LIMIT (${HEALTH_CARD_LIMIT})`,
+    );
+    assert.equal(res.json.sessions.length, HEALTH_CARD_LIMIT, `this fixture has ${TOTAL} sessions, more than the limit`);
+  });
+
+  it("T2: sessionsTotal is the full analyzed count, greater than sessions.length", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.sessionsTotal, TOTAL, "sessionsTotal must count the FULL analysis, not the narrowed response");
+    assert.ok(
+      res.json.sessionsTotal > res.json.sessions.length,
+      "the true total must exceed the narrowed response once the corpus exceeds the card limit",
+    );
+  });
+
+  it("T3: the returned sessions are the newest HEALTH_CARD_LIMIT, newest first", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    const returnedDays = res.json.sessions.map((session) => new Date(session.startedAt).getUTCDate());
+    // Days 1..TOTAL were collected; the newest HEALTH_CARD_LIMIT of them,
+    // strictly descending, are TOTAL down to TOTAL-HEALTH_CARD_LIMIT+1.
+    const expectedDays = Array.from({ length: HEALTH_CARD_LIMIT }, (_, index) => TOTAL - index);
+    assert.deepEqual(returnedDays, expectedDays);
+  });
+
+  it("T4: a verdict gated on corpusComplete is unchanged — the full scan still ran", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.sessions.length, HEALTH_CARD_LIMIT);
+    for (const session of res.json.sessions) {
+      const rule = session.rules.find((candidate) => candidate.id === "subagent-concurrency");
+      assert.ok(rule, `session ${session.sessionId} must carry the subagent-concurrency rule`);
+      // With TOTAL sessions well under DEFAULT_SCAN_LIMIT and every session
+      // naming no parent, corpusComplete is true and this is a MEASURED
+      // zero ("not-observed"). If the response-narrowing fix had instead
+      // bounded the SCAN to HEALTH_CARD_LIMIT (reusing it as a collection
+      // limit rather than only a serialization slice), corpusComplete would
+      // flip false — TOTAL sessions collected against a HEALTH_CARD_LIMIT
+      // bound — and this verdict would flip to "unknown". That flip is
+      // exactly what this assertion catches.
+      assert.equal(
+        rule.evidence.status,
+        "not-observed",
+        `session ${session.sessionId}: corpusComplete must still be true after the payload-size fix`,
+      );
     }
   });
 });

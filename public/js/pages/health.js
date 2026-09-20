@@ -912,12 +912,18 @@ export function renderHealth(mount, data, ctx = {}) {
 
   const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
   const shown = newestFirst(sessions).slice(0, SESSION_LIMIT);
+  // The server now sends only the newest-N cards and states the true corpus
+  // size separately (`sessionsTotal`), so the count below no longer misreads
+  // a narrowed response as the whole corpus. An older payload carries no
+  // such field, so `sessions.length` — the whole old-shaped array — is the
+  // fallback, not 0.
+  const sessionsTotal = Number.isFinite(data?.sessionsTotal) ? data.sessionsTotal : sessions.length;
 
   stack.append(
     el(
       'p',
       'note',
-      `The ${shown.length} most recent session${shown.length === 1 ? '' : 's'} of ${groupInt(sessions.length) ?? '0'} read from this machine. `
+      `The ${shown.length} most recent session${shown.length === 1 ? '' : 's'} of ${groupInt(sessionsTotal) ?? '0'} read from this machine. `
         + 'Every check returns one of three verdicts: a problem was observed, nothing was observed, or it could not be measured. '
         + 'The third is not a pass, and it is the most common answer on real data.',
     ),

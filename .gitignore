@@ -34,3 +34,6 @@ _trash/
 
 # factory session-health instrumentation (not part of the product)
 docs/observe_log/
+
+# playwright-mcp page snapshots (generated during verification)
+.playwright-mcp/
