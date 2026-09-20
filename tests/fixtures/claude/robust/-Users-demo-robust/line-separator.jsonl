@@ -1,0 +1,3 @@
+{"type":"assistant","message":{"id":"msg_ls","model":"claude-opus-5","content":[{"type":"text","text":"scraped quote: second visual line"}],"usage":{"input_tokens":10}}}
+{"type":"assistant","message":{"id":"msg_ps","model":"claude-opus-5","content":[{"type":"text","text":"para break: next paragraph"}],"usage":{"input_tokens":20}}}
+{"type":"assistant","message":{"id":"msg_both","model":"claude-opus-5","content":[{"type":"text","text":"  both, twice:  "}],"usage":{"input_tokens":30}}}

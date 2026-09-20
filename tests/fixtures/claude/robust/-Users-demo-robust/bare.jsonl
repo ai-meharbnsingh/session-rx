@@ -1,0 +1,6 @@
+{}
+{"foo":"bar"}
+[1,2,3]
+null
+{"type":"assistant"}
+{"type": "assistant", "timestamp": "2026-09-20T07:00:00.000Z", "uuid": "b1", "message": {"id": "msg_bare", "content": [{"type": "text", "text": "x"}]}}

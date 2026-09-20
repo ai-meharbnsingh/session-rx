@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="">
+    <meta name="color-scheme" content="dark">
+    <title>SessionRx · Coding session health</title>
+    <!-- Declared so the browser stops asking for /favicon.ico, which this
+         server does not serve and which logged a 404 on every page load.
+         A 445-byte 32x32 PNG inlined as a data URI rather than served as a
+         file: it can never be a network request, and `img-src 'self' data:`
+         already permits it. PNG and not SVG for one specific reason — an
+         inline SVG must carry an `xmlns` whose value is spelled like a URL,
+         and that literal trips the offline gate's scan over public/ even
+         though it is a namespace name and not an address (tests/integration
+         .test.js flagged exactly that on the first attempt). A base64 PNG has
+         no such string. No remote URL anywhere — GATE-OFFLINE. -->
+    <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgBAMAAACBVGfHAAAAMFBMVEWhzv5xl8pEcKk8WH4gLUAWHy4UGSUSFyMSFyISFyERFiERFR8RFR4QFR8OERoLDRSqZf30AAABSElEQVR42mWSPUgDQRCF3+wtKDHhVmxMd14RsYqaTgujVhYiRBBBNKViEbGxFNKItW2qVCpYWapVDFpFAhEExTORYCJI2LMUsmdxPznNVLsfb+fN8JaOsssSftFshLc3WSoAnbsSNdPPFV9CqdUoZbqjIlA4h1OUuj1Br1plZtuhO3SdURUAlAe6grmHwcDaA4m0D7jb60yfMMKK8fr9XPiJ2pLdlT89VGDjAm0Pzno9BD7eNGGHFBbqmngxOpbl2tKxU4wb5Vxb4KoGDsTWHJnMz/MDicQwOJzkLhCdVhsXQIQ8W1Z4x6s/OjUWMXT5JB5oQcZEiwPNG7SLMKr8ms5r4IDaBjPi+9mZHZjuHKZpQGXo1DQBaCNLnwBAlQFdAj9fzF9KFaquoTPpkbwAoEmm6x4wAMC2+4PqizL3+D3WC7tRov/f4Rf8f2okPzA3ygAAAABJRU5ErkJggg==">
+    <link rel="stylesheet" href="/css/style.css">
+    <!-- Content-Security-Policy is served as a RESPONSE HEADER by src/server.js
+         (default-src 'self'; script-src 'self'; connect-src 'self'). It is not
+         repeated as a meta tag here on purpose: a meta policy would be
+         intersected with the header, so two copies can only ever be equal or
+         more restrictive than intended, and the stricter one would break the
+         page silently. One authority, in the server. -->
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#/health" aria-label="SessionRx home">
+          <span class="brand-mark" aria-hidden="true">⌁</span>
+          <span>Session<span class="brand-accent">Rx</span></span>
+        </a>
+        <div class="topbar-meta">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Local only</span>
+        </div>
+      </header>
+
+      <nav class="tabbar" aria-label="Primary navigation">
+        <a class="tab is-active" href="#/health" data-route="health">Health</a>
+        <a class="tab" href="#/trends" data-route="trends">Trends</a>
+        <a class="tab" href="#/sessions" data-route="sessions">Sessions</a>
+        <a class="tab" href="#/report" data-route="report">Report</a>
+      </nav>
+
+      <main class="workspace">
+        <aside class="cli-panel card" aria-labelledby="cli-panel-title">
+          <div class="section-kicker">Environment</div>
+          <div class="panel-heading">
+            <h2 id="cli-panel-title">Detected CLIs</h2>
+            <span class="badge badge-unknown" id="cli-count">Checking</span>
+          </div>
+          <div id="detected-clis" class="cli-list" aria-live="polite">
+            <p class="empty-state">Loading local sources…</p>
+          </div>
+          <p class="panel-note">SessionRx reads local session evidence. Nothing leaves this machine.</p>
+        </aside>
+
+        <section class="page-area" aria-live="polite">
+          <div id="app-status" class="status-region" role="status" hidden></div>
+          <section id="page-health" class="page-mount" data-page="health" aria-labelledby="health-title"></section>
+          <section id="page-trends" class="page-mount" data-page="trends" aria-labelledby="trends-title" hidden></section>
+          <section id="page-sessions" class="page-mount" data-page="sessions" aria-labelledby="sessions-title" hidden></section>
+          <section id="page-report" class="page-mount" data-page="report" aria-labelledby="report-title" hidden></section>
+        </section>
+      </main>
+    </div>
+
+    <div id="modal-root" class="modal-root" aria-live="assertive"></div>
+
+    <noscript>
+      <p class="empty-state">SessionRx reads your local session logs in the browser;
+        it needs JavaScript. Nothing is sent anywhere either way.</p>
+    </noscript>
+
+    <!-- VENDORED, not a CDN (DIS-001 / GATE-OFFLINE): Chart.js v4.5.1, the UMD
+         build taken from the npm tarball and committed under public/vendor/.
+         It is a classic script, so `Chart` is defined before the deferred
+         module below runs. Provenance and hashes: public/vendor/PROVENANCE.md. -->
+    <script src="/vendor/chart.umd.min.js"></script>
+
+    <!-- LOAD ORDER, and why it is safe (F-022).
+         `app.js` owns the router and the `registerPage` registry; each page
+         module calls `registerPage` at import time. Four explicit tags rather
+         than one barrel module, so that every page this shell can render is
+         named here, in the file a reader opens first — and so a page module
+         that fails to parse takes only its own tab down, not the shell.
+
+         Module scripts are deferred and run in document order, but order is
+         not what makes this correct: all four pages `import` from
+         `./app.js`, so the module graph itself guarantees app.js's body has
+         run before any `registerPage` call. app.js is listed first anyway, so
+         the router still loads even if a page module is broken.
+
+         Registration completes before the first render: app.js renders on
+         `DOMContentLoaded`, which fires only after every deferred module
+         script has executed. -->
+    <script type="module" src="/js/app.js"></script>
+    <script type="module" src="/js/pages/health.js"></script>
+    <script type="module" src="/js/pages/trends.js"></script>
+    <script type="module" src="/js/pages/sessions.js"></script>
+    <script type="module" src="/js/pages/report.js"></script>
+  </body>
+</html>

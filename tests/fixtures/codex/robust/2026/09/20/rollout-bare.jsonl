@@ -1,0 +1,6 @@
+{}
+[1,2]
+null
+{"type":"event_msg"}
+{"type":"event_msg","payload":{"type":"token_count"}}
+{"type":"response_item","payload":{"type":"function_call"}}

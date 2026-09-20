@@ -1,0 +1,22 @@
+{
+  "theme": "dark",
+  "model": "claude-opus-5",
+  "permissions": {
+    "allow": [
+      "Bash(npm test)"
+    ],
+    "deny": []
+  },
+  "env": {
+    "EDITOR": "vim"
+  },
+  "aKeyThisFixHasNeverHeardOf": {
+    "nested": [
+      1,
+      2,
+      3
+    ],
+    "flag": false
+  },
+  "zzzLastKey": "stays last until autoCompact is appended"
+}

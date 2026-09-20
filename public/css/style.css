@@ -1,0 +1,535 @@
+/* SessionRx visual system — BP-001.22.
+ *
+ * Every colour is a custom property on :root. No @import, no remote font, no
+ * remote image: the only fonts named are the ones the OS already has, and the
+ * only non-flat fills are CSS gradients (GATE-OFFLINE).
+ *
+ * THE ONE RULE THIS FILE EXISTS TO ENFORCE
+ * ----------------------------------------
+ * `unknown` is not a shade of pass and not a shade of warn. On the real corpus
+ * 157 of 240 verdicts are `unknown`, so if "could not be measured" reads as a
+ * tick or as an alarm the product has lied about the majority of its output.
+ * It is therefore separated on FOUR independent channels, so it survives a
+ * colour-blind reader, a greyscale screenshot and a bad monitor:
+ *
+ *   1. hue      neutral slate (--unknown), never on the green/amber/red ramp
+ *   2. fill     a diagonal hatch (--unknown-hatch); no other state is hatched
+ *   3. border   dashed; pass / warn / critical are solid
+ *   4. type     italic, and the glyph is "?" where the others are ✓ / ! / ×
+ *
+ * A measured zero and an absent measurement are likewise never the same pixel:
+ * `.is-null` is hatched, `[data-level="0"]` is flat.
+ */
+
+:root {
+  /* surfaces */
+  --bg: #0b0e13;
+  --bg-glow: #18263a;
+  --surface: #121722;
+  --surface-raised: #18202d;
+  --surface-soft: #0f141d;
+  --surface-inset: #0a0d12;
+  --surface-hover: #1c2534;
+
+  /* lines */
+  --border: #273244;
+  --border-strong: #3a4860;
+  --border-faint: #1d2635;
+
+  /* type */
+  --text: #edf2f7;
+  --text-strong: #ffffff;
+  --muted: #8d9aae;
+  --subtle: #5f6c7e;
+
+  /* accent */
+  --accent: #68a7ff;
+  --accent-strong: #9bc6ff;
+  --accent-dim: rgba(104, 167, 255, .12);
+  --on-accent: #08111f;
+
+  /* verdict: PASS — measured, and the condition was not met */
+  --pass: #55d6a1;
+  --pass-bg: rgba(85, 214, 161, .10);
+  --pass-line: rgba(85, 214, 161, .45);
+
+  /* verdict: WARN — measured, and the condition WAS met */
+  --warn: #f3bd64;
+  --warn-bg: rgba(243, 189, 100, .10);
+  --warn-line: rgba(243, 189, 100, .45);
+
+  /* verdict: CRITICAL */
+  --crit: #f27c86;
+  --crit-bg: rgba(242, 124, 134, .10);
+  --crit-line: rgba(242, 124, 134, .45);
+
+  /* verdict: UNKNOWN — deliberately off the traffic-light ramp */
+  --unknown: #a3b0c4;
+  --unknown-bg: rgba(163, 176, 196, .07);
+  --unknown-line: rgba(163, 176, 196, .42);
+  --unknown-hatch: repeating-linear-gradient(
+    135deg,
+    rgba(163, 176, 196, .16) 0 4px,
+    rgba(163, 176, 196, .03) 4px 8px
+  );
+
+  /* informational, non-verdict */
+  --info: #7fb8d4;
+  --info-bg: rgba(127, 184, 212, .10);
+
+  /* diff */
+  --diff-ins: #6fe0b0;
+  --diff-ins-bg: rgba(85, 214, 161, .12);
+  --diff-del: #ff97a0;
+  --diff-del-bg: rgba(242, 124, 134, .12);
+  --diff-meta: #7d8ba1;
+  --diff-hunk: #8ab4ff;
+
+  /* activity heatmap ramp (measured counts) */
+  --heat-0: #171f2c;
+  --heat-1: #24466a;
+  --heat-2: #33648f;
+  --heat-3: #4a8fb8;
+  --heat-4: #68a7ff;
+
+  /* G3 cache zones */
+  --zone-green: #55d6a1;
+  --zone-yellow: #f3bd64;
+  --zone-red: #f27c86;
+
+  /* geometry + type stacks */
+  --shadow: 0 16px 45px rgba(0, 0, 0, .24);
+  --shadow-sm: 0 4px 14px rgba(0, 0, 0, .2);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, ui-sans-serif, sans-serif;
+
+  /* driven by the render layer so a grid can change shape without new CSS */
+  --heatmap-cols: 24;
+
+  color-scheme: dark;
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Aliases kept so markup written against the wave 1C tokens keeps working. */
+:root {
+  --ok: var(--pass);
+  --green: var(--pass);
+  --amber: var(--warn);
+  --red: var(--crit);
+  --grey: var(--unknown);
+}
+
+* { box-sizing: border-box; }
+html { min-width: 320px; background: var(--bg); }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-size: 14px;
+  line-height: 1.5;
+  background: radial-gradient(circle at 80% -10%, var(--bg-glow) 0, transparent 35%), var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: inherit; text-decoration: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- shell */
+
+.app-shell { max-width: 1600px; margin: 0 auto; padding: 0 28px 48px; }
+.topbar { min-height: 82px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 750; letter-spacing: -.03em; }
+.brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid #4877b3; border-radius: var(--radius-sm); color: var(--accent-strong); font-size: 25px; line-height: 1; box-shadow: 0 0 22px var(--accent-dim); }
+.brand-accent { color: var(--accent-strong); }
+.topbar-meta { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 12px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--pass); box-shadow: 0 0 12px var(--pass); }
+.tabbar { display: flex; gap: 26px; height: 58px; align-items: end; }
+.tab { position: relative; padding: 0 2px 16px; color: var(--muted); font-size: 14px; font-weight: 650; }
+.tab:hover, .tab.is-active { color: var(--text); }
+.tab.is-active::after { content: ""; position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; border-radius: 2px; background: var(--accent); }
+.workspace { display: grid; grid-template-columns: minmax(210px, 270px) minmax(0, 1fr); gap: 26px; padding-top: 28px; }
+.page-area { min-width: 0; }
+.page-mount[hidden] { display: none; }
+.page-stack { display: grid; gap: 14px; }
+
+/* ---------------------------------------------------------------- cards */
+
+.card { background: rgba(18, 23, 34, .88); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.card-pad { padding: 20px; }
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 16px 18px; border-bottom: 1px solid var(--border-faint); }
+.card-body { padding: 16px 18px; }
+.card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border-faint); background: var(--surface-soft); border-radius: 0 0 var(--radius) var(--radius); }
+.cli-panel { align-self: start; padding: 20px; }
+.section-kicker { color: var(--accent); font: 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 18px; }
+h1, h2, h3, h4, p { margin-top: 0; }
+h1 { font-size: 22px; letter-spacing: -.02em; }
+h2 { margin-bottom: 0; font-size: 16px; letter-spacing: -.02em; }
+h3 { margin-bottom: 6px; font-size: 14px; }
+h4 { margin-bottom: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.cli-list { display: grid; gap: 8px; }
+.cli-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border-faint); font-size: 13px; }
+.cli-item:first-child { border-top: 0; }
+/* The health page's own copy of the list: chips on one wrapping row instead of
+ * a stacked table, so the page shell leaves room for the cards. The sidebar's
+ * `.cli-list` is narrow and keeps the stacked form. */
+.cli-list-inline { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.cli-list-inline .cli-item { padding: 0; border-top: 0; }
+.cli-list-inline > .note { flex: 1 0 100%; margin: 0; }
+.panel-compact { padding: 12px 16px; }
+.panel-compact .panel-heading { margin: 4px 0 8px; }
+/* Scan caveats: folded, but the summary states how many there are and what
+ * kinds, so a reader knows the caveats exist without opening them. */
+.cli-notes { margin-top: 8px; }
+.cli-notes > summary { cursor: pointer; color: var(--subtle); font: 11px var(--mono); }
+.cli-notes > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.cli-notes .note { margin: 6px 0 0; }
+.cli-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-status { font-size: 11px; white-space: nowrap; }
+.panel-note { margin: 20px 0 0; color: var(--subtle); font-size: 12px; line-height: 1.55; }
+.status-region { margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: var(--surface-soft); font-size: 13px; }
+.status-region.error { border-color: var(--crit-line); color: #ffc0c6; }
+.status-region.loading { color: var(--accent-strong); }
+.empty-state { margin: 0; color: var(--muted); font-size: 13px; }
+.note { margin: 8px 0 0; color: var(--subtle); font-size: 12px; line-height: 1.55; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.toolbar-spacer { flex: 1 1 auto; }
+
+/* ---------------------------------------- health card header + meta grid */
+
+.health-card { display: grid; }
+/* A session card is read ten at a time, so its chrome is tighter than a
+ * general card's: the content is what should fill the screen (F-024). */
+.health-card .card-head { align-items: center; padding: 10px 16px; }
+.health-card .card-body { display: grid; gap: 10px; padding: 12px 16px; }
+.health-ident { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; }
+.health-cli { padding: 2px 7px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-soft); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--accent-strong); }
+.health-session { overflow: hidden; max-width: 34ch; text-overflow: ellipsis; white-space: nowrap; font: 13px var(--mono); color: var(--text); }
+.health-sep { color: var(--subtle); }
+.health-meta { font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 18px; margin: 0; }
+.meta-grid > div { min-width: 0; }
+.meta-label { display: block; color: var(--subtle); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+.meta-value { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* "not measured" is never a 0 and never blank — it is its own visible state. */
+.not-measured { color: var(--unknown); font-style: italic; }
+.not-measured .dash { font-style: normal; font-family: var(--mono); }
+.lower-bound { color: var(--unknown); }
+.lower-bound .lb-prefix { font-style: italic; font-size: 11px; letter-spacing: .02em; }
+.inferred-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 6px; padding: 1px 6px;
+  border: 1px dashed var(--unknown-line); border-radius: 5px;
+  background-image: var(--unknown-hatch);
+  color: var(--unknown); font: italic 10px var(--mono); letter-spacing: .04em; text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------- badges */
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: 22px; padding: 3px 8px;
+  border: 1px solid currentColor; border-radius: 99px;
+  font: 11px var(--mono); white-space: nowrap;
+}
+.badge-glyph { font-size: 11px; line-height: 1; }
+.badge-ok, .badge-pass { color: var(--pass); background: var(--pass-bg); }
+.badge-info { color: var(--info); background: var(--info-bg); }
+.badge-warn { color: var(--warn); background: var(--warn-bg); }
+.badge-critical, .badge-crit { color: var(--crit); background: var(--crit-bg); }
+/* dashed + hatched + italic: three separations from pass and warn on top of hue */
+.badge-unknown {
+  border-style: dashed;
+  color: var(--unknown);
+  background-color: var(--unknown-bg);
+  background-image: var(--unknown-hatch);
+  font-style: italic;
+}
+.badge-sm { min-height: 18px; padding: 1px 6px; font-size: 10px; }
+
+/* ------------------------------------------------- progress / score bar */
+
+.progress { height: 8px; overflow: hidden; border-radius: 99px; background: #263042; }
+.progress > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+
+/* Three-segment score bar. The unknown segment is hatched, so an unmeasurable
+ * check can never be read as filled-and-fine or as an alarm. */
+/* The headline and the legend say different things about the same bar, so
+ * they share a row rather than stacking; the bar and the unknown callout keep
+ * full-width rows of their own. Nothing here is removed — it is laid out. */
+.score { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 16px; }
+.score-bar, .score-unknown-callout { flex: 1 0 100%; }
+.score-bar {
+  display: flex; height: 10px; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 99px; background: var(--surface-inset);
+}
+.score-seg { height: 100%; min-width: 0; transition: none; }
+.score-seg-passed { background: var(--pass); }
+.score-seg-observed { background: var(--warn); }
+.score-seg-critical { background: var(--crit); }
+.score-seg-unknown { background-color: var(--unknown-bg); background-image: var(--unknown-hatch); border-left: 1px dashed var(--unknown-line); }
+.score-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font: 11px var(--mono); color: var(--muted); }
+.score-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.score-swatch { width: 9px; height: 9px; border-radius: 2px; background: var(--unknown); }
+.score-swatch-passed { background: var(--pass); }
+.score-swatch-observed { background: var(--warn); }
+.score-swatch-critical { background: var(--crit); }
+.score-swatch-unknown { border: 1px dashed var(--unknown-line); background-color: var(--unknown-bg); background-image: var(--unknown-hatch); }
+.score-headline { font: 12.5px var(--mono); font-variant-numeric: tabular-nums; }
+.score-unknown-callout { color: var(--unknown); font-style: italic; }
+
+/* ------------------------------------------------------- verdict rows
+ *
+ * DEFAULT STATE (F-024): ONE line per rule. `.verdict-line` is the <summary> of
+ * `.verdict-why`, so the threshold derivation, the evidence numbers, the
+ * computation note and the citation are one keystroke away and cost no height
+ * while the disclosure is closed. Native <details> rather than a scripted
+ * toggle: it is focusable and operable from the keyboard for free, and it still
+ * opens with JavaScript disabled.
+ *
+ * WHAT IS DELIBERATELY OUTSIDE `.verdict-why`, and must stay outside it:
+ * `.verdict-reason` (an unknown is not a pass), `.verdict-floor-note` (why a
+ * percentage is missing) and `.verdict-offer` (the fix buttons). Those are the
+ * honesty surface and the action; hiding them behind a click would undo the
+ * point of the page.
+ */
+
+.verdict-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.verdict {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px;
+  align-items: start; padding: 5px 9px;
+  border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+.verdict-body { min-width: 0; }
+.verdict-why { min-width: 0; }
+/* The collapsed line. `list-style: none` + the -webkit rule drop the native
+ * triangle, because `.verdict-toggle` carries a labelled caret instead. */
+.verdict-line {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
+  min-width: 0; cursor: pointer; list-style: none;
+  font-size: 13px; line-height: 1.45;
+}
+.verdict-line::-webkit-details-marker { display: none; }
+.verdict-line:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 5px; }
+.verdict-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; }
+.verdict-name { font-weight: 650; }
+.verdict-metric { font: 12px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.verdict-rule { font: 11px var(--mono); color: var(--subtle); }
+.verdict-toggle { margin-left: auto; color: var(--subtle); font: 11px var(--mono); white-space: nowrap; }
+.verdict-toggle::before { content: "\25B8  "; }
+.verdict-why[open] .verdict-toggle { color: var(--accent); }
+.verdict-why[open] .verdict-toggle::before { content: "\25BE  "; }
+.verdict-line:hover .verdict-toggle { color: var(--text); }
+.verdict-more { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border-faint); }
+.verdict-detail { margin: 5px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+/* The row is already dashed and hatched, so the reason needs no box of its
+ * own — only the dashed rule that ties it to the verdict above it. It is
+ * never truncated and never folded: it is why the check could not run. */
+.verdict-reason { margin: 3px 0 0; padding: 0 0 0 9px; border-left: 2px dashed var(--unknown-line); color: var(--unknown); font-size: 11.5px; font-style: italic; line-height: 1.45; }
+.verdict-floor-note { margin: 5px 0 0; }
+.verdict-mark { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font: 10px var(--mono); line-height: 1; }
+.verdict-values { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 0; padding: 0; font: 11.5px var(--mono); color: var(--muted); list-style: none; font-variant-numeric: tabular-nums; }
+/* The fix offer: the brief's second line — an arrow, the fix, the three actions. */
+.verdict-offer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.verdict-arrow { color: var(--subtle); font: 12px var(--mono); }
+.verdict-fix { font-size: 12.5px; color: var(--text); }
+.verdict-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+.verdict-pass { border-left-color: var(--pass); }
+.verdict-pass .verdict-mark { color: var(--pass); background: var(--pass-bg); border: 1px solid var(--pass-line); }
+.verdict-warn { border-left-color: var(--warn); }
+.verdict-warn .verdict-mark { color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-line); }
+.verdict-critical { border-left-color: var(--crit); }
+.verdict-critical .verdict-mark { color: var(--crit); background: var(--crit-bg); border: 1px solid var(--crit-line); }
+/* unknown: dashed edge + hatch + italic name. Not a lighter pass, not a softer warn. */
+.verdict-unknown {
+  border-style: dashed; border-left-style: dashed; border-left-color: var(--unknown-line);
+  background-color: var(--unknown-bg); background-image: var(--unknown-hatch);
+}
+.verdict-unknown .verdict-name { font-style: italic; font-weight: 600; color: var(--unknown); }
+.verdict-unknown .verdict-mark { color: var(--unknown); background: var(--surface-inset); border: 1px dashed var(--unknown-line); }
+
+/* ------------------------------------------------------------- tables */
+
+.table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 12px 14px; border-bottom: 1px solid var(--border); text-align: left; }
+th { position: sticky; top: 0; z-index: 1; color: var(--muted); font: 11px var(--mono); letter-spacing: .05em; text-transform: uppercase; background: var(--surface-raised); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+th[aria-sort="ascending"]::after { content: " ▲"; color: var(--accent); }
+th[aria-sort="descending"]::after { content: " ▼"; color: var(--accent); }
+tbody tr:hover { background: var(--surface-hover); }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; }
+.number, .metric, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------- chart containers */
+
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
+.chart-container {
+  position: relative; min-height: 260px; padding: 18px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.chart-container > canvas { display: block; width: 100%; }
+.chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.chart-title { font-size: 14px; font-weight: 650; }
+.chart-sub { color: var(--subtle); font: 11px var(--mono); }
+.chart-canvas-wrap { position: relative; height: 240px; }
+.chart-empty {
+  display: grid; place-items: center; height: 240px;
+  border: 1px dashed var(--unknown-line); border-radius: var(--radius-sm);
+  background-color: var(--unknown-bg); background-image: var(--unknown-hatch);
+  color: var(--unknown); font-size: 13px; font-style: italic; text-align: center; padding: 0 16px;
+}
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font: 11px var(--mono); color: var(--muted); }
+.chart-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
+.legend-swatch-green { background: var(--zone-green); }
+.legend-swatch-yellow { background: var(--zone-yellow); }
+.legend-swatch-red { background: var(--zone-red); }
+.legend-swatch-gap { border: 1px dashed var(--unknown-line); background-color: var(--unknown-bg); background-image: var(--unknown-hatch); }
+
+/* -------------------------------------------- activity heatmap (15x24) */
+
+.heatmap-wrap { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.heatmap-scroll { overflow-x: auto; }
+/* Rows are days, columns are hours; the column count is supplied by the render
+ * layer via --heatmap-cols so a 24-hour grid and a 15-day grid share one rule. */
+.heatmap {
+  display: grid;
+  grid-template-columns: repeat(var(--heatmap-cols), minmax(11px, 1fr));
+  grid-auto-rows: 13px;
+  gap: 3px;
+  min-width: 360px;
+}
+.heatmap-row-label { grid-column: 1 / -1; color: var(--subtle); font: 10px var(--mono); }
+.heatmap-cell { border-radius: 2px; background: var(--heat-0); }
+.heatmap-cell[data-level="0"] { background: var(--heat-0); }
+.heatmap-cell[data-level="1"] { background: var(--heat-1); }
+.heatmap-cell[data-level="2"] { background: var(--heat-2); }
+.heatmap-cell[data-level="3"] { background: var(--heat-3); }
+.heatmap-cell[data-level="4"] { background: var(--heat-4); }
+/* A day the collectors never covered is NOT a quiet day: hatched, not flat. */
+.heatmap-cell.is-null {
+  background-color: transparent;
+  background-image: var(--unknown-hatch);
+  box-shadow: inset 0 0 0 1px var(--unknown-line);
+}
+.heatmap-axis { display: grid; grid-template-columns: repeat(var(--heatmap-cols), minmax(11px, 1fr)); gap: 3px; margin-top: 6px; color: var(--subtle); font: 9px var(--mono); }
+.heatmap-axis > span { overflow: hidden; text-align: center; }
+.heatmap-days { display: grid; grid-auto-rows: 13px; gap: 3px; margin-right: 8px; color: var(--subtle); font: 9px/13px var(--mono); text-align: right; white-space: nowrap; }
+.heatmap-layout { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.heatmap-scale { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--muted); font: 10px var(--mono); }
+.heatmap-scale-steps { display: flex; gap: 3px; }
+.heatmap-scale-steps > i { width: 11px; height: 11px; border-radius: 2px; }
+
+/* ------------------------------------------------------------- modal */
+
+.modal-root:empty { display: none; }
+.modal-root { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(4, 6, 10, .76); }
+.modal {
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(780px, 100%); max-height: min(820px, 92vh);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface-raised); box-shadow: var(--shadow);
+}
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 20px 24px 14px; border-bottom: 1px solid var(--border-faint); }
+.modal-title { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+.modal-subtitle { margin: 4px 0 0; color: var(--muted); font: 12px var(--mono); }
+.modal-body { overflow: auto; padding: 18px 24px; display: grid; gap: 16px; }
+.modal-close { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-soft); cursor: pointer; color: var(--muted); }
+.modal-close:hover { color: var(--text); border-color: var(--accent); }
+.modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 14px 24px 20px; border-top: 1px solid var(--border-faint); }
+.modal-actions .toolbar-spacer { flex: 1 1 auto; }
+.modal-section { display: grid; gap: 8px; }
+.modal-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px 18px; margin: 0; }
+.file-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.file-list li { overflow: hidden; padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-inset); font: 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+
+.callout { padding: 11px 13px; border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-sm); font-size: 13px; line-height: 1.55; }
+.callout-title { margin: 0 0 4px; font: 11px var(--mono); text-transform: uppercase; letter-spacing: .07em; }
+.callout p { margin: 0; }
+.callout-error { border-left-color: var(--crit); background: var(--crit-bg); color: #ffd3d7; }
+.callout-error .callout-title { color: var(--crit); }
+.callout-warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.callout-warn .callout-title { color: var(--warn); }
+.callout-ok { border-left-color: var(--pass); background: var(--pass-bg); }
+.callout-ok .callout-title { color: var(--pass); }
+.callout-info { border-left-color: var(--info); background: var(--info-bg); }
+.callout-info .callout-title { color: var(--info); }
+.callout-unknown { border-left-style: dashed; border-left-color: var(--unknown-line); background-color: var(--unknown-bg); background-image: var(--unknown-hatch); color: var(--unknown); font-style: italic; }
+.callout-code { display: block; margin-top: 6px; font: 11px var(--mono); letter-spacing: .04em; opacity: .85; }
+.callout-detail { margin-top: 6px; font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------ buttons */
+
+.button {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 14px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-soft); cursor: pointer; font-size: 13px; font-weight: 600;
+}
+.button:hover:not(:disabled) { border-color: var(--accent); }
+.button:disabled { cursor: not-allowed; opacity: .45; }
+.button-primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 700; }
+.button-primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
+.button-danger { border-color: var(--crit-line); color: var(--crit); background: var(--crit-bg); }
+.button-quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.button-quiet:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+.button-sm { padding: 5px 10px; font-size: 12px; }
+.spinner {
+  display: inline-block; width: 11px; height: 11px;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 0s; } }
+
+/* --------------------------------------------------------------- diff */
+
+.diff {
+  overflow: auto; max-height: 340px; margin: 0; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-inset);
+  font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.diff-line { display: block; padding: 0 12px; }
+.diff .ins, .diff-line.ins { color: var(--diff-ins); background: var(--diff-ins-bg); }
+.diff .del, .diff-line.del { color: var(--diff-del); background: var(--diff-del-bg); }
+.diff-line.hunk { color: var(--diff-hunk); background: rgba(138, 180, 255, .08); }
+.diff-line.meta { color: var(--diff-meta); }
+.diff-line.ctx { color: var(--muted); }
+.diff-empty { padding: 12px; color: var(--unknown); font-style: italic; }
+.diff-caption { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--subtle); font: 11px var(--mono); }
+
+/* --------------------------------------------------------- responsive */
+
+@media (max-width: 900px) {
+  .app-shell { padding-right: 18px; padding-left: 18px; }
+  .workspace { grid-template-columns: 1fr; }
+  .cli-panel { order: 2; }
+  .page-area { order: 1; }
+  .chart-grid { grid-template-columns: 1fr; }
+  .verdict-toggle { margin-left: 0; }
+  .health-session { max-width: 22ch; }
+  .modal { max-height: 94vh; }
+  .modal-head, .modal-body, .modal-actions { padding-right: 16px; padding-left: 16px; }
+}
+
+@media (max-width: 520px) {
+  .topbar { min-height: 70px; }
+  .topbar-meta { font-size: 10px; }
+  .tabbar { gap: 17px; overflow-x: auto; }
+  .tab { font-size: 13px; }
+  .meta-grid { grid-template-columns: 1fr 1fr; }
+  .modal-actions { justify-content: stretch; }
+  .modal-actions .button { flex: 1 1 auto; justify-content: center; }
+}

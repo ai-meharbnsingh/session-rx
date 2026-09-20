@@ -1,0 +1,14 @@
+{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1789000000.0, "message": {"type": "TurnBegin", "payload": {"user_input": [{"type": "text", "text": "organise this section"}]}}}
+{"timestamp": 1789000001.0, "message": {"type": "StepBegin", "payload": {}}}
+{"timestamp": 1789000002.0, "message": {"type": "ContentPart", "payload": {"type": "think", "think": "read the file first", "encrypted": null}}}
+{"timestamp": 1789000003.0, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "tool_a", "function": {"name": "ReadFile", "arguments": "{\"path\": \"x.js\"}"}, "extras": null}}}
+{"timestamp": 1789000004.0, "message": {"type": "ToolResult", "payload": {"tool_call_id": "tool_a", "return_value": {"is_error": false, "output": "0123456789", "message": null, "display": [], "extras": null}}}}
+{"timestamp": 1789000005.0, "message": {"type": "StatusUpdate", "payload": {"context_usage": 0.1, "token_usage": {"input_other": 100, "output": 10, "input_cache_read": 500, "input_cache_creation": 0}, "message_id": "chatcmpl-aaa"}}}
+{"timestamp": 1789000006.0, "message": {"type": "StatusUpdate", "payload": {"context_usage": 0.25, "token_usage": {"input_other": 200, "output": 20, "input_cache_read": 600, "input_cache_creation": 128}, "message_id": "chatcmpl-bbb"}}}
+{"timestamp": 1789000007.0, "message": {"type": "TurnEnd", "payload": {}}}
+{"timestamp": 1789000010.0, "message": {"type": "TurnBegin", "payload": {"user_input": [{"type": "text", "text": "now run it"}]}}}
+{"timestamp": 1789000011.0, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "tool_b", "function": {"name": "Bash", "arguments": "{\"cmd\": \"ls\"}"}, "extras": null}}}
+{"timestamp": 1789000012.0, "message": {"type": "ToolResult", "payload": {"tool_call_id": "tool_b", "return_value": {"is_error": true, "output": "", "message": "command not found", "display": [{"type": "brief", "text": "failed"}], "extras": null}}}}
+{"timestamp": 1789000013.0, "message": {"type": "CompactionBegin", "payload": {}}}
+{"timestamp": 1789000014.0, "message": {"type": "CompactionEnd", "payload": {}}}

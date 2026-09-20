@@ -1,0 +1,4 @@
+{"timestamp": "2026-09-20T11:00:00.000Z", "type": "session_meta", "payload": {"session_id": "codex-sess-b", "cwd": "/Users/demo/other", "cli_version": "0.147.0", "model_provider": "openai"}}
+{"timestamp": "2026-09-20T11:00:01.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "no accounting in this log"}]}}
+{"timestamp": "2026-09-20T11:00:02.000Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "{}", "call_id": "call_9"}}
+{"timestamp": "2026-09-20T11:00:03.000Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call_9", "output": "Command: true\nOriginal token count: 3\nOutput:\n"}}

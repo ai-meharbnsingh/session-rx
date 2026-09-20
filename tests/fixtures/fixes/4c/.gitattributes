@@ -1,0 +1,3 @@
+# EOL-exact 4C fixtures: git must not normalize a byte.
+* -text
+*.md -text

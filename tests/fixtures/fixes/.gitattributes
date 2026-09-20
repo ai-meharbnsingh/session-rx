@@ -1,0 +1,4 @@
+# EOL-exact fixtures: never normalize, never touch a byte.
+* -text
+*.md -text
+*.json -text

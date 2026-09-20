@@ -18,3 +18,19 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# npm (appended by wave 1A — package contract)
+npm-debug.log*
+*.tgz
+.npm/
+
+# Full-suite test artifact required at project root by the repo's
+# guard_red_before_green hook (F-012). Regenerated on every run: never tracked,
+# and already outside the package.json "files" whitelist so it cannot ship.
+/test_output.txt
+
+# Local disposal (INV-0: mv, never rm)
+_trash/
+
+# factory session-health instrumentation (not part of the product)
+docs/observe_log/

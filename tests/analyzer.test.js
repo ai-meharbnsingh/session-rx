@@ -1,0 +1,1024 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { RULES, evaluateRule, EVIDENCE_STATUSES } from "../src/analyzer/rules.js";
+import { analyzeSession, analyzeAll, buildReportInput } from "../src/analyzer/health.js";
+import { generateReport, generateReportDocument } from "../src/report/generator.js";
+import {
+  at,
+  makeSession,
+  call,
+  contextHeavy,
+  contextCalm,
+  contextObservedFloor,
+  contextObservedFloorTiny,
+  kimiNativeHigh,
+  kimiNativeLow,
+  kimiFractionAboveOne,
+  contextNoWindowNoFraction,
+  contextPromotedNoLadder,
+  cacheLow,
+  cacheHigh,
+  cacheReadsOnly,
+  cacheCreatesOnly,
+  cacheAllZero,
+  repeatFive,
+  repeatFour,
+  repeatPartialCoverage,
+  geminiToolCallsNoBytes,
+  bigResults,
+  smallResults,
+  bigResultsPartialCoverage,
+  noToolCalls,
+  longRising,
+  longFalling,
+  shortRising,
+  twoObservations,
+  noTimestamps,
+  concurrentChildren,
+  sequentialChildren,
+  childrenWithoutIntervals,
+  childrenPartialIntervals,
+  sidechainMarkedSession,
+  makeCollected,
+  promotionDiagnostic,
+} from "./fixtures/analyzer/sessions.js";
+
+const RULE_IDS = ["context-pressure", "cache-hit", "repeat-tool", "large-tool-result", "long-rising-context", "subagent-concurrency"];
+
+function ruleById(id) {
+  const rule = RULES.find((entry) => entry.id === id);
+  assert.ok(rule, `no rule declared with id ${id}`);
+  return rule;
+}
+
+/** Evaluate one rule and return its RuleResult. */
+function verdict(id, session, ctx = {}) {
+  return evaluateRule(ruleById(id), session, ctx);
+}
+
+function status(id, session, ctx = {}) {
+  return verdict(id, session, ctx).evidence.status;
+}
+
+function valueOf(result, labelFragment) {
+  const found = result.evidence.values.find((value) => value.label.includes(labelFragment));
+  assert.ok(found, `no evidence value whose label contains "${labelFragment}" in ${JSON.stringify(result.evidence.values.map((v) => v.label))}`);
+  return found.value;
+}
+
+/** Every unknown must be able to explain itself. */
+function assertUnknownWithReason(result, expectFragment) {
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(typeof result.evidence.reason, "string");
+  assert.ok(result.evidence.reason.length > 40, `unknown reason too thin to be useful: ${result.evidence.reason}`);
+  if (expectFragment) {
+    assert.ok(
+      result.evidence.reason.toLowerCase().includes(expectFragment.toLowerCase()),
+      `unknown reason does not mention "${expectFragment}": ${result.evidence.reason}`,
+    );
+  }
+}
+
+// ===========================================================================
+// the six rules as DATA
+// ===========================================================================
+
+test("exactly six rules are declared, with the BP-003 ids, in blueprint order", () => {
+  assert.deepEqual(RULES.map((rule) => rule.id), RULE_IDS);
+  assert.ok(Object.isFrozen(RULES));
+});
+
+test("every rule carries a name, a description, a severity, a fix id or null, and a threshold", () => {
+  for (const rule of RULES) {
+    assert.equal(typeof rule.name, "string", `${rule.id} name`);
+    assert.ok(rule.name.length > 0, `${rule.id} name is empty`);
+    assert.ok(rule.description.length > 30, `${rule.id} description is too thin to render`);
+    assert.ok(["info", "warn", "critical"].includes(rule.severity), `${rule.id} severity ${rule.severity}`);
+    assert.ok(rule.fix === null || typeof rule.fix === "string", `${rule.id} fix`);
+    assert.ok(rule.threshold.value !== undefined && rule.threshold.value !== null, `${rule.id} threshold value`);
+    assert.equal(typeof rule.evaluate, "function", `${rule.id} evaluate`);
+  }
+});
+
+test("every threshold derivation explains the choice in words, not as a bare number", () => {
+  for (const rule of RULES) {
+    const derivation = rule.threshold.derivation;
+    assert.equal(typeof derivation, "string", `${rule.id} derivation`);
+    // The UI shows this to a user who is being told they have a problem: it has
+    // to say WHY the line is where it is, not restate the number.
+    assert.ok(derivation.split(/\s+/).length >= 40, `${rule.id} derivation is ${derivation.split(/\s+/).length} words, too short to explain anything: ${derivation}`);
+    assert.ok(/because|rather than|so that|since|which is why|deliberately/i.test(derivation), `${rule.id} derivation gives no reasoning: ${derivation}`);
+  }
+});
+
+test("the five BP-004 fix ids are the only ones any rule points at", () => {
+  const known = new Set(["claude-auto-compact", "claude-output-hygiene", "claude-batch-commands", "claude-worker-cap", "claude-compact-contract"]);
+  for (const rule of RULES) {
+    if (rule.fix !== null) assert.ok(known.has(rule.fix), `${rule.id} points at unknown fix ${rule.fix}`);
+  }
+  assert.equal(ruleById("context-pressure").fix, "claude-auto-compact");
+  assert.equal(ruleById("cache-hit").fix, "claude-output-hygiene");
+  assert.equal(ruleById("repeat-tool").fix, "claude-batch-commands");
+  assert.equal(ruleById("large-tool-result").fix, "claude-output-hygiene");
+  assert.equal(ruleById("long-rising-context").fix, "claude-compact-contract");
+  assert.equal(ruleById("subagent-concurrency").fix, "claude-worker-cap");
+});
+
+test("long-rising-context is the only critical rule; the rest warn", () => {
+  assert.equal(ruleById("long-rising-context").severity, "critical");
+  for (const rule of RULES) {
+    if (rule.id !== "long-rising-context") assert.equal(rule.severity, "warn", `${rule.id}`);
+  }
+});
+
+// ===========================================================================
+// BP-003.01 context-pressure
+// ===========================================================================
+
+test("context-pressure: average above 0.70 of a real window is observed", () => {
+  const result = verdict("context-pressure", contextHeavy);
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "average per-turn context"), 85000);
+  assert.equal(valueOf(result, "average context as a share"), 0.85);
+  assert.equal(result.evidence.values.find((v) => v.label.includes("share of the window")).windowSource, "model-table");
+});
+
+test("context-pressure: average below 0.70 is not-observed, and the numbers are still reported", () => {
+  const result = verdict("context-pressure", contextCalm);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(result.evidence.reason, null);
+  assert.equal(valueOf(result, "average context as a share"), 0.15);
+});
+
+test("context-pressure: an observed-floor window yields unknown, NOT a warn (F-014 / BP-002.18)", () => {
+  const result = verdict("context-pressure", contextObservedFloor);
+  assertUnknownWithReason(result, "1.0");
+  // The failure this guards: floor/floor is 1.0, which would clear 0.70.
+  assert.notEqual(result.evidence.status, "observed");
+  assert.ok(!result.evidence.values.some((value) => value.unit === "fraction"), "no fraction may be emitted from an observed-floor window");
+  // The number itself is still shown, as the lower bound it is.
+  assert.equal(valueOf(result, "lower bound on the window"), 41344);
+});
+
+test("context-pressure: a trivial observed-floor session is unknown too, not 100% of window", () => {
+  const result = verdict("context-pressure", contextObservedFloorTiny);
+  assert.equal(result.evidence.status, "unknown");
+  assert.ok(result.evidence.reason.includes("BP-002.18") || result.evidence.reason.includes("F-014"));
+});
+
+test("context-pressure: a Kimi-shaped session with a native fraction and a null window still evaluates (DIS-005)", () => {
+  const high = verdict("context-pressure", kimiNativeHigh);
+  assert.equal(high.evidence.status, "observed");
+  assert.equal(valueOf(high, "average native context fraction"), 0.9);
+  assert.equal(high.evidence.values.find((v) => v.label.includes("average native")).windowSource, "native");
+  assert.ok(high.evidence.derivation.includes("DIS-005"));
+
+  const low = verdict("context-pressure", kimiNativeLow);
+  assert.equal(low.evidence.status, "not-observed");
+  assert.equal(valueOf(low, "average native context fraction"), 0.15);
+
+  // No absolute token count may be invented from a fraction.
+  for (const result of [high, low]) {
+    assert.ok(!result.evidence.values.some((value) => value.unit === "tokens"), "a fraction must not be converted into tokens");
+  }
+});
+
+test("context-pressure: a native fraction above 1.0 is unknown, neither rescaled nor clamped", () => {
+  const result = verdict("context-pressure", kimiFractionAboveOne);
+  assertUnknownWithReason(result, "above 1.0");
+  assert.ok(!result.evidence.values.some((value) => value.value === 0.42 || value.value === 1));
+});
+
+test("context-pressure: no window and no fraction is unknown", () => {
+  assertUnknownWithReason(verdict("context-pressure", contextNoWindowNoFraction), "no native context fraction");
+});
+
+test("context-pressure: a promotion with no known tier behind it is unknown (BP-002.14)", () => {
+  const result = verdict("context-pressure", contextPromotedNoLadder, { promotion: { ladder: "none" } });
+  assertUnknownWithReason(result, "BP-002.18");
+  // With a real vendor tier behind the same window, the fraction IS a measurement.
+  const promoted = verdict("context-pressure", contextPromotedNoLadder, { promotion: { ladder: "vendor" } });
+  assert.equal(promoted.evidence.status, "observed");
+});
+
+test("context-pressure: a known window with no context reading anywhere is unknown, not 0.00", () => {
+  const session = makeSession({ window: { tokens: 200000, source: "model-table" }, turns: [{ ts: at(1) }] });
+  const result = verdict("context-pressure", session);
+  assertUnknownWithReason(result, "no numerator");
+});
+
+test("context-pressure: no fraction this rule can emit ever exceeds 1.0", () => {
+  for (const session of [contextHeavy, contextCalm, kimiNativeHigh, contextPromotedNoLadder]) {
+    for (const value of verdict("context-pressure", session, { promotion: { ladder: "vendor" } }).evidence.values) {
+      if (value.unit === "fraction") assert.ok(value.value <= 1, `${value.label} = ${value.value}`);
+    }
+  }
+});
+
+// ===========================================================================
+// BP-003.02 cache-hit
+// ===========================================================================
+
+test("cache-hit: a rate below 0.85 is observed", () => {
+  const result = verdict("cache-hit", cacheLow);
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "cache hit rate"), 0.1);
+});
+
+test("cache-hit: a rate at or above 0.85 is not-observed", () => {
+  const result = verdict("cache-hit", cacheHigh);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(valueOf(result, "cache hit rate"), 0.95);
+});
+
+test("cache-hit: reads with no cache-creation figure is unknown, NOT a perfect 1.00", () => {
+  const result = verdict("cache-hit", cacheReadsOnly);
+  assertUnknownWithReason(result, "1.00");
+  assert.ok(!result.evidence.values.some((value) => value.value === 1 && value.unit === "ratio"));
+});
+
+test("cache-hit: creations with no read figure is unknown, NOT a damning 0.00", () => {
+  assertUnknownWithReason(verdict("cache-hit", cacheCreatesOnly), "0.00");
+});
+
+test("cache-hit: both counters present and zero is unknown, because 0/0 is not a rate", () => {
+  assertUnknownWithReason(verdict("cache-hit", cacheAllZero), "no cache traffic");
+});
+
+test("cache-hit: no cache counters at all is unknown", () => {
+  assertUnknownWithReason(verdict("cache-hit", contextHeavy), "neither a cache-read nor a cache-creation");
+});
+
+// ===========================================================================
+// BP-003.03 repeat-tool
+// ===========================================================================
+
+test("repeat-tool: five identical tool call + input + result triples is observed", () => {
+  const result = verdict("repeat-tool", repeatFive);
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "highest number of identical"), 5);
+});
+
+test("repeat-tool: four is not-observed when every result was attributable", () => {
+  const result = verdict("repeat-tool", repeatFour);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(valueOf(result, "highest number of identical"), 4);
+});
+
+test("repeat-tool: a same INPUT run whose results differ is not a repeat", () => {
+  const session = makeSession({
+    turns: [4096, 5000, 6000, 7000, 8000, 9000].map((bytes, index) => ({
+      ts: at(index + 1),
+      toolCalls: [call("Bash", { command: "git status" })],
+      toolResultBytes: bytes,
+    })),
+  });
+  const result = verdict("repeat-tool", session);
+  assert.equal(result.evidence.status, "not-observed", "six identical inputs with six different results must not fire");
+  assert.equal(valueOf(result, "highest number of identical"), 1);
+});
+
+test("repeat-tool: a Gemini-shaped session with tool calls but no result bytes is unknown (DIS-003/DIS-006)", () => {
+  const result = verdict("repeat-tool", geminiToolCallsNoBytes);
+  assertUnknownWithReason(result, "DIS-003");
+  assert.equal(valueOf(result, "calls with an attributable result signature"), 0);
+  // The trap: three identical INPUTS are present. Input-only matching is refused.
+  assert.ok(result.evidence.reason.includes("input"), result.evidence.reason);
+});
+
+test("repeat-tool: partial coverage under the threshold is unknown, not a pass", () => {
+  const result = verdict("repeat-tool", repeatPartialCoverage);
+  assertUnknownWithReason(result, "cannot be separated");
+});
+
+test("repeat-tool: zero tool calls is unknown without corpus evidence, and a pass with it", () => {
+  assertUnknownWithReason(verdict("repeat-tool", noToolCalls), "parser gap");
+  assert.equal(status("repeat-tool", noToolCalls, { toolCallsRecorded: true }), "not-observed");
+});
+
+test("repeat-tool: identical input objects with differently ordered keys count as the same input", () => {
+  const session = makeSession({
+    turns: [
+      { ts: at(1), toolCalls: [call("Bash", { command: "ls", cwd: "/a" })], toolResultBytes: 10 },
+      { ts: at(2), toolCalls: [call("Bash", { cwd: "/a", command: "ls" })], toolResultBytes: 10 },
+      { ts: at(3), toolCalls: [call("bash", { command: "ls", cwd: "/a" })], toolResultBytes: 10 },
+      { ts: at(4), toolCalls: [call("BASH", { cwd: "/a", command: "ls" })], toolResultBytes: 10 },
+      { ts: at(5), toolCalls: [call("Bash", { command: "ls", cwd: "/a" })], toolResultBytes: 10 },
+    ],
+  });
+  assert.equal(status("repeat-tool", session), "observed");
+});
+
+// ===========================================================================
+// BP-003.04 large-tool-result
+// ===========================================================================
+
+test("large-tool-result: three results over 10,240 bytes is observed", () => {
+  const result = verdict("large-tool-result", bigResults);
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "totalled more than"), 3);
+  assert.equal(valueOf(result, "largest tool result"), 44000);
+});
+
+test("large-tool-result: small results with full coverage is not-observed", () => {
+  const result = verdict("large-tool-result", smallResults);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(valueOf(result, "totalled more than"), 0);
+});
+
+test("large-tool-result: a Gemini-shaped session yields unknown, never a zero (DIS-006)", () => {
+  const result = verdict("large-tool-result", geminiToolCallsNoBytes);
+  assertUnknownWithReason(result, "DIS-006");
+  assert.equal(valueOf(result, "turns with a recorded result byte length"), 0);
+  assert.ok(!result.evidence.values.some((value) => value.label.includes("totalled more than")), "no oversized count may be reported when nothing was measured");
+});
+
+test("large-tool-result: two oversized plus one unmeasured turn is unknown, not a pass", () => {
+  const result = verdict("large-tool-result", bigResultsPartialCoverage);
+  assertUnknownWithReason(result, "incomplete");
+});
+
+test("large-tool-result: zero tool calls is unknown without corpus evidence, and a pass with it", () => {
+  assertUnknownWithReason(verdict("large-tool-result", noToolCalls), "parser gap");
+  assert.equal(status("large-tool-result", noToolCalls, { toolCallsRecorded: true }), "not-observed");
+});
+
+// ===========================================================================
+// BP-003.05 long-rising-context
+// ===========================================================================
+
+test("long-rising-context: over 4h AND rising is observed", () => {
+  const result = verdict("long-rising-context", longRising);
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "session elapsed"), 6);
+  assert.ok(valueOf(result, "context trend") > 0);
+  assert.ok(result.evidence.derivation.includes("Theil-Sen"));
+});
+
+test("long-rising-context: long but compacting is not-observed", () => {
+  const result = verdict("long-rising-context", longFalling);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.ok(valueOf(result, "context trend") < 0);
+});
+
+test("long-rising-context: rising but short is not-observed, and both conditions are still reported", () => {
+  const result = verdict("long-rising-context", shortRising);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.ok(valueOf(result, "session elapsed") < 4);
+  assert.ok(valueOf(result, "context trend") > 0, "the slope is reported even when duration is what failed");
+});
+
+test("long-rising-context: two observations is unknown — two points are not a trend", () => {
+  assertUnknownWithReason(verdict("long-rising-context", twoObservations), "fewer than the 3");
+});
+
+test("long-rising-context: no timestamps is unknown even though context readings exist", () => {
+  assertUnknownWithReason(verdict("long-rising-context", noTimestamps), "elapsed");
+});
+
+test("long-rising-context: one outlier turn cannot set the trend (Theil-Sen, not least squares)", () => {
+  // Flat at 50,000 for twelve hours, with one 900,000 spike. Least squares
+  // would read that as a steep rise; the median of pairwise slopes does not.
+  const session = makeSession({
+    startedAt: at(0),
+    endedAt: at(720),
+    turns: [
+      { ts: at(0), inputTokens: 50000 },
+      { ts: at(120), inputTokens: 50000 },
+      { ts: at(240), inputTokens: 50000 },
+      { ts: at(360), inputTokens: 900000 },
+      { ts: at(480), inputTokens: 50000 },
+      { ts: at(600), inputTokens: 50000 },
+      { ts: at(720), inputTokens: 50000 },
+    ],
+  });
+  const result = verdict("long-rising-context", session);
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(valueOf(result, "context trend"), 0);
+});
+
+// ===========================================================================
+// BP-003.06 subagent-concurrency
+// ===========================================================================
+
+test("subagent-concurrency: peak above half of dispatched is observed", () => {
+  const result = verdict("subagent-concurrency", contextHeavy, { children: concurrentChildren });
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "peak sub-agents"), 3);
+  assert.equal(valueOf(result, "dispatched by this session"), 4);
+  assert.equal(valueOf(result, "share of dispatched"), 0.75);
+});
+
+test("subagent-concurrency: sequential children are not concurrent, including one ending as the next begins", () => {
+  const result = verdict("subagent-concurrency", contextHeavy, { children: sequentialChildren });
+  assert.equal(result.evidence.status, "not-observed");
+  assert.equal(valueOf(result, "peak sub-agents"), 1);
+});
+
+test("subagent-concurrency: children with no intervals is unknown — a count is not a concurrency", () => {
+  const result = verdict("subagent-concurrency", contextHeavy, { children: childrenWithoutIntervals });
+  assertUnknownWithReason(result, "how many ran at once");
+});
+
+test("subagent-concurrency: a below-threshold peak measured from only some intervals is unknown", () => {
+  const result = verdict("subagent-concurrency", contextHeavy, { children: childrenPartialIntervals });
+  assertUnknownWithReason(result, "can only be higher");
+});
+
+// A reason string is the product's honesty surface, so these pin the CLAIM, not
+// just the presence of prose.  The claim changed when the collectors started
+// reading sub-agent evidence (BP-003.07 / BP-003.08): what was a parser gap is
+// now a scan-width limit (F-026), and the old text would send a reader to fix
+// something already fixed.
+
+/** Claims that were true before the collectors read sub-agent evidence, and are not now. */
+const CLOSED_PARSER_GAP_CLAIMS = [
+  "does not read",
+  "does not expose",
+  "not one sub-agent interval reaches the analyzer",
+  "gap is in the parser",
+];
+
+/** An unknown may never be dressed up as a zero, however it is worded. */
+const NOT_A_ZERO_DISCLAIMERS = [
+  "not a claim that zero sub-agents were dispatched",
+  "not proof that no sub-agent was dispatched",
+];
+
+function assertNoClosedParserGapClaim(reason, label) {
+  for (const claim of CLOSED_PARSER_GAP_CLAIMS) {
+    assert.ok(
+      !reason.toLowerCase().includes(claim),
+      `${label} reason still blames a parser gap that is closed ("${claim}"): ${reason}`,
+    );
+  }
+}
+
+function assertDoesNotClaimZeroDispatched(reason, label) {
+  assert.ok(
+    NOT_A_ZERO_DISCLAIMERS.some((phrase) => reason.toLowerCase().includes(phrase)),
+    `${label} reason does not say that an empty child list is not a zero: ${reason}`,
+  );
+}
+
+test("subagent-concurrency: Claude is unknown on scan width, not on an unread subagents directory", () => {
+  const result = verdict("subagent-concurrency", sidechainMarkedSession, { sidechainTurns: 2 });
+  // The directory is still named — it is where the evidence comes FROM now.
+  assertUnknownWithReason(result, "subagents");
+  assert.ok(result.evidence.reason.includes("isSidechain"));
+  // The real cause today: the scan, not the parser (F-026).
+  assert.ok(result.evidence.reason.includes("F-026"), `Claude reason does not name F-026: ${result.evidence.reason}`);
+  assert.ok(result.evidence.reason.includes("ARE read"), `Claude reason does not say the transcripts are read: ${result.evidence.reason}`);
+  assertNoClosedParserGapClaim(result.evidence.reason, "Claude");
+  assertDoesNotClaimZeroDispatched(result.evidence.reason, "Claude");
+  assert.equal(valueOf(result, "marked as belonging to a sub-agent"), 2);
+});
+
+test("subagent-concurrency: Kimi is unknown on scan width, and says F-006's parser gap is closed", () => {
+  const result = verdict("subagent-concurrency", kimiNativeHigh);
+  assertUnknownWithReason(result, "SubagentEvent");
+  assert.ok(result.evidence.reason.includes("F-006"), `Kimi reason does not mention F-006: ${result.evidence.reason}`);
+  assert.ok(result.evidence.reason.includes("closed"), `Kimi reason does not say the gap is closed: ${result.evidence.reason}`);
+  assert.ok(result.evidence.reason.includes("F-026"), `Kimi reason does not name F-026: ${result.evidence.reason}`);
+  assertNoClosedParserGapClaim(result.evidence.reason, "Kimi");
+  assertDoesNotClaimZeroDispatched(result.evidence.reason, "Kimi");
+});
+
+test("subagent-concurrency: an unknown from a CLI whose sub-agent evidence IS read names the scan, never a parser gap", () => {
+  // Claude, Kimi and OpenCode all read sub-agent evidence (BP-003.07 - BP-003.09).
+  for (const cli of ["claude", "kimi", "opencode"]) {
+    const session = makeSession({ cli, turns: [{ ts: at(1) }] });
+    // Every shape of "nothing collected" this rule can be handed: no linkage
+    // row at all, a bounded scan, a complete scan, and sub-agent reading off.
+    const contexts = [
+      {},
+      { childLinkageAvailable: true, corpusComplete: false, sessionMeta: { subagentSessionIds: [] } },
+      { childLinkageAvailable: false, corpusComplete: true, sessionMeta: { subagentSessionIds: [] } },
+      { childLinkageAvailable: true, corpusComplete: false, sessionMeta: { subagentSessionIds: null } },
+    ];
+    for (const ctx of contexts) {
+      const result = verdict("subagent-concurrency", session, ctx);
+      const label = `${cli} with ctx ${JSON.stringify(ctx)}`;
+      assert.equal(result.evidence.status, "unknown", label);
+      assert.ok(result.evidence.reason.length > 40, `${label} reason too thin: ${result.evidence.reason}`);
+      assertNoClosedParserGapClaim(result.evidence.reason, label);
+      assertDoesNotClaimZeroDispatched(result.evidence.reason, label);
+    }
+  }
+});
+
+test("subagent-concurrency: Codex and Gemini reasons are untouched — their gap is structural, not a parser gap (DIS-004)", () => {
+  for (const cli of ["codex", "gemini"]) {
+    const result = verdict("subagent-concurrency", makeSession({ cli, turns: [{ ts: at(1) }] }));
+    assertUnknownWithReason(result, "DIS-004");
+    assert.ok(result.evidence.reason.includes("establishes a sub-agent interval"), `${cli}: ${result.evidence.reason}`);
+    assert.ok(!result.evidence.reason.includes("F-026"), `${cli} must not blame scan width: ${result.evidence.reason}`);
+    assertNoClosedParserGapClaim(result.evidence.reason, cli);
+  }
+});
+
+test("subagent-concurrency: OpenCode with no children is unknown while a limit could have cut them off, and not-observed once the whole corpus was scanned", () => {
+  const session = makeSession({ cli: "opencode", turns: [{ ts: at(1) }] });
+  assertUnknownWithReason(verdict("subagent-concurrency", session, { childLinkageAvailable: true, corpusComplete: false }), "bounded by the collection limit");
+  const complete = verdict("subagent-concurrency", session, { childLinkageAvailable: true, corpusComplete: true });
+  assert.equal(complete.evidence.status, "not-observed");
+  assert.equal(valueOf(complete, "linked to this session"), 0);
+});
+
+// ===========================================================================
+// the honesty contract, across all rules
+// ===========================================================================
+
+test("every rule returns a status from the triad and nothing else", () => {
+  const sessions = [contextHeavy, contextObservedFloor, kimiNativeHigh, geminiToolCallsNoBytes, cacheReadsOnly, longRising, noToolCalls, makeSession({ turns: [] })];
+  for (const session of sessions) {
+    for (const rule of RULES) {
+      const result = evaluateRule(rule, session);
+      assert.ok(EVIDENCE_STATUSES.includes(result.evidence.status), `${rule.id} returned ${result.evidence.status}`);
+    }
+  }
+});
+
+test("every unknown carries a reason, in every rule, on every fixture", () => {
+  const sessions = [contextHeavy, contextObservedFloor, contextObservedFloorTiny, kimiNativeHigh, kimiFractionAboveOne, geminiToolCallsNoBytes, cacheReadsOnly, cacheAllZero, longRising, twoObservations, noTimestamps, noToolCalls, repeatPartialCoverage, bigResultsPartialCoverage, makeSession({ turns: [] })];
+  let unknowns = 0;
+  for (const session of sessions) {
+    for (const rule of RULES) {
+      const result = evaluateRule(rule, session);
+      if (result.evidence.status !== "unknown") { assert.equal(result.evidence.reason, null, `${rule.id} set a reason on a ${result.evidence.status} verdict`); continue; }
+      unknowns += 1;
+      assert.equal(typeof result.evidence.reason, "string", `${rule.id} unknown with no reason`);
+      assert.ok(result.evidence.reason.trim().length > 40, `${rule.id} reason too thin: ${result.evidence.reason}`);
+    }
+  }
+  assert.ok(unknowns > 20, `expected the fixtures to exercise many unknown paths, got ${unknowns}`);
+});
+
+test("a rule that throws becomes unknown with the error in the reason, never a pass", () => {
+  const exploding = { ...ruleById("cache-hit"), evaluate() { throw new Error("boom"); } };
+  const result = evaluateRule(exploding, contextHeavy);
+  assertUnknownWithReason(result, "boom");
+  assert.ok(result.evidence.reason.includes("never as a pass"));
+});
+
+test("a rule returning an unrecognised status is coerced to unknown and says so", () => {
+  const liar = { ...ruleById("cache-hit"), evaluate() { return { status: "fine", values: [], derivation: null }; } };
+  const result = evaluateRule(liar, contextHeavy);
+  assertUnknownWithReason(result, "not one of observed");
+});
+
+test("a rule returning unknown with no reason still gets an explicit reason", () => {
+  const terse = { ...ruleById("cache-hit"), evaluate() { return { status: "unknown", values: [] }; } };
+  const result = evaluateRule(terse, contextHeavy);
+  assertUnknownWithReason(result, "NOT a pass");
+});
+
+test("no rule ever emits a zero as the evidence for an unmeasurable check", () => {
+  // The specific failure: a count of 0 that a reader takes for "none happened".
+  const unmeasurable = [
+    verdict("large-tool-result", geminiToolCallsNoBytes),
+    verdict("repeat-tool", geminiToolCallsNoBytes),
+    verdict("cache-hit", cacheReadsOnly),
+    verdict("context-pressure", contextObservedFloor),
+  ];
+  for (const result of unmeasurable) {
+    assert.equal(result.evidence.status, "unknown");
+    for (const value of result.evidence.values) {
+      if (value.value !== 0) continue;
+      // A zero is allowed only where its label says it counts what WAS measured.
+      assert.ok(/attributable|recorded result byte length/i.test(value.label), `an unexplained zero survives on an unknown verdict: ${value.label}`);
+    }
+  }
+});
+
+// ===========================================================================
+// analyzeSession: all six rules, always, and a score that cannot hide unknowns
+// ===========================================================================
+
+test("analyzeSession emits all six rules for every session, whatever the verdicts", () => {
+  for (const session of [contextHeavy, contextObservedFloor, kimiNativeHigh, geminiToolCallsNoBytes, makeSession({ turns: [] })]) {
+    const health = analyzeSession(session);
+    assert.equal(health.rules.length, 6);
+    assert.deepEqual([...health.rules.map((rule) => rule.id)].sort(), [...RULE_IDS].sort());
+  }
+});
+
+test("analyzeSession ranks observed rules first, then unmeasurable, then passes", () => {
+  const health = analyzeSession(bigResults, { toolCallsRecorded: true });
+  const order = health.rules.map((rule) => rule.evidence.status);
+  const rank = { observed: 0, unknown: 1, "not-observed": 2 };
+  for (let index = 1; index < order.length; index += 1) {
+    assert.ok(rank[order[index - 1]] <= rank[order[index]], `out of order: ${order.join(" ")}`);
+  }
+});
+
+test("an unknown never counts toward the score, and the score always states how many there were", () => {
+  const health = analyzeSession(geminiToolCallsNoBytes);
+  const { score } = health;
+  assert.equal(score.total, 6);
+  assert.equal(score.passed + score.observed + score.unknown, 6);
+  const unknownRules = health.rules.filter((rule) => rule.evidence.status === "unknown").length;
+  assert.equal(score.unknown, unknownRules);
+  assert.ok(score.unknown > 0, "this fixture exists to produce unknowns");
+  assert.equal(score.passed, health.rules.filter((rule) => rule.evidence.status === "not-observed").length);
+  assert.ok(score.label.includes(`${score.unknown} could not be measured`), score.label);
+});
+
+test("a session where nothing could be measured scores 0 of 6 passed, not 6 of 6", () => {
+  const health = analyzeSession(makeSession({ turns: [] }));
+  assert.equal(health.score.passed, 0);
+  assert.equal(health.score.unknown, 6);
+  assert.equal(health.score.label, "0 of 6 checks passed, 0 problems observed, 6 could not be measured");
+});
+
+test("analyzeSession carries the window promotion through, so a stale table entry stays visible", () => {
+  const promotion = { modelId: "claude-opus-5", tableTokens: 200000, tokens: 1000000, ladder: "vendor" };
+  const health = analyzeSession(contextHeavy, { promotion });
+  assert.deepEqual(health.windowPromotion, promotion);
+});
+
+// ===========================================================================
+// analyzeAll over a collected corpus
+// ===========================================================================
+
+function corpus() {
+  const claudeSessions = [contextHeavy, longRising, bigResults];
+  const geminiSessions = [geminiToolCallsNoBytes];
+  const openCodeSessions = [contextObservedFloor];
+  return makeCollected({
+    supported: [
+      { id: "claude", displayName: "Claude Code", sessions: claudeSessions, installed: true, paths: [], status: "supported" },
+      { id: "gemini", displayName: "Gemini CLI", sessions: geminiSessions, installed: true, paths: [], status: "supported" },
+      {
+        id: "opencode",
+        displayName: "OpenCode",
+        sessions: openCodeSessions,
+        installed: true,
+        paths: [],
+        status: "supported",
+        sessionMeta: {
+          [openCodeSessions[0].sessionId]: { sessionId: openCodeSessions[0].sessionId, parentSessionId: null },
+        },
+      },
+    ],
+    detectionOnly: [{ id: "copilot", displayName: "Copilot CLI", installed: true, paths: [], status: "detection-only" }],
+    absent: [{ id: "grok-amp", displayName: "Grok/Amp", installed: false, paths: [], status: "absent" }],
+    diagnostics: [promotionDiagnostic("claude", contextHeavy.sessionId)],
+  });
+}
+
+test("analyzeAll analyzes every supported session and reports every collector", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  assert.equal(out.sessions.length, 5);
+  assert.deepEqual(out.collectors.map((entry) => entry.cli), ["claude", "gemini", "opencode", "copilot", "grok-amp"]);
+  assert.equal(out.collectors.find((entry) => entry.cli === "copilot").sessions, null, "a detection-only CLI has no session count, and null is not zero");
+  assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").support, "unsupported");
+});
+
+test("analyzeAll surfaces windowPromotions in the per-CLI note, rather than silently correcting the table", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const claude = out.collectors.find((entry) => entry.cli === "claude");
+  assert.ok(claude.note.includes("BP-002.17"), claude.note);
+  assert.ok(claude.note.includes("200,000"), claude.note);
+  assert.ok(claude.note.includes("1,000,000"), claude.note);
+  assert.ok(claude.note.includes("stale"), claude.note);
+  assert.equal(out.promotions.length, 1);
+  assert.equal(out.promotions[0].cli, "claude");
+  const promoted = out.sessions.find((session) => session.sessionId === contextHeavy.sessionId);
+  assert.equal(promoted.windowPromotion.tokens, 1000000);
+});
+
+test("analyzeAll only claims a measured zero for sub-agents when the corpus was not cut off by a limit", () => {
+  const withLimit = analyzeAll(corpus(), { limit: 1 });
+  const withoutLimit = analyzeAll(corpus());
+  const openCodeOf = (out) => out.sessions.find((session) => session.cli === "opencode")
+    .rules.find((rule) => rule.id === "subagent-concurrency").evidence.status;
+  assert.equal(withLimit.sessions.length, 5);
+  assert.equal(openCodeOf(withLimit), "unknown");
+  assert.equal(openCodeOf(withoutLimit), "not-observed");
+});
+
+test("analyzeAll counts a limited collection in the note, so a partial corpus is visible", () => {
+  const out = analyzeAll(corpus(), { limit: 1 });
+  assert.ok(out.collectors.find((entry) => entry.cli === "claude").note.includes("collection limit of 1"));
+});
+
+test("the aggregate reports a rule as observed while still stating how many sessions were unmeasurable", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const aggregate = out.reportInput.rules.find((rule) => rule.id === "large-tool-result");
+  assert.equal(aggregate.evidence.status, "observed");
+  const unmeasurable = aggregate.evidence.values.find((value) => value.label.includes("could NOT be measured"));
+  assert.ok(unmeasurable, "the unmeasurable count must travel with an observed verdict");
+  assert.ok(unmeasurable.value >= 1, `expected unmeasurable sessions, got ${unmeasurable.value}`);
+  assert.ok(aggregate.evidence.values.some((value) => value.label === "sessions checked" && value.value === 5));
+});
+
+test("the aggregate is unknown, with a counted reason, when nothing was observed and something was unmeasurable", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const aggregate = out.reportInput.rules.find((rule) => rule.id === "subagent-concurrency");
+  assert.equal(aggregate.evidence.status, "unknown");
+  assert.ok(/\d+ of \d+ sessions could not be measured/.test(aggregate.evidence.reason), aggregate.evidence.reason);
+  assert.ok(aggregate.evidence.reason.includes("Most common reason"), aggregate.evidence.reason);
+});
+
+test("all six rules reach the report input, ranked observed-first, even when four of them are unknown", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  assert.equal(out.reportInput.rules.length, 6);
+  assert.deepEqual([...out.reportInput.rules.map((rule) => rule.id)].sort(), [...RULE_IDS].sort());
+  const rank = { observed: 0, unknown: 1, "not-observed": 2 };
+  const statuses = out.reportInput.rules.map((rule) => rule.evidence.status);
+  for (let index = 1; index < statuses.length; index += 1) {
+    assert.ok(rank[statuses[index - 1]] <= rank[statuses[index]], statuses.join(" "));
+  }
+  // Within observed, critical outranks warn (the generator does not re-rank).
+  const observed = out.reportInput.rules.filter((rule) => rule.evidence.status === "observed");
+  if (observed.length > 1 && observed.some((rule) => rule.severity === "critical")) {
+    assert.equal(observed[0].severity, "critical");
+  }
+});
+
+test("an empty corpus is unknown on all six rules, never six passes", () => {
+  const out = analyzeAll(makeCollected(), { generatedAt: "2026-09-20T16:00:00Z" });
+  assert.equal(out.sessions.length, 0);
+  assert.equal(out.reportInput.rules.length, 6);
+  for (const rule of out.reportInput.rules) {
+    assert.equal(rule.evidence.status, "unknown", rule.id);
+    assert.ok(rule.evidence.reason.includes("not a clean corpus"), rule.evidence.reason);
+  }
+});
+
+// ===========================================================================
+// F-023 — a sub-agent session is evidence ABOUT its parent, not a peer OF it
+// ===========================================================================
+
+/**
+ * Two sessions the user started and six sub-agent sessions, shaped like the
+ * real corpus: `sessionMeta` names the parent, and the sub-agent's interval
+ * lives on the sub-agent SESSION, which is why it has to be collected.
+ *
+ *   parent-1  <- child-a, child-b, child-c   (three overlapping: observed)
+ *                child-a <- grandchild       (a sub-agent of a sub-agent)
+ *   parent-2  <- child-d, child-e            (two sequential: not-observed)
+ *   (nothing) <- orphan                      (names a parent this scan did not read)
+ */
+function subagentCorpus() {
+  const parentOne = makeSession({ sessionId: "parent-1", startedAt: at(0), endedAt: at(60), turns: [{ ts: at(1), inputTokens: 1000, toolCalls: [call("Task", { a: 1 })] }] });
+  const parentTwo = makeSession({ sessionId: "parent-2", startedAt: at(0), endedAt: at(60), turns: [{ ts: at(1), inputTokens: 1000, toolCalls: [call("Task", { b: 2 })] }] });
+  const childA = makeSession({ sessionId: "child-a", startedAt: at(0), endedAt: at(30), turns: [{ ts: at(2), inputTokens: 500 }] });
+  const childB = makeSession({ sessionId: "child-b", startedAt: at(5), endedAt: at(35), turns: [{ ts: at(6), inputTokens: 500 }] });
+  const childC = makeSession({ sessionId: "child-c", startedAt: at(10), endedAt: at(40), turns: [{ ts: at(11), inputTokens: 500 }] });
+  const childD = makeSession({ sessionId: "child-d", startedAt: at(0), endedAt: at(10), turns: [{ ts: at(2), inputTokens: 500 }] });
+  const childE = makeSession({ sessionId: "child-e", startedAt: at(20), endedAt: at(30), turns: [{ ts: at(22), inputTokens: 500 }] });
+  const grandchild = makeSession({ sessionId: "grandchild", startedAt: at(1), endedAt: at(9), turns: [{ ts: at(2), inputTokens: 250 }] });
+  const orphan = makeSession({ sessionId: "orphan", startedAt: at(0), endedAt: at(5), turns: [{ ts: at(1), inputTokens: 250 }] });
+
+  const sessions = [parentOne, parentTwo, childA, childB, childC, childD, childE, grandchild, orphan];
+  const parentOf = {
+    "parent-1": null,
+    "parent-2": null,
+    "child-a": "parent-1",
+    "child-b": "parent-1",
+    "child-c": "parent-1",
+    "child-d": "parent-2",
+    "child-e": "parent-2",
+    grandchild: "child-a",
+    orphan: "parent-never-collected",
+  };
+  const sessionMeta = {};
+  for (const session of sessions) {
+    sessionMeta[session.sessionId] = { sessionId: session.sessionId, parentSessionId: parentOf[session.sessionId] };
+  }
+  return makeCollected({
+    supported: [{ id: "claude", displayName: "Claude Code", sessions, installed: true, paths: [], status: "supported", sessionMeta }],
+  });
+}
+
+const ownIds = (out) => out.sessions.map((session) => session.sessionId).sort();
+const rule6 = (session) => session.rules.find((rule) => rule.id === "subagent-concurrency");
+
+test("F-023: sub-agent sessions are kept out of the session list and the session count", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  assert.deepEqual(ownIds(out), ["parent-1", "parent-2"], "only the sessions the user started are listed");
+  assert.equal(out.sessions.length, 2);
+  assert.equal(out.reportInput.range.sessions, 2, "the headline count is the user's own sessions");
+  assert.equal(out.collectors.find((entry) => entry.cli === "claude").sessions, 2);
+  for (const session of out.sessions) {
+    assert.equal(session.isSubagentSession, false);
+    assert.equal(session.parentSessionId, null);
+  }
+});
+
+test("F-023: every sub-agent session set aside is still analyzed, counted and reachable", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+
+  // counted — 6 real sessions may not vanish quietly
+  assert.equal(out.subagentSessions.length, 7);
+  assert.equal(out.subagentSessionsSetAside.total, 7);
+  assert.equal(out.subagentSessionsSetAside.orphans, 1);
+  assert.deepEqual(out.subagentSessionsSetAside.byCli, [{ cli: "claude", count: 7, orphans: 1 }]);
+  assert.equal(out.collectors.find((entry) => entry.cli === "claude").subagentSessions, 7);
+  assert.equal(out.reportInput.range.subagentSessions, 7);
+  assert.equal(out.reportInput.clis.find((entry) => entry.cli === "claude").subagentSessions, 7);
+
+  // reachable — under the parent that launched it, nesting included
+  const byId = new Map(out.sessions.map((session) => [session.sessionId, session]));
+  assert.deepEqual(byId.get("parent-1").subagentSessions.map((s) => s.sessionId), ["child-a", "child-b", "child-c"]);
+  assert.deepEqual(byId.get("parent-2").subagentSessions.map((s) => s.sessionId), ["child-d", "child-e"]);
+  const childA = byId.get("parent-1").subagentSessions.find((s) => s.sessionId === "child-a");
+  assert.deepEqual(childA.subagentSessions.map((s) => s.sessionId), ["grandchild"], "a sub-agent of a sub-agent sits under its real parent, not at the top");
+
+  // analyzed in full — set aside is not the same as degraded
+  for (const child of out.subagentSessions) {
+    assert.equal(child.isSubagentSession, true);
+    assert.equal(typeof child.parentSessionId, "string");
+    assert.deepEqual(child.rules.map((rule) => rule.id).sort(), [...RULE_IDS].sort());
+    assert.equal(child.score.total, 6);
+  }
+
+  // the orphan is set aside WITH the rest, never dropped for having no parent card
+  const orphan = out.subagentSessions.find((session) => session.sessionId === "orphan");
+  assert.ok(orphan, "a sub-agent whose parent was not scanned is still in the payload");
+  assert.equal(ownIds(out).includes("orphan"), false, "and it is still not a session of the user's own");
+});
+
+test("F-023: rule 6 keeps every sub-agent interval — the verdict is identical to when children were peers", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const byId = new Map(out.sessions.map((session) => [session.sessionId, session]));
+
+  const one = rule6(byId.get("parent-1"));
+  assert.equal(one.evidence.status, "observed", "three overlapping sub-agents out of three dispatched is still observed");
+  assert.equal(valueOf(one, "peak sub-agents running at the same time"), 3);
+  assert.equal(valueOf(one, "sub-agent sessions dispatched by this session"), 3);
+  assert.equal(valueOf(one, "linked sub-agent sessions with a usable interval"), 3, "excluding a child from the list must not exclude its interval");
+
+  const two = rule6(byId.get("parent-2"));
+  assert.equal(two.evidence.status, "not-observed", "two sequential sub-agents is a measured pass, not unknown");
+  assert.equal(valueOf(two, "peak sub-agents running at the same time"), 1);
+
+  // and the rule reaches a verdict for every session, own or set aside
+  for (const session of [...out.sessions, ...out.subagentSessions]) {
+    assert.notEqual(rule6(session).evidence.status, "unknown", `${session.sessionId} lost its rule 6 verdict`);
+  }
+});
+
+test("F-023: corpus aggregates and top findings are about the user's own sessions", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const aggregate = out.reportInput.rules.find((rule) => rule.id === "subagent-concurrency");
+  assert.equal(aggregate.evidence.status, "observed");
+  assert.equal(aggregate.evidence.values.find((value) => value.label === "sessions checked").value, 2, "8 sessions were analyzed; 2 of them are the user's");
+  assert.equal(aggregate.evidence.values.find((value) => value.label.includes("was observed")).value, 1);
+  assert.equal(aggregate.evidence.values.find((value) => value.label.includes("could NOT be measured")).value, 0);
+});
+
+test("F-023: the per-CLI note states how many sessions were set aside and why, and names the orphan", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const note = out.collectors.find((entry) => entry.cli === "claude").note;
+  assert.ok(note.includes("7 of the 9 sessions"), note);
+  assert.ok(note.includes("set aside"), note);
+  assert.ok(note.includes("evidence about that session"), note);
+  assert.ok(/1 of them names a parent that this scan did not read/.test(note), note);
+});
+
+test("F-023: a CLI whose only sessions are sub-agents reports zero of its own, and says so", () => {
+  const child = makeSession({ sessionId: "lonely-child", turns: [{ ts: at(1), inputTokens: 100 }] });
+  const out = analyzeAll(
+    makeCollected({
+      supported: [{
+        id: "claude", displayName: "Claude Code", sessions: [child], installed: true, paths: [], status: "supported",
+        sessionMeta: { "lonely-child": { sessionId: "lonely-child", parentSessionId: "parent-elsewhere" } },
+      }],
+    }),
+    { generatedAt: "2026-09-20T16:00:00Z" },
+  );
+  assert.equal(out.sessions.length, 0);
+  assert.equal(out.subagentSessionsSetAside.total, 1);
+  const note = out.collectors[0].note;
+  assert.ok(note.includes("every one of the 1 session"), note);
+  assert.ok(note.includes("sub-agent transcript"), note);
+});
+
+test("F-023: a corpus with no parent linkage at all is untouched — every session stays the user's own", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  assert.equal(out.sessions.length, 5);
+  assert.equal(out.subagentSessions.length, 0);
+  assert.equal(out.subagentSessionsSetAside.total, 0);
+  assert.equal(out.reportInput.range.subagentSessions, 0);
+  for (const session of out.sessions) assert.deepEqual(session.subagentSessions, []);
+});
+
+test("F-023: a caller that builds its own ReportInput still gets the set-aside count, derived from the sessions", () => {
+  // This is /api/report's path: it filters `analysis.sessions` and calls
+  // buildReportInput itself, so it cannot state the corpus total.
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const derived = buildReportInput({ sessions: out.sessions, clis: out.collectors });
+  assert.equal(derived.range.sessions, 2);
+  assert.equal(derived.range.subagentSessions, 6, "3 + 2 attached children plus the 1 grandchild beneath them; the orphan hangs off no counted session");
+
+  // A session list that never carried the channel says nothing rather than zero.
+  const silent = buildReportInput({ sessions: [{ startedAt: at(0), endedAt: at(30), rules: [] }] });
+  assert.equal(silent.range.subagentSessions, null);
+});
+
+test("F-023: the set-aside count reaches the rendered report, next to the count that excludes it", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const markdown = generateReport(out.reportInput);
+  assert.match(markdown, /\| Sessions analysed \| 2 \|/);
+  assert.match(markdown, /\| Sub-agent sessions set aside \| 7 \|/);
+  assert.match(markdown, /\| claude \| 2 \| 7 \|/);
+  assert.ok(markdown.includes("left out of the count above"), "the report explains the exclusion rather than leaving a gap");
+});
+
+// ===========================================================================
+// the report contract (R_3C)
+// ===========================================================================
+
+const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "rules", "fixes", "trend"];
+const RULE_RESULT_KEYS = ["id", "name", "severity", "fix", "threshold", "evidence"];
+const EVIDENCE_KEYS = ["status", "reason", "values", "sources", "derivation", "parserVersion"];
+const VALUE_KEYS = ["label", "value", "unit", "windowSource", "sessionId"];
+
+test("buildReportInput emits exactly the ReportInput contract shape", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const input = out.reportInput;
+  assert.deepEqual(Object.keys(input).sort(), [...REPORT_INPUT_KEYS].sort());
+  assert.deepEqual(Object.keys(input.range).sort(), ["from", "sessions", "subagentSessions", "to"]);
+  assert.equal(input.parserVersion, out.sessions[0].rules[0].evidence.parserVersion);
+  assert.ok(Array.isArray(input.fixes));
+  assert.ok(["improving", "stable", "declining", "unknown"].includes(input.trend.direction));
+
+  for (const cli of input.clis) {
+    assert.deepEqual(Object.keys(cli).sort(), ["cli", "note", "sessions", "subagentSessions", "support"]);
+    assert.ok(["supported", "detection-only", "unsupported"].includes(cli.support));
+    assert.ok(cli.sessions === null || Number.isInteger(cli.sessions));
+    assert.ok(cli.subagentSessions === null || Number.isInteger(cli.subagentSessions));
+    if (cli.sessions === null) assert.equal(cli.subagentSessions, null, "nothing read means the set-aside count is not recorded, not zero");
+  }
+
+  for (const rule of input.rules) {
+    assert.deepEqual(Object.keys(rule).sort(), [...RULE_RESULT_KEYS].sort(), `${rule.id} keys`);
+    assert.deepEqual(Object.keys(rule.evidence).sort(), [...EVIDENCE_KEYS].sort(), `${rule.id} evidence keys`);
+    assert.deepEqual(Object.keys(rule.threshold).sort(), ["derivation", "value"]);
+    assert.ok(Array.isArray(rule.evidence.sources));
+    if (rule.evidence.status === "unknown") assert.equal(typeof rule.evidence.reason, "string", `${rule.id} needs a reason`);
+    else assert.equal(rule.evidence.reason, null);
+    for (const value of rule.evidence.values) {
+      for (const key of Object.keys(value)) assert.ok(VALUE_KEYS.includes(key), `${rule.id} evidence value has non-contract key ${key}`);
+      assert.equal(typeof value.label, "string");
+      assert.ok(value.value === null || ["number", "string"].includes(typeof value.value), `${rule.id} ${value.label} is ${typeof value.value}`);
+      if (value.windowSource !== undefined && value.windowSource !== null) {
+        assert.ok(["native", "model-table", "model-map", "observed-promoted", "observed-floor", "unknown"].includes(value.windowSource), `${value.windowSource}`);
+      }
+    }
+  }
+});
+
+test("the aggregated rules carry no analyzer-internal key into the report contract", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  for (const rule of out.reportInput.rules) assert.ok(!Object.hasOwn(rule, "magnitude"), `${rule.id} leaked magnitude`);
+  // It stays on the per-session results, where the ranking uses it.
+  assert.ok(out.sessions[0].rules.every((rule) => Object.hasOwn(rule, "magnitude")));
+});
+
+test("C-7: buildReportInput never reads the clock, so the same corpus renders twice identically", () => {
+  const first = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" }).reportInput;
+  const second = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" }).reportInput;
+  assert.deepEqual(first, second);
+  assert.equal(buildReportInput({ sessions: [] }).generatedAt, null, "no generatedAt supplied means null, not now()");
+  assert.equal(generateReport(first), generateReport(second));
+});
+
+test("the report input renders through the real generator, and the unknowns survive into the document", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const markdown = generateReport(out.reportInput);
+  for (const rule of RULES) assert.ok(markdown.includes(rule.name), `${rule.name} missing from the report`);
+  const unknownRules = out.reportInput.rules.filter((rule) => rule.evidence.status === "unknown");
+  assert.ok(unknownRules.length >= 2, "this corpus exists to leave unknowns in the report");
+  for (const rule of unknownRules) {
+    assert.ok(markdown.includes(rule.name), `${rule.id} vanished from the report`);
+  }
+  assert.ok(/unknown|could not be measured|not measurable/i.test(markdown));
+  const document = generateReportDocument(out.reportInput);
+  assert.equal(typeof document.markdown, "string");
+  assert.equal(typeof document.redactions, "number");
+  assert.equal(document.generatedAt, "2026-09-20T16:00:00Z");
+});
+
+test("no rendered line reports a context share above 1.00", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const markdown = generateReport(out.reportInput);
+  for (const line of markdown.split("\n")) {
+    const match = /(\d+\.\d+) of window/.exec(line);
+    if (match) assert.ok(Number(match[1]) <= 1, `impossible reading rendered: ${line}`);
+  }
+});
+
+test("the range comes from the sessions themselves and is null when they carry no timestamps", () => {
+  const dated = buildReportInput({ sessions: [{ startedAt: at(0), endedAt: at(60), rules: [] }, { startedAt: at(120), endedAt: at(300), rules: [] }] });
+  assert.equal(dated.range.from, at(0));
+  assert.equal(dated.range.to, at(300));
+  assert.equal(dated.range.sessions, 2);
+  const undated = buildReportInput({ sessions: [{ startedAt: null, endedAt: null, rules: [] }] });
+  assert.equal(undated.range.from, null);
+  assert.equal(undated.range.to, null);
+});

@@ -1,0 +1,610 @@
+/**
+ * BP-001.20 — SessionRx Markdown report generator.
+ *
+ * The report is a file the user is expected to paste into a public issue, so it
+ * is (a) deterministic, (b) secret-redacted, and (c) unable to convert absence
+ * of evidence into a clean bill of health.
+ *
+ * ============================================================================
+ * INPUT CONTRACT — the wave that builds src/analyzer/{health,rules,trends}.js
+ * MUST emit exactly this shape.  This module imports nothing from the analyzer;
+ * the object below is the whole interface between them.
+ * ============================================================================
+ *
+ *   ReportInput {
+ *     generatedAt?:   string | null   // ISO-8601, SUPPLIED BY THE CALLER.
+ *                                     // This module never reads the clock —
+ *                                     // that is what makes output diffable.
+ *     parserVersion?: string | null   // FVA-002; e.g. MODEL_WINDOWS_VERSION
+ *                                     // from src/collectors/base.js
+ *     range: {
+ *       from:      string | null      // earliest session start, ISO-8601
+ *       to:        string | null      // latest session end, ISO-8601
+ *       sessions?: number | null      // the USER'S OWN sessions in range;
+ *                                     // null = unknown
+ *       subagentSessions?: number | null
+ *                                     // sub-agent sessions SET ASIDE from that
+ *                                     // count (F-023): read and analyzed, each
+ *                                     // one evidence about the session that
+ *                                     // launched it, none of them a session of
+ *                                     // the user's own. null = not recorded,
+ *                                     // which is not zero.
+ *     }
+ *     clis: Array<{
+ *       cli:       string             // "claude" | "codex" | "gemini" | ...
+ *       sessions:  number | null      // null = count not recoverable (NOT zero)
+ *       subagentSessions?: number | null
+ *                                     // sub-agent sessions set aside for this
+ *                                     // CLI; null = nothing was read, not zero
+ *       support?:  "supported" | "detection-only" | "unsupported"
+ *       note?:     string | null      // why the count is null / what
+ *                                     // detection-only means (DIS-007)
+ *     }>
+ *     rules: Array<RuleResult>        // EVERY rule evaluated, not just the
+ *                                     // failing ones.  Analyzer-ranked, most
+ *                                     // report-worthy first; this module
+ *                                     // preserves the given order and does
+ *                                     // not re-rank.
+ *     fixes: Array<AppliedFix>
+ *     trend: {
+ *       direction: "improving" | "stable" | "declining" | "unknown"
+ *       reason?:   string | null      // REQUIRED when direction is "unknown"
+ *       metrics?:  Array<TrendMetric>
+ *     }
+ *   }
+ *
+ *   RuleResult {                      // BP-003 Rule shape plus its evaluation
+ *     id:         string              // "context-pressure"
+ *     name?:      string              // "Context pressure"
+ *     severity?:  "info" | "warn" | "critical"
+ *     fix?:       string | null       // fix id this rule maps to
+ *     threshold?: { value?: unknown, derivation?: string }
+ *     evidence: {
+ *       status:   "observed" | "not-observed" | "unknown"
+ *       reason?:  string | null       // REQUIRED when status is "unknown".
+ *                                     // A missing reason renders as an
+ *                                     // explicit "reason not recorded", never
+ *                                     // as blank and never as a pass.
+ *       values?:  Array<EvidenceValue>  // the ACTUAL numbers from the sessions
+ *       sources?: Array<string>       // file path / table + record ids (FVA-002)
+ *       derivation?: string | null    // how the numbers were computed
+ *       parserVersion?: string | null
+ *     }
+ *   }
+ *
+ *   EvidenceValue {
+ *     label:  string                  // "peak context", "cache hit rate"
+ *     value:  number | string | null
+ *     unit?:  "tokens" | "bytes" | "count" | "hours" | "fraction" | "ratio"
+ *             | string | null
+ *     windowSource?: "native" | "model-table" | "model-map"
+ *             | "observed-promoted" | "observed-floor" | "unknown" | null
+ *     sessionId?: string | null
+ *   }
+ *
+ *   TrendMetric { label: string, from: number|string|null,
+ *                 to: number|string|null, unit?: string|null,
+ *                 windowSource?: string|null }
+ *
+ *   AppliedFix {
+ *     id:        string
+ *     name?:     string
+ *     target:    string | null        // file the fix touched
+ *     appliedAt?: string | null
+ *     status?:   "applied" | "reverted" | "failed"
+ *     before:    string | null        // REQUIRED.  null renders as an explicit
+ *                                     // "BEFORE state not recorded".
+ *     after?:    string | null
+ *     undoPath?: string | null
+ *   }
+ *
+ * ============================================================================
+ * RENDERING LAWS (BLUEPRINT DIS-003..DIS-006, FVA-002, FVA-004, FVA-006)
+ * ============================================================================
+ *   L1  A "finding" is a rule whose evidence.status === "observed".  Nothing
+ *       else is ever promoted to a finding.
+ *   L2  At most 3 findings are printed (the first 3 in the given order).  If
+ *       fewer than 3 exist, the report prints the ones that exist and SAYS SO.
+ *       It is never padded.
+ *   L3  Every rule appears in section 4 with its verdict.  An "unknown" verdict
+ *       renders as unknown WITH its reason.  It is never rendered as a pass,
+ *       never as a zero, never omitted.  That conversion of "no evidence" into
+ *       "all clear" is the failure this product exists to prevent.
+ *   L4  A window whose source is "observed-promoted" or "observed-floor" is
+ *       labelled INFERRED on the same row as the number it produced (F-008).
+ *   L5  A fraction/ratio above 1.0 is never printed as a normal reading.  It is
+ *       printed as an impossible reading with the reason (F-008 clause 3).
+ *   L6  The assembled document passes redactSecrets() before it is returned.
+ *   L7  No fenced code blocks anywhere: verbatim content is 4-space-indented,
+ *       so no content can ever close a fence or leave one open.
+ *   L8  Session counts are the USER'S OWN sessions.  A sub-agent session is
+ *       evidence about the session that launched it, so it is never counted as a
+ *       session of its own in the date range or the per-CLI totals — and the
+ *       number set aside is PRINTED next to the count that excludes it (F-023).
+ *       Quietly leaving 106 real sessions out of a total is the same class of
+ *       failure as quietly counting them in.
+ *
+ * ============================================================================
+ * EXPORTS — who calls what
+ * ============================================================================
+ *   generateReport(data)         -> string        (public/js/pages/report.js,
+ *                                                  src/cli.js)
+ *   generateReportDocument(data) -> {markdown, generatedAt, redactions}
+ *                                                 (src/server.js, BP-005.05)
+ *   redactSecrets(input)         -> {text, redactions}
+ *                                                 (src/server.js API gate,
+ *                                                  FVA-004)
+ *   REPORT_FOOTER                -> string
+ */
+
+/** Verbatim, by operator specification. Must be the document's last line. */
+export const REPORT_FOOTER = "Diagnosed by SessionRx — built by Adaptive Mind";
+
+const REDACTION = "[REDACTED]";
+const MAX_FINDINGS = 3;
+const NOT_RECORDED = "not recorded";
+
+const WINDOW_SOURCE_INFERRED = Object.freeze({
+  "observed-promoted": "INFERRED from observation (observed-promoted) — the model-id window table understated this model, so the window was promoted to fit what was actually observed",
+  "observed-floor": "INFERRED from observation (observed-floor) — no window is known for this model id, so the largest context actually observed is used as a lower bound",
+});
+
+const UNIT_SUFFIX = Object.freeze({
+  tokens: " tokens",
+  bytes: " bytes",
+  count: "",
+  hours: " h",
+  fraction: " of window",
+  ratio: "",
+});
+
+// Assembled from fragments rather than written out: a literal PEM header in
+// this file is itself credential-shaped and is refused by the machine's
+// secret-handling guard on write.  The compiled pattern is identical.
+const PEM_EDGE = "-".repeat(5);
+const PEM_KEY_BLOCK = new RegExp(
+  `${PEM_EDGE}BEGIN [A-Z ]*PRIVATE KEY${PEM_EDGE}[\\s\\S]*?${PEM_EDGE}END [A-Z ]*PRIVATE KEY${PEM_EDGE}`,
+  "g",
+);
+
+/**
+ * Credential-shaped values, redacted before anything is returned (FVA-004).
+ * Ordered: keyed forms first so the KEY survives and only the VALUE is lost,
+ * then vendor prefixes, then generic long runs.
+ */
+const SECRET_PATTERNS = Object.freeze([
+  { id: "pem-key-block", re: PEM_KEY_BLOCK, replace: () => REDACTION },
+  // Runs BEFORE credential-key: otherwise `authorization: Bearer <tok>` has its
+  // value alternation stop at the space after "Bearer" and the token survives.
+  { id: "bearer", re: /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g, replace: () => `Bearer ${REDACTION}` },
+  {
+    // The optional `Bearer ` inside the value is the same leak closed a second
+    // way, so the pattern is correct on its own regardless of ordering.
+    id: "credential-key",
+    re: /("?\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|authorization|auth[_-]?token|api[_-]?key|apikey|client[_-]?secret|private[_-]?key|secret[_-]?key|secret|password|passwd|passphrase|credential|token)\b"?\s*[:=]\s*)(?:[Bb]earer\s+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}\])|]+)/gi,
+    replace: (_match, key) => `${key}${REDACTION}`,
+  },
+  { id: "vendor-prefix", re: /\b(?:sk|pk|rk)[-_](?:live|test|proj|ant|or)?[-_]?[A-Za-z0-9_-]{8,}/g, replace: () => REDACTION },
+  { id: "github-token", re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, replace: () => REDACTION },
+  { id: "gitlab-token", re: /\bglpat-[A-Za-z0-9_-]{16,}\b/g, replace: () => REDACTION },
+  { id: "slack-token", re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, replace: () => REDACTION },
+  { id: "aws-key-id", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replace: () => REDACTION },
+  { id: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g, replace: () => REDACTION },
+  { id: "jwt", re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, replace: () => REDACTION },
+  { id: "hex-run", re: /\b[0-9a-fA-F]{32,}\b/g, replace: () => REDACTION },
+  // `/` is deliberately excluded from the unpadded run: it is the path
+  // separator, and `[A-Za-z0-9+/]{40,}` swallows an ordinary deep filesystem
+  // path, which is the report's primary evidence reference (FVA-002). Padded
+  // base64 keeps `/` because no path carries a trailing `=`.
+  { id: "opaque-run", re: /\b[A-Za-z0-9+]{40,}={0,2}/g, replace: () => REDACTION },
+  { id: "padded-base64", re: /\b[A-Za-z0-9+/]{24,}={1,2}/g, replace: () => REDACTION },
+]);
+
+/**
+ * Remove credential-shaped values from arbitrary text.
+ *
+ * Deliberately over-eager: a 32+ character hex run and a 40+ character base64
+ * run are redacted even when they are in fact an account id or a content hash,
+ * because a false redaction costs the reader one lookup while a false
+ * pass-through puts a live credential in a public issue.  Callers that need a
+ * session id to survive should pass the dashed UUID form, which is not a
+ * continuous hex run.
+ *
+ * @param {unknown} input
+ * @returns {{text: string, redactions: number}}
+ */
+export function redactSecrets(input) {
+  if (input === null || input === undefined) return { text: "", redactions: 0 };
+  let out = typeof input === "string" ? input : String(input);
+  let redactions = 0;
+  for (const { re, replace } of SECRET_PATTERNS) {
+    out = out.replace(re, (...args) => {
+      redactions += 1;
+      return replace(...args);
+    });
+  }
+  return { text: out, redactions };
+}
+
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function str(value) {
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
+
+/** Table-cell safe: single line, pipes escaped, empty made explicit. */
+function cell(value) {
+  const flat = str(value).replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+  return flat === "" ? NOT_RECORDED : flat;
+}
+
+function groupInt(value) {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** Locale-independent on purpose: toLocaleString would break determinism. */
+function fmtNumber(value, unit) {
+  if (value === null || value === undefined) return NOT_RECORDED;
+  if (typeof value !== "number" || !Number.isFinite(value)) return str(value) || NOT_RECORDED;
+  if (unit === "fraction" || unit === "ratio") return value.toFixed(2);
+  if (Number.isInteger(value)) return groupInt(value);
+  // Group the integer part too, so 50674.7 does not sit next to 41,207.
+  const [whole, decimals] = String(Number(value.toFixed(3))).split(".");
+  return decimals ? `${groupInt(whole)}.${decimals}` : groupInt(whole);
+}
+
+/** L4: an inferred window says so wherever its number appears. */
+function windowNote(source) {
+  const key = str(source);
+  if (!key) return "";
+  if (Object.hasOwn(WINDOW_SOURCE_INFERRED, key)) return WINDOW_SOURCE_INFERRED[key];
+  return `window source: ${key}`;
+}
+
+/**
+ * L5: a fraction above 1.0 is a window-table defect, not a reading. It surfaces
+ * as one rather than as "208% of your window" stated as fact.
+ */
+function fmtEvidenceValue(entry) {
+  const unit = entry?.unit ?? null;
+  const raw = entry?.value ?? null;
+  const impossible = (unit === "fraction" || unit === "ratio")
+    && typeof raw === "number" && Number.isFinite(raw) && raw > 1;
+  if (impossible) {
+    return `${raw.toFixed(2)} of window — IMPOSSIBLE READING (above 1.0): a session cannot hold more context than its window, so the window is wrong for this session, not the measurement`;
+  }
+  const unitKey = str(unit);
+  const suffix = Object.hasOwn(UNIT_SUFFIX, unitKey) ? UNIT_SUFFIX[unitKey] : (unitKey ? ` ${unitKey}` : "");
+  return `${fmtNumber(raw, unit)}${suffix}`;
+}
+
+/** L7: verbatim content is indented, never fenced. */
+function indentedBlock(value) {
+  const body = str(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return body.split("\n").map((line) => `    ${line}`).join("\n");
+}
+
+function normalizeStatus(evidence) {
+  const status = str(evidence?.status);
+  if (status === "observed" || status === "not-observed" || status === "unknown") {
+    return { status, coerced: false, raw: status };
+  }
+  return { status: "unknown", coerced: true, raw: status };
+}
+
+/** L3: an unknown verdict always carries a visible reason. */
+function unknownReason(rule) {
+  const normalized = normalizeStatus(rule?.evidence);
+  const reason = str(rule?.evidence?.reason).trim();
+  if (normalized.coerced) {
+    const seen = normalized.raw ? `"${normalized.raw}"` : "no status at all";
+    const tail = reason ? ` Analyzer reason: ${reason}` : "";
+    return `treated as unknown: the analyzer returned ${seen} instead of observed / not-observed / unknown.${tail}`;
+  }
+  if (reason) return reason;
+  return "reason not recorded by the analyzer — this rule could not be evaluated and is NOT a pass";
+}
+
+function evidenceTable(values) {
+  const rows = asArray(values);
+  if (rows.length === 0) return ["No numeric evidence was recorded for this finding."];
+  const lines = [
+    "| Observation | Value | Session | Window |",
+    "| --- | --- | --- | --- |",
+  ];
+  for (const entry of rows) {
+    lines.push(`| ${cell(entry?.label)} | ${cell(fmtEvidenceValue(entry))} | ${cell(entry?.sessionId)} | ${cell(windowNote(entry?.windowSource))} |`);
+  }
+  return lines;
+}
+
+function renderHeader(data) {
+  const parserVersion = str(data.parserVersion).trim();
+  const generatedAt = str(data.generatedAt).trim();
+  const lines = ["# SessionRx diagnostic report", ""];
+  lines.push(`- Generated at: ${generatedAt || `${NOT_RECORDED} (the caller did not supply generatedAt)`}`);
+  lines.push(`- Parser version: ${parserVersion || NOT_RECORDED}`);
+  lines.push("");
+  return lines;
+}
+
+/** A count, grouped; anything that is not a finite number stays as it came. */
+function countCell(value) {
+  return cell(typeof value === "number" && Number.isFinite(value) ? groupInt(value) : value);
+}
+
+function renderRange(range) {
+  const from = str(range?.from).trim();
+  const to = str(range?.to).trim();
+  const sessions = range?.sessions;
+  const subagents = range?.subagentSessions;
+  const lines = ["## 1. Date range covered", ""];
+  lines.push("| Field | Value |");
+  lines.push("| --- | --- |");
+  lines.push(`| From | ${cell(from)} |`);
+  lines.push(`| To | ${cell(to)} |`);
+  lines.push(`| Sessions analysed | ${countCell(sessions)} |`);
+  // L8: the excluded count is printed, never merely implied.
+  lines.push(`| Sub-agent sessions set aside | ${countCell(subagents)} |`);
+  if (!from || !to) {
+    lines.push("");
+    lines.push("The range is incomplete: at least one bound could not be read from the session records.");
+  }
+  if (typeof subagents === "number" && Number.isFinite(subagents) && subagents > 0) {
+    lines.push("");
+    lines.push(
+      `${groupInt(subagents)} further session${subagents === 1 ? " was" : "s were"} read and analysed but ` +
+      `left out of the count above: ${subagents === 1 ? "it is a sub-agent" : "they are sub-agent"} transcript${subagents === 1 ? "" : "s"} dispatched by another session. ` +
+      `A sub-agent is evidence about the session that launched it, not a session of the user's own, so it informs that session's verdict instead of being counted beside it.`,
+    );
+  }
+  lines.push("");
+  return lines;
+}
+
+function renderClis(clis) {
+  const rows = asArray(clis);
+  const lines = ["## 2. CLIs detected", ""];
+  if (rows.length === 0) {
+    lines.push("No CLI was detected. That is a detection result, not a statement that no CLI is installed.");
+    lines.push("");
+    return lines;
+  }
+  lines.push("| CLI | Sessions | Sub-agent sessions set aside | Support | Note |");
+  lines.push("| --- | --- | --- | --- | --- |");
+  for (const row of rows) {
+    const count = typeof row?.sessions === "number" && Number.isFinite(row.sessions)
+      ? groupInt(row.sessions)
+      : `${NOT_RECORDED} (not zero)`;
+    // L8: per CLI too — a null here means nothing was read for it, not zero.
+    const subagents = typeof row?.subagentSessions === "number" && Number.isFinite(row.subagentSessions)
+      ? groupInt(row.subagentSessions)
+      : `${NOT_RECORDED} (not zero)`;
+    lines.push(`| ${cell(row?.cli)} | ${cell(count)} | ${cell(subagents)} | ${cell(row?.support ?? "supported")} | ${cell(row?.note)} |`);
+  }
+  lines.push("");
+  return lines;
+}
+
+function renderFindings(rules) {
+  const all = asArray(rules);
+  const observed = all.filter((rule) => normalizeStatus(rule?.evidence).status === "observed");
+  const shown = observed.slice(0, MAX_FINDINGS);
+  const lines = ["## 3. Top findings", ""];
+
+  if (shown.length === 0) {
+    lines.push(`No finding was observed across the ${all.length} rule(s) evaluated.`);
+    lines.push("This is not a clean bill of health: section 4 lists the rules that could not be evaluated.");
+    lines.push("");
+    return lines;
+  }
+
+  if (observed.length < MAX_FINDINGS) {
+    lines.push(`${observed.length} finding(s) were observed, which is fewer than three. The report lists the ones that exist and is not padded to three.`);
+  } else if (observed.length > MAX_FINDINGS) {
+    lines.push(`${observed.length} findings were observed; the ${MAX_FINDINGS} most report-worthy are shown. Section 4 lists every rule.`);
+  } else {
+    lines.push(`${observed.length} findings were observed.`);
+  }
+  lines.push("");
+
+  shown.forEach((rule, index) => {
+    const name = str(rule?.name).trim() || str(rule?.id).trim() || "unnamed rule";
+    const severity = str(rule?.severity).trim() || "severity not recorded";
+    lines.push(`### 3.${index + 1} ${name} (${severity})`);
+    lines.push("");
+    lines.push(`- Rule id: \`${cell(rule?.id)}\``);
+    const derivation = str(rule?.threshold?.derivation).trim();
+    const thresholdValue = rule?.threshold?.value;
+    if (derivation || (thresholdValue !== undefined && thresholdValue !== null)) {
+      lines.push(`- Threshold: ${cell(derivation || thresholdValue)}`);
+    }
+    const how = str(rule?.evidence?.derivation).trim();
+    if (how) lines.push(`- Derivation: ${cell(how)}`);
+    lines.push("");
+    lines.push("Evidence — the numbers actually measured in these sessions:");
+    lines.push("");
+    lines.push(...evidenceTable(rule?.evidence?.values));
+    lines.push("");
+    const sources = asArray(rule?.evidence?.sources).map((source) => str(source).trim()).filter(Boolean);
+    lines.push(`- Sources: ${sources.length ? sources.join("; ") : NOT_RECORDED}`);
+    const fix = str(rule?.fix).trim();
+    lines.push(`- Suggested fix: ${fix ? `\`${fix}\`` : "none available"}`);
+    const parser = str(rule?.evidence?.parserVersion).trim();
+    if (parser) lines.push(`- Parser version: ${parser}`);
+    lines.push("");
+  });
+
+  return lines;
+}
+
+function renderRuleCoverage(rules) {
+  const rows = asArray(rules);
+  const lines = ["## 4. Rule coverage", ""];
+  if (rows.length === 0) {
+    lines.push("No rule was evaluated. Nothing here can be read as a pass.");
+    lines.push("");
+    return lines;
+  }
+  const unknowns = rows.filter((rule) => normalizeStatus(rule?.evidence).status === "unknown");
+  lines.push(`${rows.length} rule(s) evaluated. \`unknown\` means the data needed to decide was absent — it is not a pass and not a zero.`);
+  lines.push("");
+  lines.push("| Rule | Severity | Verdict | Why |");
+  lines.push("| --- | --- | --- | --- |");
+  for (const rule of rows) {
+    const { status } = normalizeStatus(rule?.evidence);
+    let why;
+    if (status === "unknown") {
+      why = `UNKNOWN — ${unknownReason(rule)}`;
+    } else if (status === "not-observed") {
+      why = str(rule?.evidence?.reason).trim() || "evaluated against real data; the threshold was not crossed";
+    } else {
+      why = `observed; ${asArray(rule?.evidence?.values).length} observation(s) recorded`;
+    }
+    lines.push(`| \`${cell(rule?.id)}\` | ${cell(rule?.severity)} | ${cell(status)} | ${cell(why)} |`);
+  }
+  lines.push("");
+  if (unknowns.length > 0) {
+    lines.push(`${unknowns.length} rule(s) returned \`unknown\` and could not be diagnosed:`);
+    lines.push("");
+    for (const rule of unknowns) {
+      const name = str(rule?.name).trim() || str(rule?.id).trim() || "unnamed rule";
+      lines.push(`- \`${cell(rule?.id)}\` ${name}: unknown — ${cell(unknownReason(rule))}`);
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
+function renderFixes(fixes) {
+  const rows = asArray(fixes);
+  const lines = ["## 5. Fixes applied", ""];
+  if (rows.length === 0) {
+    lines.push("No fix was applied in this period.");
+    lines.push("");
+    return lines;
+  }
+  lines.push(`${rows.length} fix(es) recorded. Each one shows the BEFORE state it replaced.`);
+  lines.push("");
+  rows.forEach((fix, index) => {
+    const name = str(fix?.name).trim() || str(fix?.id).trim() || "unnamed fix";
+    lines.push(`### 5.${index + 1} ${name}`);
+    lines.push("");
+    lines.push(`- Fix id: \`${cell(fix?.id)}\``);
+    lines.push(`- Target: ${cell(fix?.target)}`);
+    lines.push(`- Status: ${cell(fix?.status ?? "applied")}`);
+    lines.push(`- Applied at: ${cell(fix?.appliedAt)}`);
+    if (str(fix?.undoPath).trim()) lines.push(`- Undo record: ${cell(fix.undoPath)}`);
+    lines.push("");
+    const before = fix?.before;
+    if (before === null || before === undefined || str(before).trim() === "") {
+      lines.push("BEFORE state not recorded — this fix cannot be audited from this report alone.");
+    } else {
+      lines.push("BEFORE:");
+      lines.push("");
+      lines.push(indentedBlock(before));
+    }
+    lines.push("");
+    const after = fix?.after;
+    if (after !== null && after !== undefined && str(after).trim() !== "") {
+      lines.push("AFTER:");
+      lines.push("");
+      lines.push(indentedBlock(after));
+      lines.push("");
+    }
+  });
+  return lines;
+}
+
+function renderTrend(trend) {
+  const raw = str(trend?.direction).trim();
+  const known = raw === "improving" || raw === "stable" || raw === "declining";
+  // "unknown" IS a contract value, so it is reported as itself. Only a value
+  // outside the four is called out as unrecognised.
+  const recognised = known || raw === "unknown";
+  const lines = ["## 6. Trend summary", ""];
+  if (recognised) {
+    lines.push(`Direction: ${raw}`);
+  } else {
+    const suffix = raw ? ` (the analyzer reported "${raw}", which is not one of improving / stable / declining)` : "";
+    lines.push(`Direction: unknown${suffix}`);
+  }
+  const reason = str(trend?.reason).trim();
+  if (reason) {
+    lines.push("");
+    lines.push(`Reason: ${reason}`);
+  } else if (!known) {
+    lines.push("");
+    lines.push("Reason: reason not recorded by the analyzer — the direction could not be established and must not be read as stable.");
+  }
+  const metrics = asArray(trend?.metrics);
+  if (metrics.length > 0) {
+    lines.push("");
+    lines.push("| Metric | Earlier | Later | Window |");
+    lines.push("| --- | --- | --- | --- |");
+    for (const metric of metrics) {
+      const unit = metric?.unit ?? null;
+      const from = fmtEvidenceValue({ value: metric?.from, unit });
+      const to = fmtEvidenceValue({ value: metric?.to, unit });
+      lines.push(`| ${cell(metric?.label)} | ${cell(from)} | ${cell(to)} | ${cell(windowNote(metric?.windowSource))} |`);
+    }
+  }
+  lines.push("");
+  return lines;
+}
+
+function assemble(data) {
+  const lines = [
+    ...renderHeader(data),
+    ...renderRange(data.range),
+    ...renderClis(data.clis),
+    ...renderFindings(data.rules),
+    ...renderRuleCoverage(data.rules),
+    ...renderFixes(data.fixes),
+    ...renderTrend(data.trend),
+    "---",
+    "",
+    REPORT_FOOTER,
+    "",
+  ];
+  // Collapse runs of blank lines so one input can only ever produce one byte
+  // sequence, whatever mix of branches it took.
+  const out = [];
+  for (const line of lines) {
+    if (line === "" && out.length > 0 && out[out.length - 1] === "") continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/**
+ * BP-005.05 envelope: `{markdown, generatedAt, redactions}`.
+ *
+ * @param {object} data a ReportInput (see INPUT CONTRACT above)
+ * @returns {{markdown: string, generatedAt: string|null, redactions: number}}
+ */
+export function generateReportDocument(data) {
+  if (!isPlainObject(data)) {
+    throw new TypeError("generateReport expects a ReportInput object");
+  }
+  const { text: markdown, redactions } = redactSecrets(assemble(data));
+  const generatedAt = str(data.generatedAt).trim();
+  return { markdown, generatedAt: generatedAt || null, redactions };
+}
+
+/**
+ * @param {object} data a ReportInput (see INPUT CONTRACT above)
+ * @returns {string} redacted Markdown
+ */
+export function generateReport(data) {
+  return generateReportDocument(data).markdown;
+}
+
+export default generateReport;

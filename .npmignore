@@ -1,0 +1,30 @@
+# Belt-and-braces alongside the "files" whitelist in package.json.
+# The whitelist is authoritative; this file is the second line of defence so a
+# published tarball can never carry tests, fixtures, factory metadata, or a
+# credential file.
+
+# Tests and fixture corpora
+/tests/
+*.test.js
+fixtures/
+
+# Project docs and build/scratch output
+/docs/
+/out/
+/observe_log/
+HANDOFF.md
+
+# Factory and tooling metadata
+/.factory/
+/.factory_phase
+/.claude/
+/.github/
+
+# Credentials — names only ever live here, but never publish either file
+.env
+.env.*
+
+# Local noise
+*.log
+*.tgz
+.DS_Store

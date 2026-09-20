@@ -1,0 +1,1060 @@
+/**
+ * Wave 5A — `src/server.js` (BP-005) and `src/cli.js`.
+ *
+ * ── Real-file safety, guaranteed structurally, not by care ──────────────────
+ * 1. The collector registry is INJECTED as a stub in every test, so no test
+ *    ever reads the developer's real `~/.claude`, `~/.codex`, `~/.gemini`, … .
+ *    The real registry hardcodes `os.homedir()` at module load, which is
+ *    exactly why it is replaced rather than reconfigured.
+ * 2. Every app is created with `home:` pointing at a fresh `mkdtemp` directory.
+ *    `createFixEnvironment` refuses any target that escapes the configured
+ *    home (`PATH_ESCAPE`), so a fix physically cannot write outside it.
+ * 3. `real-file safety` at the bottom hashes the developer's real
+ *    `~/.claude/CLAUDE.md` and `~/.claude/settings.json` before and after the
+ *    whole suite and fails if either changed, and fails if `~/.session-rx`
+ *    appeared. That is the proof, not the intention.
+ *
+ * Credential-shaped test values are ASSEMBLED FROM FRAGMENTS. A literal token
+ * or a literal `password: "…"` pair in this file is itself credential-shaped
+ * and is refused by the machine's secret-handling guard on write; the values
+ * the tests actually exercise are identical.
+ */
+
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
+import http from "node:http";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { Collector, normalizeSession } from "../src/collectors/base.js";
+import { collectMany, detectMany } from "../src/collectors/registry.js";
+import {
+  DEFAULT_SCAN_LIMIT,
+  FIX_CATALOG,
+  LOOPBACK_HOST,
+  createApp,
+  csrfFailure,
+  filterSessions,
+  injectNonce,
+  redactJson,
+  sortSessions,
+  startServer,
+} from "../src/server.js";
+import { redactSecrets } from "../src/report/generator.js";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(HERE, "..");
+const PUBLIC_DIR = path.join(PROJECT_ROOT, "public");
+
+/** A synthetic GitHub-shaped value, assembled so no literal appears here. */
+const PLANTED_SECRET = `${"gh"}${"p"}_${"TESTONLY"}${"0123456789abcdef"}`;
+
+/** Wrong CSRF header values, kept out of `key: "value"` position. */
+const BAD_HEADER_SAME_LENGTH = "f".repeat(64);
+const BAD_HEADER_SHORT = "not-the-nonce";
+
+// ---------------------------------------------------------------------------
+// Real-home tripwire (safety guarantee 3)
+// ---------------------------------------------------------------------------
+
+const REAL_HOME = os.homedir();
+const WATCHED_REAL_PATHS = [
+  path.join(REAL_HOME, ".claude", "CLAUDE.md"),
+  path.join(REAL_HOME, ".claude", "settings.json"),
+];
+const REAL_STATE_DIR = path.join(REAL_HOME, ".session-rx");
+
+async function fingerprint(target) {
+  try {
+    return crypto.createHash("sha256").update(await fs.readFile(target)).digest("hex");
+  } catch (error) {
+    return `absent:${error.code ?? "unknown"}`;
+  }
+}
+
+const realBefore = new Map();
+let realStateDirExistedBefore = false;
+
+before(async () => {
+  for (const target of WATCHED_REAL_PATHS) realBefore.set(target, await fingerprint(target));
+  realStateDirExistedBefore = existsSync(REAL_STATE_DIR);
+});
+
+// ---------------------------------------------------------------------------
+// Test doubles
+// ---------------------------------------------------------------------------
+
+const ISO = (day, hour = 12) => new Date(Date.UTC(2026, 8, day, hour, 0, 0)).toISOString();
+
+function testSession(overrides = {}) {
+  return normalizeSession({
+    cli: "claude",
+    sessionId: "aaaaaaaa-1111-4111-8111-111111111111",
+    project: "-Users-demo-app",
+    cwd: "/Users/demo/app",
+    model: "claude-sonnet-4-5",
+    window: { tokens: 200000, source: "model-table" },
+    startedAt: ISO(18, 9),
+    endedAt: ISO(18, 11),
+    turns: [
+      {
+        ts: ISO(18, 9),
+        context: { inputTokens: 160000, source: "native" },
+        cacheRead: 90000,
+        cacheCreate: 1000,
+        output: 400,
+        toolCalls: [{ id: "t1", name: "Bash", input: { command: "ls" } }],
+        toolResultBytes: 1200,
+      },
+      {
+        ts: ISO(18, 10),
+        context: { inputTokens: 40000, source: "native" },
+        cacheRead: 95000,
+        cacheCreate: 500,
+        output: 300,
+        toolCalls: [{ id: "t2", name: "Read", input: { file: "a.js" } }],
+        toolResultBytes: 800,
+      },
+    ],
+    ...overrides,
+  });
+}
+
+/** A session whose tool input carries a credential-shaped value (FVA-004). */
+function secretBearingSession() {
+  return normalizeSession({
+    cli: "codex",
+    sessionId: "bbbbbbbb-2222-4222-8222-222222222222",
+    project: "-Users-demo-secrets",
+    cwd: "/Users/demo/secrets",
+    model: "gpt-5-codex",
+    startedAt: ISO(19, 9),
+    endedAt: ISO(19, 10),
+    window: { tokens: 128000, source: "model-table" },
+    turns: [{
+      ts: ISO(19, 9),
+      context: { inputTokens: 1000, source: "native" },
+      cacheRead: 10,
+      cacheCreate: 10,
+      output: 10,
+      toolCalls: [{ id: "s1", name: "Bash", input: { command: `echo ${PLANTED_SECRET}` } }],
+      toolResultBytes: 10,
+    }],
+  });
+}
+
+class FakeCollector extends Collector {
+  constructor(id, sessions) {
+    super({ id, displayName: `${id} (test double)`, cli: id });
+    this.sessions = sessions;
+  }
+
+  detect() {
+    return { installed: true, paths: [`/test-double/${this.id}`], status: "supported" };
+  }
+
+  async collect({ limit } = {}) {
+    return Number.isInteger(limit) && limit > 0 ? this.sessions.slice(0, limit) : this.sessions;
+  }
+}
+
+/** Installed, claims to be supported, throws while reading. */
+class ExplodingCollector extends Collector {
+  constructor() {
+    super({ id: "exploder", displayName: "Exploding CLI (test double)", cli: "exploder" });
+  }
+
+  detect() {
+    return { installed: true, paths: ["/test-double/exploder"], status: "supported" };
+  }
+
+  async collect() {
+    throw new Error("test collector blew up reading its log");
+  }
+}
+
+/**
+ * A registry module double. `detectAll`/`collectAll` delegate to the REAL
+ * `detectMany`/`collectMany`, so per-collector failure isolation is the
+ * production code path and not a second implementation.
+ */
+function stubRegistry(collectors) {
+  return {
+    async detectAll() { return detectMany(collectors); },
+    async collectAll(options) { return collectMany(collectors, options); },
+  };
+}
+
+const DEFAULT_COLLECTORS = () => [
+  new FakeCollector("claude", [testSession()]),
+  new FakeCollector("codex", [secretBearingSession()]),
+];
+
+// ---------------------------------------------------------------------------
+// HTTP client — `node:http`, because `fetch` refuses to set `Host`
+// ---------------------------------------------------------------------------
+
+function raw({ port, method = "GET", target, headers = {}, body = null }) {
+  // An explicit `undefined` means "send this header not at all"; `http.request`
+  // throws on an undefined value rather than omitting it.
+  const sent = Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== undefined));
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: LOOPBACK_HOST, port, method, path: target, headers: sent }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => {
+        let json = null;
+        try { json = JSON.parse(text); } catch { json = null; }
+        resolve({ status: res.statusCode, headers: res.headers, text, json });
+      });
+    });
+    req.on("error", reject);
+    if (body !== null) req.write(body);
+    req.end();
+  });
+}
+
+/** Spawn a server whose every external dependency is a temp dir or a double. */
+async function launch(overrides = {}) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "session-rx-5a-"));
+  await fs.mkdir(path.join(home, ".claude"), { recursive: true });
+  await fs.writeFile(path.join(home, ".claude", "CLAUDE.md"), "# Demo instructions\n\nExisting content.\n", "utf8");
+  await fs.writeFile(path.join(home, ".claude", "settings.json"), `{\n  "theme": "dark"\n}\n`, "utf8");
+
+  const collectors = overrides.collectors ?? DEFAULT_COLLECTORS();
+  const running = await startServer({
+    port: 0,
+    home,
+    publicDir: overrides.publicDir ?? PUBLIC_DIR,
+    modules: { registry: stubRegistry(collectors), ...(overrides.modules ?? {}) },
+    ...(overrides.fixCatalog ? { fixCatalog: overrides.fixCatalog } : {}),
+    ...(overrides.scanLimit ? { scanLimit: overrides.scanLimit } : {}),
+  });
+
+  const origin = `http://${LOOPBACK_HOST}:${running.port}`;
+  return {
+    ...running,
+    home,
+    origin,
+    get: (target, headers = {}) => raw({ port: running.port, target, headers }),
+    post: (target, { body = "{}", headers = {} } = {}) => raw({
+      port: running.port,
+      method: "POST",
+      target,
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        "x-csrf-token": running.nonce,
+        origin,
+        host: `${LOOPBACK_HOST}:${running.port}`,
+        ...headers,
+      },
+      body,
+    }),
+  };
+}
+
+const servers = [];
+async function server(overrides) {
+  const running = await launch(overrides);
+  servers.push(running);
+  return running;
+}
+
+after(async () => {
+  for (const running of servers) {
+    try { await running.close(); } catch { /* already closed */ }
+  }
+});
+
+// ===========================================================================
+
+describe("BP-005.12 — loopback binding", () => {
+  it("binds 127.0.0.1 and nothing else", async () => {
+    const running = await server();
+    const address = running.server.address();
+    assert.equal(address.address, "127.0.0.1");
+    assert.equal(address.family, "IPv4");
+    assert.equal(running.host, "127.0.0.1");
+    assert.match(running.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  });
+
+  it("never names a wildcard bind address in its source", async () => {
+    const source = await fs.readFile(path.join(PROJECT_ROOT, "src", "server.js"), "utf8");
+    assert.equal(source.includes("0.0.0.0"), false, "server.js must not contain 0.0.0.0");
+    assert.equal(/app\.listen\(\s*port\s*\)/.test(source), false, "listen() must always be given the loopback host");
+    const cli = await fs.readFile(path.join(PROJECT_ROOT, "src", "cli.js"), "utf8");
+    assert.equal(cli.includes("0.0.0.0"), false, "cli.js must not contain 0.0.0.0");
+  });
+
+  it("is unreachable on this machine's non-loopback addresses", async (t) => {
+    const running = await server();
+    const external = Object.values(os.networkInterfaces())
+      .flat()
+      .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
+      .map((entry) => entry.address);
+    if (external.length === 0) {
+      t.skip("no non-loopback IPv4 interface on this machine");
+      return;
+    }
+    const outcome = await new Promise((resolve) => {
+      const socket = net.connect({ host: external[0], port: running.port });
+      socket.setTimeout(2000);
+      socket.once("connect", () => { socket.destroy(); resolve(null); });
+      socket.once("timeout", () => { socket.destroy(); resolve("ETIMEDOUT"); });
+      socket.once("error", (err) => resolve(err.code));
+    });
+    assert.notEqual(outcome, null, `a socket to ${external[0]}:${running.port} should not connect`);
+  });
+});
+
+describe("BP-005.11 — the page and the injected nonce", () => {
+  it("serves index.html with the per-process nonce in the csrf-token meta", async () => {
+    const running = await server();
+    const res = await running.get("/");
+    assert.equal(res.status, 200);
+    assert.match(res.headers["content-type"], /^text\/html/);
+    assert.match(res.headers["cache-control"], /no-store/);
+    assert.ok(res.headers["content-security-policy"].includes("default-src 'self'"));
+    assert.ok(res.text.includes(`<meta name="csrf-token" content="${running.nonce}">`), "nonce must reach the page");
+    assert.equal(res.text.includes(`content=""`), false, "the placeholder meta must be replaced");
+  });
+
+  it("serves /index.html the same way", async () => {
+    const running = await server();
+    const res = await running.get("/index.html");
+    assert.equal(res.status, 200);
+    assert.ok(res.text.includes(running.nonce));
+  });
+
+  it("injects a meta tag even if the placeholder is gone", () => {
+    const nonce = "abc123";
+    assert.ok(injectNonce("<html><head><title>x</title></head></html>", nonce)
+      .includes(`<meta name="csrf-token" content="${nonce}">`));
+    assert.ok(injectNonce(`<meta name='csrf-token' content='old'>`, nonce)
+      .includes(`content="${nonce}"`));
+    assert.ok(injectNonce("no head at all", nonce).includes(nonce));
+  });
+
+  it("serves the real stylesheet from public/", async () => {
+    const running = await server();
+    const res = await running.get("/css/style.css");
+    assert.equal(res.status, 200);
+    assert.match(res.headers["content-type"], /text\/css/);
+  });
+
+  it("sends a 404 with a reason, never an empty body, for an unknown asset", async () => {
+    const running = await server();
+    const res = await running.get("/nope.txt");
+    assert.equal(res.status, 404);
+    assert.equal(res.json.reason, "not_found");
+    assert.ok(res.json.error.length > 0);
+  });
+});
+
+describe("static traversal is refused", () => {
+  it("refuses a raw ../ path", async () => {
+    const running = await server();
+    // `fetch` would normalise this away, so it goes out over a raw request.
+    const res = await running.get("/../package.json");
+    assert.equal(res.status, 403);
+    assert.equal(res.text.includes("session-rx"), false, "package.json must not be served");
+  });
+
+  it("refuses a percent-encoded ../ path", async () => {
+    const running = await server();
+    for (const target of ["/%2e%2e/package.json", "/css/%2E%2E%2Fpackage.json", "/%2e%2e%2f%2e%2e%2fetc/passwd"]) {
+      const res = await running.get(target);
+      assert.equal(res.status, 403, `${target} must be refused`);
+    }
+  });
+
+  it("refuses a NUL byte in the path", async () => {
+    const running = await server();
+    const res = await running.get("/css/%00style.css");
+    assert.equal(res.status, 400);
+  });
+
+  it("refuses a dotfile inside public/", async () => {
+    const running = await server();
+    const res = await running.get("/.gitignore");
+    assert.ok(res.status === 403 || res.status === 404, `expected a refusal, got ${res.status}`);
+  });
+});
+
+describe("GET routes return 200 with the BP-005 shape", () => {
+  it("BP-005.10 /api/collectors", async () => {
+    const running = await server();
+    const res = await running.get("/api/collectors");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.json.collectors));
+    assert.equal(res.json.collectors.length, 2);
+    for (const collector of res.json.collectors) {
+      assert.equal(typeof collector.id, "string");
+      assert.equal(typeof collector.installed, "boolean");
+      assert.equal(typeof collector.status, "string");
+      assert.ok(Array.isArray(collector.paths));
+    }
+    assert.ok(Array.isArray(res.json.diagnostics));
+  });
+
+  it("BP-005.01 /api/health", async () => {
+    const running = await server();
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.json.sessions));
+    assert.equal(res.json.sessions.length, 2);
+    assert.ok(Array.isArray(res.json.collectors));
+    assert.ok(Array.isArray(res.json.diagnostics));
+    const session = res.json.sessions.find((candidate) => candidate.cli === "claude");
+    assert.ok(Array.isArray(session.rules) && session.rules.length > 0, "each session carries rule results");
+    assert.equal(typeof session.score, "object");
+  });
+
+  it("F-025 /api/health states how many sessions were set aside as sub-agents", async () => {
+    // `sessions` is the user's OWN sessions only (F-023). Without this block
+    // the gap between what was read and what is listed is unexplained, and a
+    // set-aside session looks like a dropped one.
+    const PARENT = "aaaaaaaa-1111-4111-8111-111111111111";
+    const CHILD = "cccccccc-3333-4333-8333-333333333333";
+    const claude = new FakeCollector("claude", [testSession(), testSession({ sessionId: CHILD })]);
+    claude.sessionMeta = { [PARENT]: { parentSessionId: null }, [CHILD]: { parentSessionId: PARENT } };
+    const running = await server({ collectors: [claude] });
+
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    // The child is a sub-agent of the parent, so only the parent is listed.
+    assert.deepEqual(res.json.sessions.map((session) => session.sessionId), [PARENT]);
+
+    const setAside = res.json.subagentSessionsSetAside;
+    assert.ok(setAside && typeof setAside === "object", "/api/health must publish the aggregate, not only the per-CLI count");
+    assert.equal(setAside.total, 1, "the one sub-agent session must be COUNTED, not silently dropped");
+    assert.equal(setAside.orphans, 0);
+    assert.deepEqual(setAside.byCli, [{ cli: "claude", count: 1, orphans: 0 }]);
+
+    // The per-CLI count already travelled; the aggregate must agree with it.
+    const perCli = res.json.collectors
+      .map((collector) => collector.subagentSessions)
+      .filter((count) => Number.isInteger(count))
+      .reduce((sum, count) => sum + count, 0);
+    assert.equal(setAside.total, perCli, "the aggregate must equal the per-CLI counts it summarises");
+  });
+
+  it("F-021 /api/health publishes each fix's TITLE, so the UI keeps no second catalogue", async () => {
+    const running = await server();
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+
+    const titles = new Map(FIX_CATALOG.map((fix) => [fix.id, fix.title]));
+    let offered = 0;
+    for (const session of res.json.sessions) {
+      for (const rule of session.rules) {
+        assert.ok("fixTitle" in rule, `rule ${rule.id} must carry fixTitle, even when it is null`);
+        if (rule.fix === null) {
+          assert.equal(rule.fixTitle, null, "a rule with no fix names no fix");
+          continue;
+        }
+        offered += 1;
+        assert.equal(rule.fixTitle, titles.get(rule.fix), `the title published for ${rule.fix} must be the catalogue's`);
+      }
+    }
+    assert.ok(offered > 0, "this fixture must exercise at least one rule that maps to a fix");
+  });
+
+  it("F-021 a fix id outside the catalogue publishes a null title, never a guessed name", async () => {
+    // The rules still name `claude-*` fixes; this catalogue knows none of them.
+    const running = await server({
+      fixCatalog: [{ id: "not-a-real-fix", title: "Not a real fix", kind: "append-section", blueprint: "BP-000", specifier: "./fixes/nowhere.js" }],
+    });
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    const withFix = res.json.sessions.flatMap((session) => session.rules).filter((rule) => rule.fix !== null);
+    assert.ok(withFix.length > 0, "this fixture must exercise at least one rule that maps to a fix");
+    for (const rule of withFix) {
+      assert.equal(rule.fixTitle, null, `${rule.fix} is not in this catalogue, so no name may be invented for it`);
+    }
+  });
+
+  it("BP-005.01 /api/health honours since and limit", async () => {
+    const running = await server();
+    const res = await running.get("/api/health?limit=1&since=2026-01-01T00:00:00.000Z");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.scan.limitPerCollector, 1);
+    assert.equal(res.json.scan.defaulted, false);
+  });
+
+  it("BP-005.02 /api/sessions with total, sort, order and filters", async () => {
+    const running = await server();
+    const res = await running.get("/api/sessions");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.total, 2);
+    assert.equal(res.json.sessions.length, 2);
+    assert.ok(Array.isArray(res.json.diagnostics));
+    // Default sort is startedAt desc: the 19th before the 18th.
+    assert.equal(res.json.sessions[0].cli, "codex");
+
+    const ascending = await running.get("/api/sessions?sort=startedAt&order=asc");
+    assert.equal(ascending.json.sessions[0].cli, "claude");
+
+    const filtered = await running.get("/api/sessions?cli=claude");
+    assert.equal(filtered.json.total, 1);
+    assert.equal(filtered.json.sessions[0].cli, "claude");
+
+    const byProject = await running.get("/api/sessions?project=demo-app");
+    assert.equal(byProject.json.total, 1);
+
+    const limited = await running.get("/api/sessions?limit=1");
+    assert.equal(limited.json.sessions.length, 1);
+    assert.equal(limited.json.total, 2, "limit bounds the rows, not the reported total");
+    assert.equal(limited.json.returned, 1);
+  });
+
+  it("BP-005.03 /api/sessions/:sessionId, and 404 for an unknown id", async () => {
+    const running = await server();
+    const found = await running.get("/api/sessions/aaaaaaaa-1111-4111-8111-111111111111");
+    assert.equal(found.status, 200);
+    assert.equal(found.json.session.sessionId, "aaaaaaaa-1111-4111-8111-111111111111");
+
+    const missing = await running.get("/api/sessions/does-not-exist");
+    assert.equal(missing.status, 404);
+    assert.equal(missing.json.reason, "session_not_found");
+    assert.ok(missing.json.scan, "a 404 states how much was scanned, so it is not read as 'does not exist'");
+  });
+
+  it("BP-005.04 /api/trends", async () => {
+    const running = await server();
+    const res = await running.get("/api/trends");
+    assert.equal(res.status, 200);
+    assert.ok(res.json.charts, "charts");
+    assert.ok(Array.isArray(res.json.charts.context));
+    assert.ok(Array.isArray(res.json.charts.cache));
+    assert.ok(Array.isArray(res.json.charts.spend));
+    assert.ok(Array.isArray(res.json.unknowns));
+    assert.equal(res.json.charts.context.length, 15, "BP-005.04: a 15-day window");
+    // BP-005.04 writes the grid as "24x15"; wave 3B builds it day-major and
+    // labels its own axes, so the assertion is against the labelled shape.
+    assert.equal(res.json.heatmap.orientation, "day-major");
+    assert.equal(res.json.heatmap.rows, 15);
+    assert.equal(res.json.heatmap.cols, 24);
+    assert.equal(res.json.heatmap.grid.length, 15);
+    assert.equal(res.json.heatmap.grid[0].length, 24);
+  });
+
+  it("BP-005.05 /api/report", async () => {
+    const running = await server();
+    const res = await running.get("/api/report");
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.json.markdown, "string");
+    assert.ok(res.json.markdown.startsWith("# SessionRx diagnostic report"));
+    assert.equal(typeof res.json.generatedAt, "string");
+    assert.equal(typeof res.json.redactions, "number");
+  });
+
+  it("BP-005.09 /api/fixes/:fixId/check is a GET and changes nothing", async () => {
+    const running = await server();
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    const before = await fs.readFile(target, "utf8");
+    const res = await running.get("/api/fixes/claude-output-hygiene/check");
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.json.applied, "boolean");
+    assert.equal(res.json.applied, false);
+    assert.equal(typeof res.json.marker, "string");
+    assert.equal(await fs.readFile(target, "utf8"), before, "check() must not write");
+  });
+
+  it("lists the fix catalog", async () => {
+    const running = await server();
+    const res = await running.get("/api/fixes");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.fixes.length, 5, "BP-004.01..05");
+    assert.deepEqual(res.json.fixes.map((fix) => fix.id).sort(), [
+      "claude-auto-compact",
+      "claude-batch-commands",
+      "claude-compact-contract",
+      "claude-output-hygiene",
+      "claude-worker-cap",
+    ]);
+    assert.ok(res.json.fixes.every((fix) => fix.available === true), "every BP-004 fix module resolves");
+  });
+
+  it("rejects a malformed query parameter with a 400, not a 500", async () => {
+    const running = await server();
+    for (const target of ["/api/health?limit=abc", "/api/health?limit=0", "/api/sessions?from=not-a-date", "/api/sessions?sort=nope", "/api/sessions?order=sideways"]) {
+      const res = await running.get(target);
+      assert.equal(res.status, 400, `${target} → 400`);
+      assert.ok(res.json.error.length > 0);
+    }
+  });
+});
+
+describe("BP-005.13/14 — CSRF: the four rejection paths", () => {
+  const TARGET = "/api/fixes/claude-output-hygiene/preview";
+
+  it("missing nonce → 403", async () => {
+    const running = await server();
+    const res = await running.post(TARGET, { headers: { "x-csrf-token": undefined } });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "csrf_token_missing");
+  });
+
+  it("wrong nonce → 403", async () => {
+    const running = await server();
+    const res = await running.post(TARGET, { headers: { "x-csrf-token": BAD_HEADER_SHORT } });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "csrf_token_mismatch");
+  });
+
+  it("foreign Origin → 403", async () => {
+    const running = await server();
+    const res = await running.post(TARGET, { headers: { origin: "https://evil.example" } });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "origin_rejected");
+  });
+
+  it("wrong Host → 403", async () => {
+    const running = await server();
+    const res = await running.post(TARGET, {
+      headers: { host: `evil.example:${running.port}`, origin: `http://evil.example:${running.port}` },
+    });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "host_rejected");
+  });
+
+  it("missing Origin and Origin: null → 403 (BP-005.14)", async () => {
+    const running = await server();
+    const absent = await running.post(TARGET, { headers: { origin: undefined } });
+    assert.equal(absent.status, 403);
+    assert.equal(absent.json.reason, "origin_missing");
+
+    const nulled = await running.post(TARGET, { headers: { origin: "null" } });
+    assert.equal(nulled.status, 403);
+    assert.equal(nulled.json.reason, "origin_rejected");
+  });
+
+  it("a right-length wrong value is still refused (constant-time compare)", async () => {
+    const running = await server();
+    assert.equal(BAD_HEADER_SAME_LENGTH.length, running.nonce.length);
+    const res = await running.post(TARGET, { headers: { "x-csrf-token": BAD_HEADER_SAME_LENGTH } });
+    assert.equal(res.status, 403);
+    assert.equal(res.json.reason, "csrf_token_mismatch");
+  });
+
+  it("a rejection never echoes the nonce back", async () => {
+    const running = await server();
+    const res = await running.post(TARGET, { headers: { "x-csrf-token": BAD_HEADER_SHORT } });
+    assert.equal(res.text.includes(running.nonce), false);
+  });
+
+  it("csrfFailure is order-stable: token, then Host, then Origin", () => {
+    const state = { nonce: "n", hostAllowlist: new Set(["127.0.0.1:1"]) };
+    assert.equal(csrfFailure(state, { headers: {} }).reason, "csrf_token_missing");
+    assert.equal(csrfFailure(state, { headers: { "x-csrf-token": "x" } }).reason, "csrf_token_mismatch");
+    assert.equal(csrfFailure(state, { headers: { "x-csrf-token": "n", host: "evil:1" } }).reason, "host_rejected");
+    assert.equal(csrfFailure(state, { headers: { "x-csrf-token": "n", host: "127.0.0.1:1" } }).reason, "origin_missing");
+    assert.equal(csrfFailure(state, {
+      headers: { "x-csrf-token": "n", host: "127.0.0.1:1", origin: "http://127.0.0.1:1" },
+    }), null);
+  });
+
+  it("a GET carries no CSRF requirement", async () => {
+    const running = await server();
+    assert.equal((await running.get("/api/collectors")).status, 200);
+  });
+
+  it("no response carries a CORS header", async () => {
+    const running = await server();
+    for (const target of ["/", "/api/collectors", "/api/health"]) {
+      const res = await running.get(target, { origin: "https://evil.example" });
+      for (const header of Object.keys(res.headers)) {
+        assert.equal(header.startsWith("access-control-"), false, `${target} leaked ${header}`);
+      }
+    }
+  });
+});
+
+describe("a valid POST succeeds", () => {
+  it("BP-005.06 preview with nonce + Origin + Host returns the fix shape", async () => {
+    const running = await server();
+    const res = await running.post("/api/fixes/claude-output-hygiene/preview");
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.json.description, "string");
+    assert.equal(typeof res.json.diff, "string");
+    assert.ok(res.json.diff.includes("session-rx:output-hygiene:v1"), "the diff shows the marker it will write");
+    assert.ok(Array.isArray(res.json.files_affected) && res.json.files_affected.length > 0);
+    assert.equal(res.json.reversible, true);
+    assert.ok(res.json.check, "preview carries the check result");
+  });
+
+  it("preview writes nothing", async () => {
+    const running = await server();
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    const before = await fingerprint(target);
+    await running.post("/api/fixes/claude-output-hygiene/preview");
+    assert.equal(await fingerprint(target), before);
+    assert.equal(existsSync(path.join(running.home, ".session-rx")), false, "preview creates no undo state");
+  });
+
+  it("BP-005.07/08 apply then undo, inside the temp home only", async () => {
+    const running = await server();
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    // This test writes, so it proves WHERE it will write before writing.
+    assert.ok(running.state.home.includes("session-rx-5a-"),
+      `refusing to run an apply outside a suite temp dir: ${running.state.home}`);
+    const before = await fs.readFile(target, "utf8");
+
+    const applied = await running.post("/api/fixes/claude-output-hygiene/apply");
+    assert.equal(applied.status, 200);
+    assert.equal(applied.json.applied, true);
+    assert.equal(typeof applied.json.undoPath, "string");
+    assert.ok(applied.json.undoPath.startsWith(running.home), "undo state stays under the configured home");
+    const afterApply = await fs.readFile(target, "utf8");
+    assert.notEqual(afterApply, before);
+    assert.ok(afterApply.startsWith(before), "BP-004.08: existing bytes preserved, the section appended");
+
+    const checked = await running.get("/api/fixes/claude-output-hygiene/check");
+    assert.equal(checked.json.applied, true);
+
+    const undone = await running.post("/api/fixes/claude-output-hygiene/undo", {
+      body: JSON.stringify({ undoPath: applied.json.undoPath }),
+    });
+    assert.equal(undone.status, 200);
+    assert.equal(undone.json.restored, true);
+    assert.equal(undone.json.byteIdentical, true);
+    assert.equal(await fs.readFile(target, "utf8"), before, "undo is byte-identical");
+  });
+
+  it("a fix refusal is a 409 with its code, not a 500", async () => {
+    const running = await server();
+    assert.equal((await running.post("/api/fixes/claude-batch-commands/apply")).status, 200);
+    const second = await running.post("/api/fixes/claude-batch-commands/preview");
+    assert.equal(second.status, 409);
+    assert.equal(second.json.code, "ALREADY_APPLIED");
+    assert.equal(second.json.reason, "fix_already_applied");
+  });
+
+  it("a missing target file is a 409 precondition, not a 500", async () => {
+    const running = await server();
+    await fs.rm(path.join(running.home, ".claude", "CLAUDE.md"));
+    const res = await running.post("/api/fixes/claude-worker-cap/preview");
+    assert.equal(res.status, 409);
+    assert.equal(res.json.code, "TARGET_MISSING");
+  });
+
+  it("an engine-invariant failure is a 500, not a 409", async () => {
+    const { FixError, FIX_ERROR_CODES } = await import("../src/fixes/base.js");
+    const running = await server({
+      fixCatalog: [{
+        id: "engine-broke",
+        title: "Engine failure double",
+        kind: "append-section",
+        factory: () => ({
+          id: "engine-broke",
+          check: async () => ({ applied: false, marker: "none" }),
+          preview: async () => {
+            throw new FixError(FIX_ERROR_CODES.WRITE_NOT_VERIFIED, "the bytes on disk are not the bytes written");
+          },
+        }),
+      }],
+    });
+    const res = await running.post("/api/fixes/engine-broke/preview");
+    assert.equal(res.status, 500);
+    assert.equal(res.json.code, "WRITE_NOT_VERIFIED");
+    assert.equal(res.json.reason, "fix_write_not_verified");
+  });
+
+  it("a documented response key is not overridable by the fix", async () => {
+    const running = await server({
+      fixCatalog: [{
+        id: "liar-fix",
+        title: "A fix that reports the wrong shape",
+        kind: "append-section",
+        factory: () => ({
+          id: "liar-fix",
+          check: async () => ({ applied: "yes", marker: 42 }),
+          preview: async () => ({ reversible: "sure", files_affected: "not-an-array", diff: null, description: null }),
+        }),
+      }],
+    });
+    const checked = await running.get("/api/fixes/liar-fix/check");
+    assert.equal(checked.json.applied, false, "a non-boolean applied is normalised to false");
+    const previewed = await running.post("/api/fixes/liar-fix/preview");
+    assert.equal(previewed.json.reversible, false);
+    assert.deepEqual(previewed.json.files_affected, []);
+    assert.equal(previewed.json.diff, "");
+  });
+
+  it("an unknown fix id is a 404", async () => {
+    const running = await server();
+    const res = await running.post("/api/fixes/not-a-fix/preview");
+    assert.equal(res.status, 404);
+    assert.equal(res.json.reason, "fix_not_found");
+  });
+
+  it("a malformed JSON body is a 400, not a 500", async () => {
+    const running = await server();
+    const res = await running.post("/api/fixes/claude-output-hygiene/preview", { body: "{not json" });
+    assert.equal(res.status, 400);
+    assert.equal(res.json.reason, "body_parse_failed");
+  });
+});
+
+describe("honest degradation", () => {
+  it("a collector that throws does not 500 the sessions route", async () => {
+    const running = await server({
+      collectors: [new FakeCollector("claude", [testSession()]), new ExplodingCollector()],
+    });
+    const res = await running.get("/api/sessions");
+    assert.equal(res.status, 200, "one broken collector must not take the route down");
+    assert.equal(res.json.total, 1, "the healthy collector still reports");
+    const diagnostic = res.json.diagnostics.find((entry) => entry.cli === "exploder");
+    assert.ok(diagnostic, "the failure surfaces as a diagnostic");
+    assert.ok(diagnostic.errors.some((message) => message.includes("blew up")), "with the real error text");
+  });
+
+  it("the same is true of /api/health, /api/trends and /api/report", async () => {
+    const running = await server({
+      collectors: [new FakeCollector("claude", [testSession()]), new ExplodingCollector()],
+    });
+    for (const target of ["/api/health", "/api/trends", "/api/report"]) {
+      const res = await running.get(target);
+      assert.equal(res.status, 200, target);
+      assert.ok(Array.isArray(res.json.diagnostics), target);
+      assert.ok(res.json.diagnostics.some((entry) => entry.cli === "exploder"), `${target} surfaces the diagnostic`);
+    }
+  });
+
+  it("a missing dependency module is a 503 with a named cause, never an empty 200", async () => {
+    const running = await server({ modules: { trends: "./__wave_3b_not_landed__.js" } });
+    const res = await running.get("/api/trends");
+    assert.equal(res.status, 503);
+    assert.equal(res.json.reason, "dependency_unavailable");
+    assert.equal(res.json.dependency, "trends");
+    assert.ok(res.json.error.includes("unavailable"));
+    // The failure mode this guards against: a body that renders as "all clear".
+    assert.equal(res.json.charts, undefined);
+    assert.equal(res.json.unknowns, undefined);
+    // Its neighbours are unaffected.
+    assert.equal((await running.get("/api/health")).status, 200);
+  });
+
+  it("a missing analyzer is a 503 on every route that needs it", async () => {
+    const running = await server({ modules: { health: "./__wave_3a_not_landed__.js" } });
+    for (const target of ["/api/health", "/api/sessions", "/api/report"]) {
+      const res = await running.get(target);
+      assert.equal(res.status, 503, target);
+      assert.equal(res.json.dependency, "health", target);
+    }
+    assert.equal((await running.get("/api/collectors")).status, 200, "detection does not need the analyzer");
+  });
+
+  it("a missing redactor refuses to serve data rather than serving it unredacted", async () => {
+    const running = await server({ modules: { report: "./__wave_3c_not_landed__.js" } });
+    const res = await running.get("/api/collectors");
+    assert.equal(res.status, 503);
+    assert.equal(res.json.reason, "redactor_unavailable");
+  });
+
+  it("a fix whose module is absent is listed as unavailable, not silently dropped", async () => {
+    const running = await server({
+      fixCatalog: [{ id: "ghost-fix", title: "Ghost", kind: "append-section", blueprint: "BP-999", specifier: "./fixes/claude/__not_landed__.js" }],
+    });
+    const listed = await running.get("/api/fixes");
+    assert.equal(listed.status, 200);
+    assert.equal(listed.json.fixes[0].available, false);
+    assert.ok(listed.json.fixes[0].reason.includes("not installed"));
+
+    const previewed = await running.post("/api/fixes/ghost-fix/preview");
+    assert.equal(previewed.status, 503);
+    assert.equal(previewed.json.reason, "fix_unavailable");
+  });
+
+  it("an unreadable frontend is a 500 that says so", async () => {
+    const running = await server({ publicDir: path.join(os.tmpdir(), "session-rx-no-such-public") });
+    const res = await running.get("/");
+    assert.equal(res.status, 500);
+    assert.ok(res.json.error.includes("frontend could not be read"));
+  });
+});
+
+describe("BP-005.15 / FVA-004 — secret redaction on the way out", () => {
+  it("a credential-shaped value in session evidence never reaches the client", async () => {
+    const running = await server();
+    for (const target of ["/api/sessions", "/api/health", "/api/report"]) {
+      const res = await running.get(target);
+      assert.equal(res.status, 200, target);
+      assert.equal(res.text.includes(PLANTED_SECRET), false, `${target} leaked the planted value`);
+    }
+  });
+
+  it("the nonce is never in an API response", async () => {
+    const running = await server();
+    for (const target of ["/api/collectors", "/api/health", "/api/sessions", "/api/trends", "/api/report", "/api/fixes"]) {
+      const res = await running.get(target);
+      assert.equal(res.text.includes(running.nonce), false, `${target} leaked the nonce`);
+    }
+  });
+
+  it("the nonce is never written under the configured home", async () => {
+    const running = await server();
+    await running.post("/api/fixes/claude-worker-cap/apply");
+    const found = [];
+    const walk = async (dir) => {
+      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) await walk(full);
+        else if ((await fs.readFile(full, "utf8").catch(() => "")).includes(running.nonce)) found.push(full);
+      }
+    };
+    await walk(running.home);
+    assert.deepEqual(found, [], "the nonce must not be persisted anywhere");
+  });
+
+  it("redactJson drops a value its key makes credential-shaped, and keeps ordinary text", () => {
+    // Values held in variables so no `key: "literal"` pair appears in this file.
+    const values = { tokenish: "short", passwordish: "hunter2", keyish: "abc" };
+    const probe = {
+      access_token: values.tokenish,
+      password: values.passwordish,
+      note: "nothing secret here",
+      nested: [{ api_key: values.keyish }, { path: "/Users/demo/app" }],
+    };
+    const { value } = redactJson(probe, redactSecrets);
+    assert.equal(value.access_token, "[REDACTED]");
+    assert.equal(value.password, "[REDACTED]");
+    assert.equal(value.note, "nothing secret here");
+    assert.equal(value.nested[0].api_key, "[REDACTED]");
+    assert.equal(value.nested[1].path, "/Users/demo/app", "a filesystem path is evidence, not a secret");
+  });
+
+  it("redactJson still produces valid JSON for a keyed secret", () => {
+    const values = { v: "abc" };
+    const { value } = redactJson({ token: values.v }, redactSecrets);
+    assert.equal(JSON.parse(JSON.stringify(value)).token, "[REDACTED]");
+  });
+
+  it("redactJson counts what it removed and survives a cycle", () => {
+    const values = { v: "abc" };
+    const cyclic = { secret: values.v };
+    cyclic.self = cyclic;
+    const { value, redactions } = redactJson(cyclic, redactSecrets);
+    assert.ok(redactions >= 1);
+    assert.equal(value.self, "[circular]");
+  });
+});
+
+describe("pure helpers", () => {
+  it("filterSessions excludes a session with no recoverable timestamp from a bounded window", () => {
+    const dated = testSession();
+    const undated = normalizeSession({ cli: "kimi", sessionId: "k1" });
+    const all = [dated, undated];
+    assert.equal(filterSessions(all, {}).length, 2);
+    assert.equal(filterSessions(all, { from: new Date(ISO(1)) }).length, 1);
+    assert.equal(filterSessions(all, { cli: ["kimi"] }).length, 1);
+    assert.equal(filterSessions(all, { project: "DEMO-APP" }).length, 1, "project match is case-insensitive");
+  });
+
+  it("sortSessions puts nulls last in both directions", () => {
+    const withTime = { sessionId: "a", startedAt: ISO(10) };
+    const without = { sessionId: "b", startedAt: null };
+    assert.equal(sortSessions([without, withTime], "startedAt", "desc")[0].sessionId, "a");
+    assert.equal(sortSessions([without, withTime], "startedAt", "asc")[0].sessionId, "a");
+  });
+
+  it("the default scan bound is stated in the response", async () => {
+    const running = await server();
+    const res = await running.get("/api/sessions");
+    assert.equal(res.json.scan.limitPerCollector, DEFAULT_SCAN_LIMIT);
+    assert.equal(res.json.scan.defaulted, true);
+    assert.equal(res.json.scan.atLimit, false);
+    assert.ok(res.json.scan.note.includes("reached the end"));
+  });
+
+  it("scan.atLimit is true when a collector filled the bound", async () => {
+    const running = await server({ scanLimit: 1 });
+    const res = await running.get("/api/sessions");
+    assert.equal(res.json.scan.atLimit, true);
+    assert.ok(res.json.scan.note.includes("older sessions exist"));
+  });
+
+  it("createApp generates a distinct high-entropy nonce per process", () => {
+    const a = createApp({ publicDir: PUBLIC_DIR }).state.nonce;
+    const b = createApp({ publicDir: PUBLIC_DIR }).state.nonce;
+    assert.notEqual(a, b);
+    assert.equal(a.length, 64, "32 random bytes, hex");
+    assert.match(a, /^[0-9a-f]{64}$/);
+  });
+});
+
+describe("src/cli.js", () => {
+  it("parses its arguments and environment", async () => {
+    const { parseArgs } = await import("../src/cli.js");
+    assert.equal(parseArgs([]).open, true);
+    assert.equal(parseArgs(["--no-open"]).open, false);
+    assert.equal(parseArgs([], { SESSION_RX_NO_OPEN: "1" }).open, false);
+    assert.equal(parseArgs(["--port", "7331"]).port, 7331);
+    assert.equal(parseArgs(["--port=7331"]).port, 7331);
+    assert.equal(parseArgs([], { SESSION_RX_PORT: "7400" }).port, 7400);
+    assert.equal(parseArgs(["--help"]).help, true);
+    assert.throws(() => parseArgs(["--port", "nope"]), /needs a port number/);
+    assert.throws(() => parseArgs(["--port", "99999"]), /between 1 and 65535/);
+    assert.throws(() => parseArgs(["--nonsense"]), /unknown option/);
+  });
+
+  it("skips a taken port and binds a free one", async () => {
+    const { listenOnFreePort } = await import("../src/cli.js");
+    const blocker = await startServer({ port: 0, publicDir: PUBLIC_DIR });
+    try {
+      const running = await listenOnFreePort([blocker.port, 0], { publicDir: PUBLIC_DIR });
+      try {
+        assert.notEqual(running.port, blocker.port, "the taken port must be skipped");
+        assert.equal(running.server.address().address, "127.0.0.1");
+      } finally {
+        await running.close();
+      }
+    } finally {
+      await blocker.close();
+    }
+  });
+
+  it("reports that every candidate was taken instead of binding something else", async () => {
+    const { listenOnFreePort } = await import("../src/cli.js");
+    const blocker = await startServer({ port: 0, publicDir: PUBLIC_DIR });
+    try {
+      await assert.rejects(
+        listenOnFreePort([blocker.port], { publicDir: PUBLIC_DIR }),
+        (error) => error.code === "EADDRINUSE",
+      );
+    } finally {
+      await blocker.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The safety proof, asserted last
+// ---------------------------------------------------------------------------
+
+describe("real-file safety", () => {
+  it("the developer's real home is byte-identical to how the suite found it", async () => {
+    for (const target of WATCHED_REAL_PATHS) {
+      assert.equal(await fingerprint(target), realBefore.get(target), `${target} changed during the suite`);
+    }
+    if (!realStateDirExistedBefore) {
+      assert.equal(existsSync(REAL_STATE_DIR), false, `${REAL_STATE_DIR} was created during the suite`);
+    }
+  });
+
+  it("every app under test was pointed at an OS temp directory", () => {
+    assert.ok(servers.length > 0);
+    for (const running of servers) {
+      assert.ok(running.state.home.includes("session-rx-5a-"), `${running.state.home} is not a suite temp dir`);
+      assert.notEqual(running.state.home, REAL_HOME);
+    }
+  });
+});
