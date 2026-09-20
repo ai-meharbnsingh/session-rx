@@ -1315,3 +1315,129 @@ test("an aborted request is not rewritten as 'server not running'", async () => 
     globalThis.fetch = saved;
   }
 });
+
+// ==========================================================================
+// D. The stale-nonce contract (app.js `request()`)
+//
+// The server mints a fresh CSRF nonce on every start (`crypto.randomBytes`)
+// and injects it into the served HTML. GET requests skip CSRF, so a tab left
+// open through a server restart keeps rendering — until the user clicks
+// Preview/Apply/Undo, whose mutating request still carries the previous
+// process's nonce and gets a 403 with the raw "does not match this server's
+// startup nonce" string. That is accurate and useless: the actionable fact is
+// "reload the page". These tests key ONLY off `body.reason`, never off the
+// 403 status, because 403 is also returned for host/origin rejections that
+// mean something else entirely and must keep their own message.
+// ==========================================================================
+
+const csrfResponse = (reason, error) => new Response(JSON.stringify({ error, reason }), {
+  status: 403,
+  headers: { "Content-Type": "application/json" },
+});
+
+test("a stale csrf_token_mismatch is reported as a page that needs reloading, not the raw nonce string", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(
+    csrfResponse("csrf_token_mismatch", "X-CSRF-Token does not match this server's startup nonce"),
+  );
+  try {
+    await assert.rejects(app.api.post("/api/fixes/1/apply"), (error) => {
+      assert.notEqual(
+        error.message,
+        "X-CSRF-Token does not match this server's startup nonce",
+        "the raw nonce-mismatch string must not reach the user verbatim",
+      );
+      assert.match(error.message, /reload/i, "must tell the user to reload the page");
+      assert.match(error.message, /SessionRx/, "must name what the page is stale from");
+      assert.ok(!/[!]/.test(error.message), "no exclamation marks");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("a stale csrf_token_missing gets the same reload message", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(
+    csrfResponse("csrf_token_missing", "X-CSRF-Token header is required on every mutating request"),
+  );
+  try {
+    await assert.rejects(app.api.post("/api/fixes/1/apply"), (error) => {
+      assert.match(error.message, /reload/i, "must tell the user to reload the page");
+      assert.match(error.message, /SessionRx/, "must name what the page is stale from");
+      assert.notEqual(
+        error.message,
+        "X-CSRF-Token header is required on every mutating request",
+        "the raw missing-token string must not reach the user verbatim",
+      );
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("a host_not_allowed 403 keeps its own server-supplied message, not the reload message", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(
+    csrfResponse("host_not_allowed", "Host header is not the loopback address this server is bound to"),
+  );
+  try {
+    await assert.rejects(app.api.post("/api/fixes/1/apply"), (error) => {
+      assert.equal(
+        error.message,
+        "Host header is not the loopback address this server is bound to",
+        "host_not_allowed is not a stale-page condition and must not be rewritten as one",
+      );
+      assert.ok(!/reload/i.test(error.message), "must not tell the user to reload — that is the wrong fix here");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("an origin_rejected 403 keeps its own server-supplied message, not the reload message", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(
+    csrfResponse("origin_rejected", "Origin header is not this server's own origin"),
+  );
+  try {
+    await assert.rejects(app.api.post("/api/fixes/1/apply"), (error) => {
+      assert.equal(
+        error.message,
+        "Origin header is not this server's own origin",
+        "origin_rejected is not a stale-page condition and must not be rewritten as one",
+      );
+      assert.ok(!/reload/i.test(error.message), "must not tell the user to reload — that is the wrong fix here");
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("the stale-nonce error carries the server body as `cause`, so nothing is lost", async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(
+    csrfResponse("csrf_token_mismatch", "X-CSRF-Token does not match this server's startup nonce"),
+  );
+  try {
+    await assert.rejects(app.api.post("/api/fixes/1/apply"), (error) => {
+      assert.equal(
+        error.cause?.reason,
+        "csrf_token_mismatch",
+        "the rewritten error must carry the server's `reason` via `cause`",
+      );
+      assert.equal(
+        error.cause?.error,
+        "X-CSRF-Token does not match this server's startup nonce",
+        "the original server message must still be reachable via `cause`, even though the user is shown the reload message instead",
+      );
+      return true;
+    });
+  } finally {
+    globalThis.fetch = saved;
+  }
+});

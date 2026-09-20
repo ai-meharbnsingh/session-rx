@@ -41,6 +41,12 @@ const request = async (path, options = {}) => {
   let body;
   try { body = await response.json(); } catch { body = null; }
   if (!response.ok) {
+    if (body?.reason === 'csrf_token_mismatch' || body?.reason === 'csrf_token_missing') {
+      throw new Error(
+        'This page was loaded from an earlier run of SessionRx — reload the page for this action to work.',
+        { cause: body },
+      );
+    }
     const detail = typeof body?.error === 'string' ? body.error : `Request failed (${response.status})`;
     throw new Error(detail);
   }
