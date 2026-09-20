@@ -1,0 +1,20 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+out/e2e/playwright-report/
+out/e2e/test-results/
+playwright-report/
+test-results/
+.next/
+dist/
+build/
+.pytest_cache/
+htmlcov/
+.coverage
+*.log
+
+# Credentials — never tracked
+.env
+.env.*
+!.env.example
