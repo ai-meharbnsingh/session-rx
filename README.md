@@ -30,7 +30,7 @@ checks against each recent session, and offers a local fix for the ones that
 fail. The six checks are context pressure, cache hit rate, repeated tool work,
 large tool results, long rising context, and sub-agent concurrency.
 
-![Overview showing detected CLIs, summary cards with sessions analyzed and problems found, checks that could not be measured, and health donut displaying the three verdict states — problems found, passed, not measured](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
+![Overview showing a Last 15 days range selector, a line stating how many sessions the window holds and that the scan was not complete, summary cards for sessions analyzed, problems found, fixes available and checks that could not be measured, and a Health summary beside Trends — the donut showing passed, problems found and could not be measured, and an issue distribution listing every check with the number of sessions it could not be measured on](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
 
 ### Every check returns one of three answers
 
