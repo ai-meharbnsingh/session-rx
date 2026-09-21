@@ -249,6 +249,20 @@ function makeApi(corpus, { pageSize = 20 } = {}) {
   };
 }
 
+/** Page identity is the endpoint plus its pagination parameters, not the scan window. */
+const sessionPage = (url) => {
+  const parsed = new URL(url, "http://127.0.0.1");
+  assert.equal(parsed.pathname, "/api/sessions", "pagination must use the sessions endpoint");
+  assert.ok(parsed.searchParams.get("scan"), "pagination keeps the scan bound");
+  assert.ok(parsed.searchParams.get("from"), "pagination keeps the range start");
+  assert.ok(parsed.searchParams.get("to"), "pagination keeps the range end");
+  return {
+    pathname: parsed.pathname,
+    limit: Number(parsed.searchParams.get("limit")),
+    offset: Number(parsed.searchParams.get("offset")),
+  };
+};
+
 /** The body `/api/sessions` publishes, built the way src/server.js builds it. */
 function page(corpus, offset, limit) {
   const sessions = corpus.slice(offset, offset + limit);
@@ -347,7 +361,11 @@ test("the sentinel appends the next page rather than replacing the first", async
   latestObserver().trigger();
   await settle();
 
-  assert.deepEqual(api.calls, ["/api/sessions?limit=20&offset=20"], "the sentinel asks for the page after the one it holds");
+  assert.deepEqual(
+    api.calls.map(sessionPage),
+    [{ pathname: "/api/sessions", limit: 20, offset: 20 }],
+    "the sentinel asks for the page after the one it holds",
+  );
   const afterIds = dataRows(mount).map((row) => row.dataset.sessionId);
   assert.equal(afterIds.length, 40, "20 + 20; a replacing page would still read 20");
   assert.deepEqual(afterIds.slice(0, 20), firstIds, "page 1 stays, in its original order, above page 2");
@@ -365,7 +383,11 @@ test("a sentinel that fires twice does not fetch the same page twice", async () 
   observer.trigger();
   observer.trigger();
   await settle();
-  assert.deepEqual(api.calls, ["/api/sessions?limit=20&offset=20"], "an in-flight page is not requested again");
+  assert.deepEqual(
+    api.calls.map(sessionPage),
+    [{ pathname: "/api/sessions", limit: 20, offset: 20 }],
+    "an in-flight page is not requested again",
+  );
 
   // And once more AFTER it settled, against the redrawn sentinel — which is
   // what really happens, because appending rows pushes the sentinel back into
@@ -373,11 +395,14 @@ test("a sentinel that fires twice does not fetch the same page twice", async () 
   latestObserver().trigger();
   await settle();
   assert.deepEqual(
-    api.calls,
-    ["/api/sessions?limit=20&offset=20", "/api/sessions?limit=20&offset=40"],
+    api.calls.map(sessionPage),
+    [
+      { pathname: "/api/sessions", limit: 20, offset: 20 },
+      { pathname: "/api/sessions", limit: 20, offset: 40 },
+    ],
     "each offset is asked for exactly once",
   );
-  assert.equal(new Set(api.calls).size, api.calls.length, "no URL is repeated");
+  assert.equal(new Set(api.calls.map((url) => sessionPage(url).offset)).size, api.calls.length, "no offset is repeated");
   assert.equal(dataRows(mount).length, 45);
 });
 
@@ -476,8 +501,11 @@ test("a failed page says so in the helper's own words, and offers a retry that w
 
   assert.equal(dataRows(mount).length, 40, "the retry asks for the SAME page again and gets it");
   assert.deepEqual(
-    api.calls,
-    ["/api/sessions?limit=20&offset=20", "/api/sessions?limit=20&offset=20"],
+    api.calls.map(sessionPage),
+    [
+      { pathname: "/api/sessions", limit: 20, offset: 20 },
+      { pathname: "/api/sessions", limit: 20, offset: 20 },
+    ],
     "the failed offset is re-requested, not skipped",
   );
   assert.equal(pagerStrip(mount).dataset.state, "idle", "and the page is back to waiting for the reader");

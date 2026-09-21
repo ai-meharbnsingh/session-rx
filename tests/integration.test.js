@@ -66,6 +66,7 @@ const SCRIPTS = scriptSources(INDEX_HTML);
 const PAGE_DIR = path.join(PUBLIC, "js", "pages");
 const PAGE_FILES = readdirSync(PAGE_DIR).filter((name) => name.endsWith(".js")).sort();
 const ROUTES = ["health", "trends", "sessions", "report"];
+const pathnameOf = (url) => new URL(String(url), "http://test").pathname;
 
 function walk(dir) {
   const out = [];
@@ -529,7 +530,7 @@ async function boot() {
   };
   globalThis.fetch = async (url) => {
     requested.push(String(url));
-    const body = FIXTURES[String(url)];
+    const body = FIXTURES[pathnameOf(url)];
     if (!body) return { ok: false, status: 404, json: async () => ({ error: `no fixture for ${url}` }) };
     return { ok: true, status: 200, json: async () => body };
   };
@@ -558,8 +559,11 @@ test("the app boots in process, registers all four routes, and renders real DOM"
         app.captured.has("DOMContentLoaded"),
         "app.js must register a DOMContentLoaded handler — module scripts run before that event fires",
       );
-      assert.ok(app.requested.includes("/api/health"), `the health route must fetch /api/health; got ${app.requested}`);
-      assert.ok(app.requested.includes("/api/collectors"), "the shell must fetch the collector list");
+      const paths = app.requested.map(pathnameOf);
+      assert.ok(paths.includes("/api/health"), `the health route must fetch /api/health; got ${app.requested}`);
+      assert.ok(paths.includes("/api/collectors"), "the shell must fetch the collector list");
+      const health = new URL(app.requested.find((url) => pathnameOf(url) === "/api/health"), "http://test");
+      assert.equal(health.searchParams.get("limit"), "250", "the health request keeps its scan limit");
 
       const mount = app.shell.mounts.get("health");
       assert.ok(mount, "index.html must declare a #page-health mount");
@@ -617,7 +621,10 @@ test("the app boots in process, registers all four routes, and renders real DOM"
           assert.equal(app.shell.mounts.get(other).hidden, true, `#page-${other} must be hidden while on ${route}`);
         }
         assert.equal(app.shell.byId.get("app-status").textContent, "", `route "${route}" reported an error`);
-        assert.ok(app.requested.includes(`/api/${route}`), `route "${route}" never called /api/${route}`);
+        assert.ok(
+          app.requested.map(pathnameOf).includes(`/api/${route}`),
+          `route "${route}" never called /api/${route}`,
+        );
       }
       // Each page put its own heading in, so no two routes share one renderer.
       assert.match(app.shell.mounts.get("health").textContent, /Session health/);

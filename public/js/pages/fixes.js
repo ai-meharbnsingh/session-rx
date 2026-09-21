@@ -1,4 +1,4 @@
-import { registerPage } from '../app.js';
+import { rangeQuery, registerPage } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
 import { button, el, observedRules, plainText, ruleLabel, severity } from '../components/ui.js';
 
@@ -38,7 +38,7 @@ function issueNavigation(index, total) {
 async function renderFixes(mount, data, ctx = {}) {
   if (!mount) return;
   const api = ctx.api;
-  const health = data?.health || await api.get('/api/health');
+  const health = data?.health || await api.get(`/api/health${rangeQuery('/api/health')}`);
   const fixesPayload = data?.fixes || await api.get('/api/fixes');
   const items = observedRules(health?.sessions || []).filter((item) => item.rule?.fix);
   const catalog = fixesPayload?.fixes || [];

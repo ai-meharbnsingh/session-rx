@@ -22,7 +22,7 @@
  * @module public/js/pages/report
  */
 
-import { registerPage, api as appApi } from '../app.js';
+import { rangeQuery, registerPage, api as appApi } from '../app.js';
 
 /** The last report fetched on this page, so a tab switch does not lose it. */
 const state = {
@@ -89,7 +89,7 @@ async function generate(api) {
   state.copied = null;
   draw();
   try {
-    const body = await api.get('/api/report');
+    const body = await api.get(`/api/report${rangeQuery('/api/report')}`);
     state.report = body;
     // Keep the router's cache in step, so navigating away and back shows the
     // report just generated rather than the one it fetched on first load.

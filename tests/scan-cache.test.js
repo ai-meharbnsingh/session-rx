@@ -362,7 +362,23 @@ describe("the scan cache re-reads when it must", () => {
     assert.deepEqual(narrowAgain.json, narrow.json, "and the narrow scan is still the narrow scan");
   });
 
-  it("never serves one `since` window under another", async () => {
+  it("never serves one health scan bound under another, but reuses the same one", async () => {
+    const root = await corpusRoot();
+    const claude = new CountingCollector("claude", root, Array.from({ length: 10 }, (_, i) => madeUpSession("claude", i)));
+    const app = await server({ collectors: [claude] });
+
+    await app.get("/api/health?since=2026-09-01T01:00:00.000Z");
+    await app.get("/api/health?since=2026-09-01T05:00:00.000Z");
+    await app.get("/api/health?since=2026-09-01T05:00:00.000Z");
+
+    assert.equal(claude.calls.length, 2);
+    assert.deepEqual(claude.calls.map((call) => call.since), [
+      "2026-09-01T01:00:00.000Z",
+      "2026-09-01T05:00:00.000Z",
+    ]);
+  });
+
+  it("keeps `/api/sessions` date filters off the scan and still changes the listed window", async () => {
     const root = await corpusRoot();
     const claude = new CountingCollector("claude", root, Array.from({ length: 10 }, (_, i) => madeUpSession("claude", i)));
     const app = await server({ collectors: [claude] });
@@ -370,8 +386,11 @@ describe("the scan cache re-reads when it must", () => {
     const all = await app.get("/api/sessions");
     const windowed = await app.get("/api/sessions?from=2026-09-01T05:00:00.000Z");
 
-    assert.equal(claude.calls.length, 2);
-    assert.deepEqual(claude.calls.map((call) => call.since), [null, "2026-09-01T05:00:00.000Z"]);
+    // `from` is a result filter, not a scan cutoff: keeping it out of `since`
+    // prevents a narrowed scan from making `corpusComplete` look true and
+    // fabricating a measured-zero pass for `subagent-concurrency`.
+    assert.equal(claude.calls.length, 1, "a date filter must reuse the same scan");
+    assert.ok(claude.calls.every((call) => call.since === null), "a date filter must never become a scan cutoff");
     assert.equal(all.json.total, 10);
     assert.equal(windowed.json.total, 5);
   });

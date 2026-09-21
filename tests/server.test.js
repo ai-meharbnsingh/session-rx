@@ -165,6 +165,21 @@ class FakeCollector extends Collector {
   }
 }
 
+class WindowAwareCollector extends FakeCollector {
+  async collect({ limit, since } = {}) {
+    const from = since instanceof Date ? since.getTime() : null;
+    const sessions = from === null
+      ? this.sessions
+      : this.sessions.filter((session) => {
+        const started = Date.parse(session?.startedAt ?? "");
+        const ended = Date.parse(session?.endedAt ?? "");
+        const at = Number.isFinite(started) ? started : ended;
+        return Number.isFinite(at) && at >= from;
+      });
+    return Number.isInteger(limit) && limit > 0 ? sessions.slice(0, limit) : sessions;
+  }
+}
+
 /** Installed, claims to be supported, throws while reading. */
 class ExplodingCollector extends Collector {
   constructor() {
@@ -580,6 +595,24 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.equal(res.json.heatmap.grid[0].length, 24);
   });
 
+  it("keeps the analyzer window separate from the session window on /api/trends", async () => {
+    const running = await server();
+    const res = await running.get("/api/trends");
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.json.window.days, "number");
+    assert.ok(Number.isFinite(res.json.window.days));
+    assert.equal(res.json.window.timezone, "local");
+    assert.equal(typeof res.json.sessionWindow.matched, "number");
+  });
+
+  it("publishes only sessionWindow on /api/health", async () => {
+    const running = await server();
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    assert.ok(res.json.sessionWindow && typeof res.json.sessionWindow === "object");
+    assert.equal(Object.hasOwn(res.json, "window"), false);
+  });
+
   it("BP-005.05 /api/report", async () => {
     const running = await server();
     const res = await running.get("/api/report");
@@ -787,6 +820,86 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
         `session ${session.sessionId}: corpusComplete must still be true after the payload-size fix`,
       );
     }
+  });
+});
+
+describe("date windows are serialization filters, not scan bounds", () => {
+  function windowFixture() {
+    const target = testSession({ sessionId: "target", startedAt: ISO(3, 9), endedAt: ISO(3, 11) });
+    const parent = testSession({ sessionId: "parent", startedAt: ISO(1, 9), endedAt: ISO(1, 11) });
+    const child = testSession({ sessionId: "child", startedAt: ISO(1, 10), endedAt: ISO(1, 10, 30) });
+    const collector = new WindowAwareCollector("claude", [parent, child, target]);
+    collector.sessionMeta = {
+      [target.sessionId]: { sessionId: target.sessionId, parentSessionId: null },
+      [parent.sessionId]: { sessionId: parent.sessionId, parentSessionId: null },
+      [child.sessionId]: { sessionId: child.sessionId, parentSessionId: parent.sessionId },
+    };
+    return collector;
+  }
+
+  it("keeps the subagent-concurrency verdict distribution identical when a window excludes sessions", async () => {
+    const running = await server({ collectors: [windowFixture()] });
+    const whole = await running.get("/api/health?limit=3");
+    const bounded = await running.get(`/api/health?limit=3&from=${encodeURIComponent(ISO(3, 0))}&to=${encodeURIComponent(ISO(3, 23))}`);
+    const unknownCount = (body) => body.sessions
+      .flatMap((session) => session.rules)
+      .filter((rule) => rule.id === "subagent-concurrency" && rule.evidence.status === "unknown")
+      .length;
+    assert.equal(whole.json.sessions.length, 2, "the child is set aside, leaving the two own sessions");
+    assert.equal(bounded.json.sessions.length, 1, "the window excludes the older own session");
+    assert.equal(unknownCount(bounded.json), unknownCount(whole.json));
+    assert.equal(unknownCount(bounded.json), 1, "the target verdict stays unknown, never a manufactured measured zero");
+  });
+
+  it("keeps scan.atLimit and the scan note byte-identical with and without a window", async () => {
+    const running = await server({ collectors: [windowFixture()] });
+    const whole = await running.get("/api/sessions?scan=3");
+    const bounded = await running.get(`/api/sessions?scan=3&from=${encodeURIComponent(ISO(3, 0))}`);
+    assert.equal(JSON.stringify(bounded.json.scan), JSON.stringify(whole.json.scan));
+    assert.equal(bounded.json.scan.atLimit, whole.json.scan.atLimit);
+    assert.equal(bounded.json.scan.note, whole.json.scan.note);
+  });
+
+  it("keeps sessionsTotal on the full analysis while sessionWindow.matched reports the narrowed set", async () => {
+    const running = await server({ collectors: [windowFixture()] });
+    const whole = await running.get("/api/health?limit=3");
+    const bounded = await running.get(`/api/health?limit=3&from=${encodeURIComponent(ISO(3, 0))}`);
+    assert.equal(bounded.json.sessionsTotal, whole.json.sessionsTotal);
+    assert.equal(whole.json.sessionWindow.matched, whole.json.sessionsTotal);
+    assert.equal(bounded.json.sessionWindow.matched, 1);
+    assert.equal(bounded.json.sessionWindow.applied, true);
+  });
+
+  it("counts undated sessions excluded by a bounded window and keeps them uncounted without one", async () => {
+    const dated = testSession({ sessionId: "dated", startedAt: ISO(3, 9), endedAt: ISO(3, 11) });
+    const undated = normalizeSession({ cli: "claude", sessionId: "undated" });
+    const running = await server({ collectors: [new FakeCollector("claude", [dated, undated])] });
+    const whole = await running.get("/api/health");
+    const bounded = await running.get(`/api/health?from=${encodeURIComponent(ISO(3, 0))}`);
+    assert.equal(whole.json.sessions.length, 2);
+    assert.equal(whole.json.sessionWindow.excludedUndated, 0);
+    assert.equal(whole.json.sessionWindow.matched, 2);
+    assert.equal(bounded.json.sessions.length, 1);
+    assert.equal(bounded.json.sessionWindow.excludedUndated, 1);
+    assert.equal(bounded.json.sessionWindow.matched, 1);
+  });
+
+  it("narrows the serialized /api/health sessions array without narrowing sessionsTotal", async () => {
+    const running = await server({ collectors: [new FakeCollector("claude", [
+      testSession({ sessionId: "early", startedAt: ISO(1, 9), endedAt: ISO(1, 11) }),
+      testSession({ sessionId: "late", startedAt: ISO(3, 9), endedAt: ISO(3, 11) }),
+    ])] });
+    const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(3, 0))}&to=${encodeURIComponent(ISO(3, 23))}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.sessions.map((session) => session.sessionId), ["late"]);
+    assert.equal(res.json.sessionsTotal, 2);
+    assert.deepEqual(res.json.sessionWindow, {
+      applied: true,
+      from: ISO(3, 0),
+      to: ISO(3, 23),
+      excludedUndated: 0,
+      matched: 1,
+    });
   });
 });
 

@@ -39,7 +39,7 @@
  * @module public/js/pages/sessions
  */
 
-import { registerPage, api as appApi } from '../app.js';
+import { rangeQuery, registerPage, api as appApi } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
 import { dateText, duration, el as uiEl, healthNode, cliIcon, ruleLabel, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
 import {
@@ -468,7 +468,7 @@ async function loadNextPage(api, redraw) {
   state.loading = true;
   redraw();
   try {
-    const payload = await api.get(`/api/sessions?limit=${PAGE_SIZE}&offset=${offset}`);
+    const payload = await api.get(`/api/sessions?limit=${PAGE_SIZE}&offset=${offset}${rangeQuery('/api/sessions').replace(/^\?/, '&')}`);
     absorb(payload, false);
     state.error = null;
   } catch (error) {

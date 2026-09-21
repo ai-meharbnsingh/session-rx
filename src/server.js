@@ -419,6 +419,33 @@ export function filterSessions(sessions, { cli, project, from, to } = {}) {
   });
 }
 
+function sessionWindow(sessions, { cli, project, from, to } = {}) {
+  const applied = from !== null && from !== undefined || to !== null && to !== undefined;
+  if (!Array.isArray(sessions)) {
+    return {
+      applied,
+      from: applied && from ? from.toISOString() : null,
+      to: applied && to ? to.toISOString() : null,
+      excludedUndated: applied ? null : 0,
+      matched: null,
+    };
+  }
+  const base = filterSessions(sessions, { cli, project });
+  const matchedSessions = filterSessions(base, { from, to });
+  return {
+    applied,
+    from: applied && from ? from.toISOString() : null,
+    to: applied && to ? to.toISOString() : null,
+    excludedUndated: applied ? base.filter((session) => sessionTime(session) === null).length : 0,
+    matched: matchedSessions.length,
+  };
+}
+
+function collectedSessions(collected) {
+  if (!Array.isArray(collected?.supported)) return null;
+  return collected.supported.flatMap((entry) => Array.isArray(entry?.sessions) ? entry.sessions : []);
+}
+
 export function sortSessions(sessions, field = "startedAt", order = "desc") {
   const key = SORT_FIELDS.has(field) ? field : "startedAt";
   const direction = order === "asc" ? 1 : -1;
@@ -1165,6 +1192,8 @@ export function createApp(options = {}) {
     const query = {
       since: parseIsoDate(singleValue(req.query.since, "since"), "since"),
       limit: parseLimit(singleValue(req.query.limit, "limit")),
+      from: parseIsoDate(singleValue(req.query.from, "from"), "from"),
+      to: parseIsoDate(singleValue(req.query.to, "to"), "to"),
     };
     const result = await analyzeFor(res, query);
     if (!result) return;
@@ -1175,7 +1204,9 @@ export function createApp(options = {}) {
     // mirrors the page's own `SESSION_LIMIT`) — so the payload shrinks
     // without the scan shrinking with it.
     const allSessions = Array.isArray(result.analysis.sessions) ? result.analysis.sessions : [];
-    const cardSessions = sortSessions(allSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
+    const sessionWindowValue = sessionWindow(allSessions, query);
+    const windowedSessions = filterSessions(allSessions, { from: query.from, to: query.to });
+    const cardSessions = sortSessions(windowedSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
     await sendJson(res, 200, {
       sessions: cardSessions,
       // The true count over the FULL analysis, so the health page's "N of
@@ -1193,6 +1224,7 @@ export function createApp(options = {}) {
       promotions: result.analysis.promotions ?? [],
       diagnostics: result.analysis.diagnostics ?? [],
       scan: result.scan,
+      sessionWindow: sessionWindowValue,
       generatedAt: state.now().toISOString(),
     });
   }));
@@ -1224,10 +1256,16 @@ export function createApp(options = {}) {
     // `scan.atLimit` says whether older unread sessions exist. A page is a
     // window onto `total`; `total` is a window onto the scan; neither is ever
     // published as the size of the corpus.
-    const result = await analyzeFor(res, { since: from, limit: scan });
+    const result = await analyzeFor(res, { since: null, limit: scan });
     if (!result) return;
 
     const matched = filterSessions(result.analysis.sessions, {
+      cli: parseCsvList(singleValue(req.query.cli, "cli")),
+      project: singleValue(req.query.project, "project"),
+      from,
+      to,
+    });
+    const sessionWindowValue = sessionWindow(result.analysis.sessions, {
       cli: parseCsvList(singleValue(req.query.cli, "cli")),
       project: singleValue(req.query.project, "project"),
       from,
@@ -1258,6 +1296,7 @@ export function createApp(options = {}) {
       // `nextOffset` must be able to stop on falsiness alone.
       nextOffset: hasMore ? consumed : null,
       scan: result.scan,
+      sessionWindow: sessionWindowValue,
       diagnostics: result.analysis.diagnostics ?? [],
     });
   }));
@@ -1288,7 +1327,7 @@ export function createApp(options = {}) {
     const to = parseIsoDate(singleValue(req.query.to, "to"), "to");
     const cli = parseCsvList(singleValue(req.query.cli, "cli"));
     const scan = parseLimit(singleValue(req.query.scan, "scan"));
-    const collectedFor = await collectFor(res, { since: from, limit: scan });
+    const collectedFor = await collectFor(res, { since: null, limit: scan });
     if (!collectedFor) return;
     const trends = await require$(res, "trends", "the trend builder");
     if (!trends) return;
@@ -1302,7 +1341,12 @@ export function createApp(options = {}) {
     // `{context, spend, cache}`. BP-005.04 named the third series `tools`; the
     // trend builder measures cache spend instead, and emitting an empty
     // `tools: []` to satisfy the table would be a fabricated series.
-    await sendJson(res, 200, { ...built, scan: collectedFor.scan, diagnostics: collectedFor.collected.diagnostics ?? [] });
+    await sendJson(res, 200, {
+      ...built,
+      scan: collectedFor.scan,
+      sessionWindow: sessionWindow(collectedSessions(collectedFor.collected), { cli, from, to }),
+      diagnostics: collectedFor.collected.diagnostics ?? [],
+    });
   }));
 
   /**
@@ -1444,7 +1488,7 @@ export function createApp(options = {}) {
     const to = parseIsoDate(singleValue(req.query.to, "to"), "to");
     const cli = parseCsvList(singleValue(req.query.cli, "cli"));
     const scan = parseLimit(singleValue(req.query.scan, "scan"));
-    const result = await analyzeFor(res, { since: from, limit: scan });
+    const result = await analyzeFor(res, { since: null, limit: scan });
     if (!result) return;
     const reportModule = await require$(res, "report", "the report generator");
     if (!reportModule) return;
@@ -1491,6 +1535,7 @@ export function createApp(options = {}) {
       generatedAt: document.generatedAt,
       redactions: document.redactions,
       scan: result.scan,
+      sessionWindow: sessionWindow(result.analysis.sessions, { cli, from, to }),
       // Not in BP-005.05, and required anyway: a report assembled from a corpus
       // where a collector failed must say so, or it reads as a complete picture.
       diagnostics: result.analysis.diagnostics ?? [],

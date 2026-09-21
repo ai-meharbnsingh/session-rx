@@ -40,11 +40,25 @@
           <a class="tab" href="#/fixes" data-route="fixes">Fixes</a>
           <a class="tab" href="#/report" data-route="report">Report</a>
         </nav>
+        <div class="range-picker-wrap">
+          <div class="range-picker">
+            <span class="range-calendar" data-icon="calendar" aria-hidden="true"></span>
+            <label class="visually-hidden" for="range-select">Session date range</label>
+            <select id="range-select" aria-label="Session date range">
+              <option value="15d">Last 15 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 3 months</option>
+              <option value="all">All time</option>
+            </select>
+            <span class="range-chevron" aria-hidden="true">⌄</span>
+          </div>
+        </div>
         <div class="topbar-meta">
           <span class="status-dot" aria-hidden="true"></span>
           <span>Local only</span>
         </div>
       </header>
+      <p id="range-coverage" class="range-coverage" role="status">Coverage could not be determined yet.</p>
 
       <main class="workspace">
         <aside class="cli-panel card" aria-labelledby="cli-panel-title">
