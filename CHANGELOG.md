@@ -12,18 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Local-first session analysis tool**: `npx session-rx` opens a browser to diagnose inefficient AI coding sessions. No cloud, no accounts, no telemetry, and no AI API calls.
 - **CLI support**: Parsers for Claude Code, Codex, Gemini CLI, Kimi, and OpenCode. Copilot has detection-only support; Grok and Amp are honest stubs, acknowledging when a format cannot be confirmed.
 - **Six health rules** scored against each session's actual CLI context window, not a hardcoded threshold:
-  - Long context usage
-  - Repeated tool use
-  - Sub-agent concurrency
-  - Auto-compact configuration
-  - Output hygiene
-  - Batch command practice
+  - Context pressure — average per-turn context against the session's own window
+  - Low cache hit — share of reusable prompt content rebuilt instead of read back
+  - Repeated tool work — same tool, same input, a result of the same size
+  - Large tool results — turns whose tool results exceed the byte threshold
+  - Long rising context — long session AND a rising context trend, both required
+  - High sub-agent concurrency — peak concurrent sub-agents against total dispatched
 - **Honesty contract**: Every verdict is one of `observed`, `not-observed`, or `unknown`. The tool never reports `unknown` as a pass. Null metrics are never rendered as zero. Over 50% of verdicts acknowledge what cannot be measured with evidence.
-- **Five reversible fixes** for Claude Code configuration with preview, apply, undo, and check operations:
-  - Create absent `~/.claude/CLAUDE.md` with health recommendations
-  - Merge auto-compact settings into `~/.claude/settings.json`
-  - Configure output hygiene and batch commands
-  - Adjust worker concurrency limits
+- **Five reversible fixes** for Claude Code configuration with preview, apply, undo, and check operations. Every one writes to Claude Code's own config, whichever CLI the finding came from:
+  - `claude-auto-compact` — merges auto-compaction settings into `~/.claude/settings.json`
+  - `claude-output-hygiene` — appends an output-bounding section to `~/.claude/CLAUDE.md`
+  - `claude-batch-commands` — appends a command-batching section to `~/.claude/CLAUDE.md`
+  - `claude-worker-cap` — appends sub-agent fan-out and brief-size caps to `~/.claude/CLAUDE.md`
+  - `claude-compact-contract` — appends what must survive a compaction to `~/.claude/CLAUDE.md`
 - **`session-rx clean` command**: Explicitly remove undo history. The command is a dry-run by default, showing what would be removed (files, bytes, date range) before confirming with `--yes`.
 - **Four analysis pages**:
   - Health: diagnoses across recent sessions, showing the 10 newest sessions and total measured count
@@ -41,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Read-only database access via `file:?mode=ro` URI
   - Backup before every fix apply, stored in `~/.session-rx/undo/<timestamp>/`
   - Report redaction enforced (fails closed if redaction code cannot load)
-- **Complete test suite**: 805 tests covering health rules, collectors, fix engine, server routes, and UI components. All pass.
+- **Complete test suite**: 824 tests covering health rules, collectors, fix engine, server routes, and UI components. All pass.
 
 ### Fixed
 

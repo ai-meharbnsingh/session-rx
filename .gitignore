@@ -13,6 +13,10 @@ build/
 htmlcov/
 .coverage
 *.log
+# A fixture is captured evidence, not a runtime log. The blanket rule above
+# silently swallowed tests/fixtures/copilot/.../logs/process-*.log, so that
+# test passed on the author's disk and failed on every fresh clone.
+!tests/fixtures/**/*.log
 
 # Credentials — never tracked
 .env
