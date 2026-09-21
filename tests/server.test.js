@@ -757,7 +757,12 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
     const meta = {};
     for (let day = 1; day <= TOTAL; day += 1) {
       const sessionId = `dddddddd-0000-4000-8000-${String(day).padStart(12, "0")}`;
-      sessions.push(testSession({ sessionId, startedAt: ISO(day, 9), endedAt: ISO(day, 11) }));
+      const session = testSession({ sessionId, startedAt: ISO(day, 9), endedAt: ISO(day, 11) });
+      if (day <= 2) {
+        session.turns.forEach((turn) => { turn.toolResultBytes = 20000; });
+        session.turns.push({ ...session.turns[0], ts: ISO(day, 11) });
+      }
+      sessions.push(session);
       meta[sessionId] = { parentSessionId: null };
     }
     const claude = new FakeCollector("claude", sessions);
@@ -820,6 +825,31 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
         `session ${session.sessionId}: corpusComplete must still be true after the payload-size fix`,
       );
     }
+  });
+
+  it("T5: ruleTotals count the full window, not only the serialized card sessions", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const res = await running.get("/api/health");
+    assert.equal(res.status, 200);
+    const totalObserved = res.json.ruleTotals.reduce((sum, rule) => sum + rule.observed, 0);
+    const cardObserved = res.json.sessions.reduce((sum, session) => sum + session.rules.filter((rule) => rule.evidence.status === "observed").length, 0);
+    assert.ok(totalObserved > cardObserved, "full-window observed totals must exceed what the ten serialized sessions can contain");
+  });
+
+  it("T6: a date window changes ruleTotals but not scan metadata or verdicts", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const whole = await running.get("/api/health");
+    const bounded = await running.get(`/api/health?from=${encodeURIComponent(ISO(3, 0))}&to=${encodeURIComponent(ISO(4, 23))}`);
+    assert.notDeepEqual(bounded.json.ruleTotals, whole.json.ruleTotals);
+    assert.deepEqual(bounded.json.scan, whole.json.scan);
+    const wholeVerdict = new Map(whole.json.sessions.map((session) => [session.sessionId, session.rules.map((rule) => [rule.id, rule.evidence.status])]));
+    for (const session of bounded.json.sessions) assert.deepEqual(session.rules.map((rule) => [rule.id, rule.evidence.status]), wholeVerdict.get(session.sessionId));
+  });
+
+  it("T7: every rule's three totals add up to its window population", async () => {
+    const running = await server({ collectors: [manyCollector()] });
+    const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(1, 0))}&to=${encodeURIComponent(ISO(TOTAL, 23))}`);
+    for (const rule of res.json.ruleTotals) assert.equal(rule.observed + rule.notObserved + rule.unknown, res.json.ruleTotalsSessions, rule.id);
   });
 });
 

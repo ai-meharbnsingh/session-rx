@@ -1207,6 +1207,24 @@ export function createApp(options = {}) {
     const sessionWindowValue = sessionWindow(allSessions, query);
     const windowedSessions = filterSessions(allSessions, { from: query.from, to: query.to });
     const cardSessions = sortSessions(windowedSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
+    const ruleTotalsById = new Map();
+    for (const session of windowedSessions) {
+      const rules = Array.isArray(session?.rules) ? session.rules : [];
+      const rulesById = new Map(rules.filter((rule) => typeof rule?.id === "string").map((rule) => [rule.id, rule]));
+      for (const rule of rules) {
+        if (!rule || typeof rule.id !== "string") continue;
+        if (!ruleTotalsById.has(rule.id)) {
+          ruleTotalsById.set(rule.id, { id: rule.id, name: rule.name ?? null, observed: 0, notObserved: 0, unknown: 0 });
+        }
+      }
+      for (const [id, total] of ruleTotalsById) {
+        const status = rulesById.get(id)?.evidence?.status;
+        if (status === "observed") total.observed += 1;
+        else if (status === "not-observed") total.notObserved += 1;
+        else total.unknown += 1;
+      }
+    }
+    const ruleTotals = [...ruleTotalsById.values()];
     await sendJson(res, 200, {
       sessions: cardSessions,
       // The true count over the FULL analysis, so the health page's "N of
@@ -1214,6 +1232,8 @@ export function createApp(options = {}) {
       // whole corpus. `null`, not 0, when the analyzer published no sessions
       // array — an absent count is not a measured zero.
       sessionsTotal: Array.isArray(result.analysis.sessions) ? result.analysis.sessions.length : null,
+      ruleTotals,
+      ruleTotalsSessions: Array.isArray(result.analysis.sessions) ? windowedSessions.length : null,
       collectors: result.analysis.collectors,
       // F-023/F-025: how many sessions were set aside as sub-agents of another
       // session. `sessions` above is the user's OWN sessions only, so without
