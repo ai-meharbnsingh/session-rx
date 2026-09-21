@@ -8,9 +8,11 @@ Diagnose and fix inefficient AI coding sessions. Local, private, one command.
 npx session-rx
 ```
 
-Requires Node.js 20 or newer. The command picks a free loopback port, starts a
-local server, and opens your browser. `--port <n>` binds an exact port,
-`--no-open` just prints the URL, and `--help` lists the rest.
+Requires Node.js 22.13 or newer — SessionRx reads OpenCode's database with the
+SQLite support built into Node, which earlier versions do not have. The command
+picks a free loopback port, starts a local server, and opens your browser.
+`--port <n>` binds an exact port, `--no-open` just prints the URL, and `--help`
+lists the rest.
 
 ```
 npx session-rx clean
@@ -77,8 +79,10 @@ CODEX  01a0bebe-3ce5-79b3-8130-132d288e…                  4m | 26 turns
 
   ? High sub-agent concurrency               [? COULD NOT BE MEASURED]
     Not measured. This is NOT a pass — the check could not run here.
-    Nothing in Codex's rollout records establishes a sub-agent interval:
-    there is no sidechain marker and no parent/child session linkage.
+    Codex's logs don't record which turns belonged to a sub-agent or
+    which parent started them, so there is no way to tell whether two
+    were running at the same time. Claude Code does record it, so this
+    check produces a real result on a Claude session.
 
   ✓ Long rising context  session elapsed: 0.07 hours       [✓ PASSED]
   ✓ Context pressure     average per-turn context: 52,612 tokens
@@ -99,7 +103,7 @@ writes down, so each row says what it can and cannot support.
 |---|---|---|
 | Claude Code | `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl`, plus `…/<session-uuid>/subagents/agent-*.jsonl` | All six checks. Sub-agent concurrency is read from the separate sub-agent transcripts, which is the only place that activity is recorded. Context windows come from a model-id table, overridden by observation where a session demonstrably held more than the table allows — see Limitations. |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<uuid>.jsonl` | Five of six. The context window is stated by the CLI itself (`model_context_window`), which is the most reliable source there is. Nothing in its records establishes a sub-agent interval, so that check always reports `unknown`. |
-| Gemini CLI | `~/.gemini/tmp/<project-slug>/chats/session-<ISO>-<id>.jsonl` | Context pressure and long rising context work. Its records prove that a tool was *called* but carry no stable tool-result contract and no result byte length, so on a session that actually calls tools the repeated-work and large-result checks report `unknown`; cache counters and sub-agent linkage are absent too. It also writes a session file per invocation, most of which hold no exchange at all — on the machine measured above, 508 of 510 files had no turn to read, and those sessions report `unknown` on every check. |
+| Gemini CLI | `~/.gemini/tmp/<project-slug>/chats/session-<ISO>-<id>.jsonl` | Context pressure and long rising context work. Its records prove that a tool was *called* but carry no stable tool-result contract and no result byte length, so on a session that actually calls tools the repeated-work and large-result checks report `unknown`; cache counters are absent too, and nothing in its records ties a sub-agent back to the session that started it. It also writes a session file per invocation, most of which hold no exchange at all — on the machine measured above, 508 of 510 files had no turn to read, and those sessions report `unknown` on every check. |
 | Kimi | `~/.kimi/sessions/<workspace-hash>/<session-uuid>/wire.jsonl` | All six can produce a verdict, with one caveat: Kimi reports a context *fraction* and no absolute window, so the card shows no token window and no token count is invented from the percentage. The context check still works, from the fraction. Sub-agent intervals come from its `SubagentEvent` records. |
 | OpenCode | `~/.local/share/opencode/opencode.db` (SQLite, opened read-only) | Five of six. Its model ids are not in any published window table, so the window shown is a *measured lower bound* from the session's own peak ("at least 64,329 tokens"). Dividing that peak by itself is 1.0 for every session by construction, so no context percentage and no context verdict is derived from it — that check reports `unknown` rather than warning on every session. |
 | GitHub Copilot CLI | `~/.copilot/` (`config.json`, `logs/process-<epoch>-<pid>.log`) | Detected only. Its logs carry no transcript, so there is nothing to check and no session is invented for it. |
@@ -131,8 +135,10 @@ applied twice.
 - No accounts, no sign-in.
 - No telemetry.
 - No AI API calls.
-- No network requests at runtime at all. Chart.js is vendored into the
-  package, so the charts work with the network off.
+- No remote network requests at all. The page talks only to the SessionRx
+  server running on your own machine at `127.0.0.1`, and nothing is requested
+  from, or sent to, anywhere else. Chart.js is vendored into the package, so
+  the charts work with the network off.
 - Session logs are read read-only. The only writes are the fixes you
   explicitly Apply, and each one is backed up first.
 - OpenCode's database is opened read-only and queried against a table
@@ -144,7 +150,8 @@ applied twice.
 ## Limitations
 
 - **The scan is bounded.** By default it reads the 250 newest sessions per
-  CLI, because an unbounded scan of a heavy corpus takes minutes. Every
+  CLI, because reading every session on a heavily used machine takes
+  minutes. Every
   response says how much was read and whether it hit that bound. Widen it with
   `?scan=` on `/api/sessions`, `/api/trends` and `/api/report`, or `?limit=` on
   `/api/health`.

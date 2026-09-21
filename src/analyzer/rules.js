@@ -210,7 +210,7 @@ function windowDenominator(session, ctx) {
       reason:
         `the window for this session is not a measured window: no model-id table entry matched ${str(session?.model) || "this model"}, ` +
         `so the only evidence available is the session's own observed peak (${tokens === null ? "unknown" : `at least ${tokens.toLocaleString("en-US")} tokens`}). ` +
-        `Dividing that peak by itself gives 1.0 for every session by construction — a trivial session and a genuinely full one would both read "100% of window" — so no fraction and no threshold verdict is derived from it (BP-002.18 / F-014). The peak itself is reported below as a lower bound, because that part is true.`,
+        `Dividing that peak by itself gives 1.0 for every session by construction — a trivial session and a genuinely full one would both read "100% of window" — so no share of the window and no comparison against the threshold is derived from it (BP-002.18 / F-014). The peak itself is reported below as a lower bound, because that part is true.`,
     };
   }
   if (source === "observed-promoted" && promotionLadder === "none") {
@@ -221,7 +221,7 @@ function windowDenominator(session, ctx) {
       code: "window-above-known-tiers",
       reason:
         "this session's observed peak exceeds every window tier known to the model table, so the window was set to the observed peak itself rather than to a real vendor tier " +
-        "(promotion ladder `none`). The denominator is therefore the numerator again and BP-002.18 applies exactly as it does to `observed-floor`.",
+        "(promotion ladder `none`). The figure being divided and the figure it is divided by are therefore the same number again, and BP-002.18 applies exactly as it does to `observed-floor`.",
     };
   }
   if (tokens === null || tokens <= 0) {
@@ -239,7 +239,7 @@ function windowDenominator(session, ctx) {
       source,
       tokens,
       code: "window-source-unsupported",
-      reason: `window.source "${source}" is not one of the sources BP-002.11-BP-002.14 permit a threshold verdict from.`,
+      reason: `window.source "${source}" is not one of the sources BP-002.11-BP-002.14 permit a threshold comparison from.`,
     };
   }
   return { usable: true, source, tokens, code: null };
@@ -255,7 +255,7 @@ const contextPressure = {
     derivation:
       "Warn above 0.70 — seven tenths — of the window (BP-003.01). It is a headroom budget, not a vendor-published limit: the three tenths left over have to absorb the next turn's tool output and still leave room to compact deliberately instead of being truncated mid-task. " +
       "The test is the session AVERAGE rather than the peak, because one spike near the ceiling is recoverable while a session that simply sits up there is not; the peak is reported alongside it. " +
-      "Where the window itself is only a lower bound (window.source `observed-floor`, or a promotion with no known tier behind it), no fraction is computed at all: the denominator would be the numerator, every such session would read 1.00, and the warning would fire on all of them regardless of size (BP-002.18).",
+      "Where the window itself is only a lower bound (window.source `observed-floor`, or a promotion with no known tier behind it), no fraction is computed at all: the session's own peak would be divided by itself, every such session would read 1.00, and the warning would fire on all of them regardless of size (BP-002.18).",
   },
   severity: "warn",
   fix: "claude-auto-compact",
@@ -312,7 +312,7 @@ const contextPressure = {
     if (denominator.usable) {
       if (!tokenReadings.length) {
         return unknown(
-          `the window is known (${denominator.tokens.toLocaleString("en-US")} tokens, source "${denominator.source}") but not one turn in this session carried a context reading, so there is no numerator.`,
+          `the window is known (${denominator.tokens.toLocaleString("en-US")} tokens, source "${denominator.source}") but not one turn in this session carried a context reading, so there is nothing to express as a share of it.`,
           [{ label: "context window", value: denominator.tokens, unit: "tokens", windowSource: denominator.source, sessionId }],
           "no-context-readings",
         );
@@ -324,7 +324,7 @@ const contextPressure = {
       const values = [
         { label: "average per-turn context", value: Math.round(avg), unit: "tokens", sessionId },
         { label: "peak per-turn context", value: peak, unit: "tokens", sessionId },
-        { label: "context window used as the denominator", value: denominator.tokens, unit: "tokens", windowSource: denominator.source, sessionId },
+        { label: "context window the shares below are measured against", value: denominator.tokens, unit: "tokens", windowSource: denominator.source, sessionId },
         { label: "average context as a share of the window", value: round(avgFraction), unit: "fraction", windowSource: denominator.source, sessionId },
         { label: "peak context as a share of the window", value: round(peakFraction), unit: "fraction", windowSource: denominator.source, sessionId },
         countValue("turns carrying a context reading", tokenReadings.length),
@@ -394,7 +394,7 @@ const cacheHit = {
     value: 0.85,
     derivation:
       "Flag below 0.85 (BP-003.02): at least around six of every seven cacheable prefix tokens should be cache READS, not cache CREATIONS. Below that line more than one prefix token in seven is being paid for twice, which points at cache configuration or a prefix that keeps changing rather than at the size of the work. " +
-      "The rate needs BOTH counters to exist: a CLI that reports reads but never reports creations would compute a flawless 1.00 out of a missing field, so a missing counter makes this rule unknown rather than a pass. A denominator of zero is unknown for the same reason — no cache traffic is not a good cache rate.",
+      "The rate needs BOTH counters to exist: a CLI that reports reads but never reports creations would compute a flawless 1.00 out of a missing field, so a missing counter makes this rule unknown rather than a pass. Nothing to divide by is unknown for the same reason — no cache traffic is not a good cache rate.",
   },
   severity: "warn",
   fix: "claude-output-hygiene",
@@ -797,7 +797,7 @@ const longRisingContext = {
 
     if (elapsedHours === null) {
       return unknown(
-        `this session carries no usable elapsed time: startedAt is ${session?.startedAt === undefined ? "absent" : JSON.stringify(session?.startedAt ?? null)}, endedAt is ${JSON.stringify(session?.endedAt ?? null)}, and ${stamps.length} of ${turns.length} turns carry a timestamp — fewer than the two needed to span an interval. Duration is half of this rule, so no verdict follows.`,
+        `this session carries no usable elapsed time: startedAt is ${session?.startedAt === undefined ? "absent" : JSON.stringify(session?.startedAt ?? null)}, endedAt is ${JSON.stringify(session?.endedAt ?? null)}, and ${stamps.length} of ${turns.length} turns carry a timestamp — fewer than the two needed to span an interval. Duration is half of this rule, so this rule cannot be decided either way.`,
         points.length ? [countValue("context observations available", points.length)] : [],
         "no-elapsed-time",
       );
@@ -874,12 +874,12 @@ function scanWidthClause(ctx) {
     return (
       looked +
       "The scan was bounded rather than complete for this CLI — only part of its sessions were read — so a parent whose sub-agent transcripts fall outside that window reports an empty child list. " +
-      "An unscanned child is not an absent child: widening the scan (`?scan=`) turns this into a verdict, and until then this is not a claim that zero sub-agents were dispatched (F-026)."
+      "An unscanned child is not an absent child: widening the scan (`?scan=`) turns this into an answer, and until then this is not a claim that zero sub-agents were dispatched (F-026)."
     );
   }
   return (
     looked +
-    "No parent/child linkage row reached the analyzer for this CLI in this run, so an empty child list cannot be read as a measured zero — the linkage is what would make it one. " +
+    "No record tying a sub-agent session back to the session that dispatched it reached the analyzer for this CLI in this run, so an empty child list cannot be read as a measured zero — that record is what would make it one. " +
     "This is not a claim that zero sub-agents were dispatched (F-026)."
   );
 }
@@ -921,7 +921,7 @@ function subagentReason(session, ctx) {
     case "claude":
       return (
         "Claude's sub-agent transcripts ARE read: `src/collectors/claude.js` reads `<project-slug>/<session-id>/subagents/agent-*.jsonl` and turns each one it collects into a child session carrying its own start and end, which is what lets this rule return a figure at all (BP-003.07). " +
-        `The \`isSidechain\` marker is not a substitute, which is why an empty child list is never read off it: the marker is never \`true\` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the sidechain-marked turn count recorded here (${sidechainTurns}) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end, so even a turn that does carry it cannot be attributed to one sub-agent or overlapped with another (DIS-004). ` +
+        `The \`isSidechain\` marker is not a substitute, which is why an empty child list is never read off it: the marker is never \`true\` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the count of marked turns recorded here (${sidechainTurns}) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end, so even a turn that does carry it cannot be attributed to one sub-agent or overlapped with another (DIS-004). ` +
         scanWidthClause(ctx)
       );
     case "opencode":
@@ -936,11 +936,11 @@ function subagentReason(session, ctx) {
         scanWidthClause(ctx)
       );
     case "codex":
-      return "Nothing in Codex's rollout records establishes a sub-agent interval: there is no sidechain marker and no parent/child session linkage to overlap (DIS-004).";
+      return "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
     case "gemini":
-      return "Nothing in Gemini's history records establishes a sub-agent interval: there is no sidechain marker and no parent/child session linkage to overlap (DIS-004).";
+      return "Nothing in Gemini's history records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
     default:
-      return `no sidechain marker and no parent/child session linkage is available for ${cli || "this CLI"}, so sub-agent intervals cannot be established (DIS-004).`;
+      return `no turn marker and no record tying a child session to the session that dispatched it is available for ${cli || "this CLI"}, so sub-agent intervals cannot be established (DIS-004).`;
   }
 }
 
@@ -1041,7 +1041,7 @@ const subagentConcurrency = {
       if (ctx?.childLinkageAvailable === true && ctx?.corpusComplete === true) {
         return notObserved(
           [countValue("sub-agent sessions linked to this session", 0)],
-          "this CLI publishes a parent/child session linkage, the scan was not cut short by the collection limit, and no session names this one as its parent. This is a measured zero, not a missing field.",
+          "this CLI records which session dispatched each sub-agent session, the scan was not cut short by the collection limit, and no session names this one as its parent. This is a measured zero, not a missing field.",
           0,
         );
       }

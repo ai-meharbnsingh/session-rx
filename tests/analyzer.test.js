@@ -350,17 +350,31 @@ test("evaluateRule carries plain.unmeasured through to the RuleResult untouched"
   assert.equal(measured.evidence.reasonCode, null);
 });
 
-test("the Codex sub-agent reason is unchanged — the plain sentence was added beside it, not swapped in", () => {
-  // The prose is the evidence of record. A wave that "improves the wording"
-  // rewrites history; this pins the exact string the analyzer has always
-  // emitted, so the plain-language work can only ever be additive.
+test("the Codex and Gemini sub-agent reasons still make the whole claim, in words a stranger can read", () => {
+  // RE-AIMED, not relaxed. This pin was written to stop plain-language work
+  // SWAPPING the evidence of record out, and it still does that: both strings
+  // are asserted whole. What moved is the wording it pins. `sidechain` and
+  // `linkage` are the analyzer's vocabulary for its own internals, and these
+  // reasons reach the shared Markdown report — which has no collapsed
+  // <details> to keep them out of sight and no glossary to look them up in.
+  // The claim is unchanged: no per-turn marker, no parent/child record, so no
+  // interval to overlap, so unknown rather than a zero.
   const CODEX_REASON =
-    "Nothing in Codex's rollout records establishes a sub-agent interval: there is no sidechain marker and no parent/child session linkage to overlap (DIS-004).";
+    "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
   const result = verdict("subagent-concurrency", makeSession({ cli: "codex" }), {});
   assert.equal(result.evidence.reason, CODEX_REASON);
   const GEMINI_REASON =
-    "Nothing in Gemini's history records establishes a sub-agent interval: there is no sidechain marker and no parent/child session linkage to overlap (DIS-004).";
-  assert.equal(verdict("subagent-concurrency", makeSession({ cli: "gemini" }), {}).evidence.reason, GEMINI_REASON);
+    "Nothing in Gemini's history records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
+  const gemini = verdict("subagent-concurrency", makeSession({ cli: "gemini" }), {});
+  assert.equal(gemini.evidence.reason, GEMINI_REASON);
+  // Both halves of the claim, asserted as MEANING rather than as bytes, so the
+  // next rewording has to keep saying both of them — and neither result may
+  // quietly become a pass.
+  for (const emitted of [result, gemini]) {
+    assert.equal(emitted.evidence.status, "unknown");
+    assert.match(emitted.evidence.reason, /no turn is marked as belonging to a sub-agent/);
+    assert.match(emitted.evidence.reason, /nothing ties a child session to the session that dispatched it/);
+  }
 });
 
 test("the five BP-004 fix ids are the only ones any rule points at", () => {
@@ -456,7 +470,7 @@ test("context-pressure: a promotion with no known tier behind it is unknown (BP-
 test("context-pressure: a known window with no context reading anywhere is unknown, not 0.00", () => {
   const session = makeSession({ window: { tokens: 200000, source: "model-table" }, turns: [{ ts: at(1) }] });
   const result = verdict("context-pressure", session);
-  assertUnknownWithReason(result, "no numerator");
+  assertUnknownWithReason(result, "nothing to express as a share of it");
 });
 
 test("context-pressure: no fraction this rule can emit ever exceeds 1.0", () => {

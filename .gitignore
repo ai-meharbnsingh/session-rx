@@ -37,3 +37,7 @@ docs/observe_log/
 
 # playwright-mcp page snapshots (generated during verification)
 .playwright-mcp/
+
+# factory scaffolding — local only, not part of the published project
+.factory_phase
+.claude/graphs/

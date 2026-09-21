@@ -1,0 +1,76 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0] - 2026-09-21
+
+### Added
+
+- **Local-first session analysis tool**: `npx session-rx` opens a browser to diagnose inefficient AI coding sessions. No cloud, no accounts, no telemetry, and no AI API calls.
+- **CLI support**: Parsers for Claude Code, Codex, Gemini CLI, Kimi, and OpenCode. Copilot has detection-only support; Grok and Amp are honest stubs, acknowledging when a format cannot be confirmed.
+- **Six health rules** scored against each session's actual CLI context window, not a hardcoded threshold:
+  - Long context usage
+  - Repeated tool use
+  - Sub-agent concurrency
+  - Auto-compact configuration
+  - Output hygiene
+  - Batch command practice
+- **Honesty contract**: Every verdict is one of `observed`, `not-observed`, or `unknown`. The tool never reports `unknown` as a pass. Null metrics are never rendered as zero. Over 50% of verdicts acknowledge what cannot be measured with evidence.
+- **Five reversible fixes** for Claude Code configuration with preview, apply, undo, and check operations:
+  - Create absent `~/.claude/CLAUDE.md` with health recommendations
+  - Merge auto-compact settings into `~/.claude/settings.json`
+  - Configure output hygiene and batch commands
+  - Adjust worker concurrency limits
+- **`session-rx clean` command**: Explicitly remove undo history. The command is a dry-run by default, showing what would be removed (files, bytes, date range) before confirming with `--yes`.
+- **Four analysis pages**:
+  - Health: diagnoses across recent sessions, showing the 10 newest sessions and total measured count
+  - Trends: changes in session behavior over time
+  - Sessions: paginated list of all sessions (newest first, 20 per page by default, up to 5,000)
+  - Report: Markdown summary with secret redaction, traceable to session sources
+- **Performance optimizations**:
+  - Paginated session API reduces response from 43.8 MB to 0.53 MB for the first page
+  - Corpus signature caching with invalidation on file changes
+  - Analysis cached selectively to maintain honesty guarantees (verdicts rebuilt per request)
+  - Health page renders in ~1,050ms after first request
+- **Offline operation**: Chart.js is vendored; the UI works without internet access.
+- **Security hardening**:
+  - Host header validation on every request to prevent DNS rebinding
+  - Read-only database access via `file:?mode=ro` URI
+  - Backup before every fix apply, stored in `~/.session-rx/undo/<timestamp>/`
+  - Report redaction enforced (fails closed if redaction code cannot load)
+- **Complete test suite**: 805 tests covering health rules, collectors, fix engine, server routes, and UI components. All pass.
+
+### Fixed
+
+- Half of the `subagent-concurrency` rule's positives were false: sessions with peak=1 (one sub-agent) no longer trigger a problem report; the floor is now peak ≥ 2.
+- Report section "Fixes applied" was asserted as empty even when fixes had been applied minutes earlier. Now reads the transaction journal correctly.
+- Crashed collectors reported as healthy; failed reads now transparently publish error status instead of a measured zero.
+- False all-clear when a session's vendor tier was unknown: now returns `unknown` with reason rather than borrowing from a fallback vendor tier.
+- Long-rising-context rule returned false `not-observed` when slope could not be computed (all timestamps identical); now returns `unknown` with reason.
+- Sub-agent sessions (449 on the machine) were silently hidden; now counted and displayed separately.
+- 250 Gemini sessions with zero turns were counted as readable; disclosure now clarifies that none of them recorded any message, so there is nothing to measure.
+- Server restart left open tabs unable to apply fixes; error message now names the actual cause (stale CSRF token) and the fix (reload the page).
+- Foreign Host headers bypassed all validation checks; now rejected before path traversal (fixes DNS rebinding vulnerability).
+- Fixes refused to create absent config files even when their parent directories existed; now creates absent files (never absent directories), with disclosure in the diff using `/dev/null` as git convention.
+- AutoCompactFix failed on created files; now handles empty-file case separately from unparseable-file case.
+- Health page shipped full 18.2 MB of data to render 10 cards; now narrows only the serialized array while keeping full dataset in analysis (preserves honesty contract).
+- Pagination count was off-by-one on filtered lists; ordering clarified (filter then page, never the reverse).
+- Sessions API could re-scan all sessions on every page load (5,538ms overhead per page); now caches the scan result with signature-based invalidation (1,151ms → 1,050ms after first request).
+- README claimed database write lock was never taken but WAL mode takes a lock on the `-shm` sidecar; clarified that database **content** is never altered.
+- README promised privacy without disclosing that the report includes file paths and project names for traceability; now documented.
+
+### Changed
+
+- CLI now accepts subcommands (`session-rx clean`); flags like `--port` work unchanged.
+- Undo history now survives tool uninstall (documented). Explicit removal requires `session-rx clean --yes`.
+- Collectors now deliver diagnostic details on every scan, including file counts and error reasons, enabling honest "could not read" verdicts.
+- Health rule verdicts that cannot be measured (too few data points, vendor tier unknown, no slope computed) now return `unknown` with a plain-English reason instead of being reported as `not-observed`.
+- Window tier resolution no longer borrows from a fallback all-vendor ladder when a vendor is explicitly named; unknown tiers in named vendors stay unknown.
+- Sub-agent sessions are now counted and partitioned, not silently removed from the headline view.
+
+---
+
+SessionRx is designed around a core principle: an absence of evidence is not evidence of absence. The tool's first obligation is honesty about what it can and cannot measure. Over 51% of verdicts on live sessions acknowledge measurable uncertainty rather than reporting a pass the evidence does not support.

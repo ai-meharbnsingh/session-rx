@@ -246,9 +246,90 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function str(value) {
+/**
+ * Internal decision identifiers, and why they stop at this file.
+ *
+ * The analyzer keeps its own filing references — the `BP-`, `DIS-` and `F-`
+ * numbers — inside its evidence strings, and that is correct: they are the
+ * evidence of record, and in the UI they only ever render inside collapsed
+ * technical detail. The report is a different artifact. It is what a user
+ * pastes into an issue, sends to a colleague or screenshots; it has no
+ * collapsed section to keep engineering detail in, and a stranger reading
+ * their own report has no document in which to look `BP-004.03` up. So the
+ * identifiers are removed HERE, at the document boundary, and nowhere
+ * upstream.
+ *
+ * What must not change is the MEANING. Several of these sentences exist
+ * precisely to stop a missing measurement from reading as a good result, so
+ * the reference is taken out the way a copy editor would take it out:
+ *
+ *   - a reference standing alone in brackets goes, brackets and all
+ *       "…no verdict is derived from it (BP-002.18 / F-014). The peak…"
+ *    -> "…no verdict is derived from it. The peak…"
+ *   - a reference that only labels the clause after it leaves the clause
+ *       "(DIS-005: the fraction is preserved…)"  ->  "(the fraction is preserved…)"
+ *   - a reference doing real grammatical work in the sentence becomes the
+ *     plain words it stood for, so the sentence still parses and still says
+ *     the same thing
+ *       "…and BP-002.18 applies exactly as it does to `observed-floor`."
+ *    -> "…and that rule applies exactly as it does to `observed-floor`."
+ *
+ * Verbatim user content is exempt: `indentedBlock` renders a BEFORE/AFTER
+ * block through `verbatim()`, because a fix's before-state has to equal the
+ * user's own file, and rewriting their words to tidy ours would be a worse
+ * lie than the one this function removes.
+ */
+const ID_TOKEN = String.raw`(?:BP|DIS|F)-\d+(?:\.\d+)*`;
+const ID_JOIN = String.raw`(?:\s*[/,&-]\s*|\s+(?:and|to)\s+)`;
+const ID_RUN = `${ID_TOKEN}(?:${ID_JOIN}${ID_TOKEN})*`;
+const ID_PRESENT = /(?:BP|DIS|F)-\d/;
+/** "…derived from it (BP-002.18 / F-014)." -> "…derived from it." */
+const ID_BRACKETED_ALONE = new RegExp(String.raw`[ \t]*\((?:${ID_RUN})\)`, "g");
+/** "(DIS-005: the fraction…" -> "(the fraction…" */
+const ID_BRACKETED_LABEL = new RegExp(String.raw`\((?:${ID_RUN})\s*:\s*`, "g");
+/** "(BP-003.07 measured true=0…" -> "(measured true=0…" */
+const ID_BRACKETED_LEAD = new RegExp(String.raw`\((?:${ID_RUN})\s+(?=\S)`, "g");
+/** A reference left in the running text, where words have to take its place. */
+const ID_IN_SENTENCE = new RegExp(`(${ID_RUN})`, "g");
+
+function countIds(run) {
+  return (run.match(/(?:BP|DIS|F)-\d/g) ?? []).length;
+}
+
+/**
+ * @param {string} text
+ * @returns {string} the same text with no internal identifier and no scar
+ *   where one was — no empty brackets, no doubled space, no stranded comma.
+ */
+function withoutInternalIds(text) {
+  if (!ID_PRESENT.test(text)) return text;
+  let out = text
+    .replace(ID_BRACKETED_ALONE, "")
+    .replace(ID_BRACKETED_LABEL, "(")
+    .replace(ID_BRACKETED_LEAD, "(")
+    .replace(ID_IN_SENTENCE, (run) => (countIds(run) > 1 ? "those rules" : "that rule"));
+  out = out
+    .replace(/[ \t]*\(\s*\)/g, "")
+    .replace(/\([ \t]+/g, "(")
+    .replace(/[ \t]+([.,;:!?)])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ");
+  return out;
+}
+
+/** Converted, never edited: the user's own bytes (see withoutInternalIds). */
+function verbatim(value) {
   if (value === null || value === undefined) return "";
   return String(value);
+}
+
+/**
+ * Every analyzer-supplied value reaches the document through here, which is
+ * what makes "no internal identifier in the report" a property of the file
+ * rather than of the eight call sites that would otherwise each have to
+ * remember it.
+ */
+function str(value) {
+  return withoutInternalIds(verbatim(value));
 }
 
 /** Table-cell safe: single line, pipes escaped, empty made explicit. */
@@ -299,7 +380,7 @@ function fmtEvidenceValue(entry) {
 
 /** L7: verbatim content is indented, never fenced. */
 function indentedBlock(value) {
-  const body = str(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const body = verbatim(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   return body.split("\n").map((line) => `    ${line}`).join("\n");
 }
 
@@ -514,8 +595,23 @@ function fixHistoryUnknownReason(fixes) {
   return `reason not recorded by the caller — the history arrived as ${shape} rather than a list of applied fixes`;
 }
 
+/** Missing status is "applied": that is what the caller records by omission. */
+function fixStatus(fix) {
+  return str(fix?.status).trim() || "applied";
+}
+
+/**
+ * The heading names what the section actually holds. A list where five of
+ * seven fixes were undone again is still history worth printing — a fix that
+ * was applied and then reverted really did happen — but under the words
+ * "Fixes applied" a reader skimming headings counts seven of them as being in
+ * place. So a list that is not all applied is titled as the history it is,
+ * and the lead line gives the split. The per-entry `Status:` lines are the
+ * record and are left exactly as they are.
+ */
 function renderFixes(fixes) {
-  const lines = ["## 5. Fixes applied", ""];
+  const allApplied = !Array.isArray(fixes) || fixes.every((fix) => fixStatus(fix) === "applied");
+  const lines = [allApplied ? "## 5. Fixes applied" : "## 5. Fix history", ""];
   if (!Array.isArray(fixes)) {
     lines.push(`Applied-fix history: unknown — ${fixHistoryUnknownReason(fixes)}`);
     lines.push("");
@@ -529,7 +625,19 @@ function renderFixes(fixes) {
     lines.push("");
     return lines;
   }
-  lines.push(`${rows.length} fix(es) recorded. Each one shows the BEFORE state it replaced.`);
+  if (allApplied) {
+    lines.push(`${rows.length} fix(es) recorded. Each one shows the BEFORE state it replaced.`);
+  } else {
+    const reverted = rows.filter((fix) => fixStatus(fix) === "reverted").length;
+    const applied = rows.filter((fix) => fixStatus(fix) === "applied").length;
+    const elsewhere = rows.length - applied - reverted;
+    const split = [
+      applied > 0 ? `${applied} still in place` : null,
+      reverted > 0 ? `${reverted} applied and then undone` : null,
+      elsewhere > 0 ? `${elsewhere} in another state, named per entry below` : null,
+    ].filter(Boolean).join(", ");
+    lines.push(`${rows.length} fix(es) recorded: ${split}. Not all of them are in effect — read the Status line of each. Each one shows the BEFORE state it replaced.`);
+  }
   lines.push("");
   rows.forEach((fix, index) => {
     const name = str(fix?.name).trim() || str(fix?.id).trim() || "unnamed fix";

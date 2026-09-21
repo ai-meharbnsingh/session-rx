@@ -10,6 +10,7 @@ import {
 import { happyInput } from "./fixtures/report/happy.js";
 import { zeroFindingsInput, twoFindingsInput } from "./fixtures/report/sparse.js";
 import { secretsInput, SEEDED, SEEDED_VALUES } from "./fixtures/report/secrets.js";
+import { RULES, evaluateRule } from "../src/analyzer/rules.js";
 
 const HEADING = /^(#{1,6}) (.+)$/;
 
@@ -564,4 +565,373 @@ test("the report carries no marketing adjective", () => {
   for (const word of ["blazing", "seamless", "effortless", "world-class", "cutting-edge", "revolutionary", "powerful", "amazing", "best-in-class"]) {
     assert.equal(md.includes(word), false, `marketing language in the report: ${word}`);
   }
+});
+
+// --------------------------------------------------------------------------
+// THE SHARED ARTIFACT CARRIES NO INTERNAL IDENTIFIER
+//
+// The analyzer keeps its own filing references inside its evidence strings on
+// purpose — that is the evidence of record — and the UI only ever shows them
+// inside collapsed technical detail. The report is the artifact users SHARE:
+// pasted into issues, sent to colleagues, screenshotted. It has no collapsed
+// detail, and a stranger reading their own report has no document in which to
+// look one of those references up. These tests pin the removal, and — more
+// importantly — the sentences the removal must not damage, several of which
+// exist precisely to stop a missing measurement reading as a good result.
+//
+// No pre-existing test asserted an identifier in the rendered report, so
+// nothing here re-aims one: the five that mention a reference do so only in a
+// comment or a test name, describing which decision a case came from.
+// --------------------------------------------------------------------------
+
+const INTERNAL_ID = /DIS-\d|BP-\d|\bF-\d/g;
+
+/**
+ * Verbatim from src/analyzer/rules.js — the text the analyzer really emits.
+ * A frozen copy, so a reworded rule must be copied here deliberately; the
+ * guard at the end of this file reads the LIVE rules instead, which is what
+ * catches a sentence this list has fallen behind.
+ */
+const ANALYZER_SENTENCES = Object.freeze([
+  `Dividing that peak by itself gives 1.0 for every session by construction — a trivial session and a genuinely full one would both read "100% of window" — so no share of the window and no comparison against the threshold is derived from it (BP-002.18 / F-014). The peak itself is reported below as a lower bound, because that part is true.`,
+  "(promotion ladder `none`). The figure being divided and the figure it is divided by are therefore the same number again, and BP-002.18 applies exactly as it does to `observed-floor`.",
+  `window.source "model-id-table" is not one of the sources BP-002.11-BP-002.14 permit a threshold comparison from.`,
+  "codex recorded 41 tool calls for this session but no result signature that can be attributed to any single one of them — either the per-turn result byte length is absent (DIS-006) or every turn made more than one call, so its one byte total cannot be split between them. Same input with an unknown result is not a repeat, so this rule reports unknown rather than counting inputs alone (DIS-003).",
+  "gemini recorded 12 turns with tool calls for this session but no result byte length for any of them, so result size cannot be measured. A missing byte count is not a small result (DIS-006); it is not counted at all.",
+  "The `isSidechain` marker is not a substitute, which is why an empty child list is never read off it: the marker is never `true` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the count of marked turns recorded here (4) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end (DIS-004).",
+  "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).",
+  "(DIS-005: the fraction is preserved and never converted into invented absolute tokens).",
+]);
+
+function reportOf(overrides = {}) {
+  return generateReport({
+    range: { from: null, to: null },
+    clis: [],
+    rules: [],
+    fixes: [],
+    trend: { direction: "unknown", reason: "no trend was computed here" },
+    ...overrides,
+  });
+}
+
+/** Every analyzer sentence above, rendered where the document really puts it. */
+function analyzerProseReport() {
+  return reportOf({
+    rules: ANALYZER_SENTENCES.map((sentence, index) => ({
+      id: `rule-${index}`,
+      name: `Rule ${index}`,
+      severity: "warn",
+      threshold: { value: null, derivation: sentence },
+      evidence: { status: "unknown", reason: sentence, derivation: sentence, values: [] },
+    })),
+  });
+}
+
+test("no internal identifier reaches the shared report, anywhere in the document", () => {
+  const documents = [
+    ["happy path", generateReport(happyInput)],
+    ["zero findings", generateReport(zeroFindingsInput)],
+    ["two findings", generateReport(twoFindingsInput)],
+    ["seeded secrets", generateReport(secretsInput)],
+    ["analyzer prose", analyzerProseReport()],
+  ];
+  for (const [name, md] of documents) {
+    assert.deepEqual(md.match(INTERNAL_ID) ?? [], [], `${name}: an internal identifier reached the report`);
+  }
+});
+
+test("each real rule's own threshold text renders into the report without an identifier", () => {
+  for (const rule of RULES) {
+    const md = reportOf({
+      rules: [{
+        id: rule.id,
+        name: rule.name,
+        severity: rule.severity,
+        threshold: rule.threshold,
+        evidence: { status: "observed", values: [{ label: "peak context", value: 0.91, unit: "fraction" }] },
+      }],
+    });
+    assert.match(md, /- Threshold: /, `${rule.id}: the threshold line vanished`);
+    assert.deepEqual(md.match(INTERNAL_ID) ?? [], [], `${rule.id}: identifier in the rendered threshold`);
+  }
+});
+
+test("the sentences that stop an absence reading as a pass still say so after the identifier goes", () => {
+  const md = analyzerProseReport();
+
+  // 1. a peak divided by itself is not a measurement of pressure
+  assert.match(md, /so no share of the window and no comparison against the threshold is derived from it\. The peak itself is reported below as a lower bound/);
+  // 2. the identifier was the SUBJECT of this sentence; plain words take its place
+  assert.match(md, /The figure being divided and the figure it is divided by are therefore the same number again, and that rule applies exactly as it does to `observed-floor`\./);
+  // 3. a window source outside the permitted set is compared against nothing
+  assert.match(md, /is not one of the sources those rules permit a threshold comparison from\./);
+  // 4. an unknown result is not a repeat, and unknown is not a pass
+  assert.match(md, /Same input with an unknown result is not a repeat, so this rule reports unknown rather than counting inputs alone\./);
+  // 5. a missing byte count is not a small result
+  assert.match(md, /A missing byte count is not a small result; it is not counted at all\./);
+  // 6. the zero that would have been a false all-clear
+  assert.match(md, /is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding/);
+  // 7. a structural absence stays an absence
+  assert.match(md, /nothing ties a child session to the session that dispatched it, so there are no intervals to overlap\./);
+  // 8. a labelling reference goes; the clause it labelled stays
+  assert.match(md, /\(the fraction is preserved and never converted into invented absolute tokens\)/);
+});
+
+test("removing an identifier leaves no scar", () => {
+  const documents = [
+    generateReport(happyInput),
+    generateReport(zeroFindingsInput),
+    generateReport(twoFindingsInput),
+    generateReport(secretsInput),
+    analyzerProseReport(),
+  ];
+  for (const md of documents) {
+    assert.equal(/\(\s*\)/.test(md), false, "empty parentheses left where an identifier was");
+    for (const line of md.split("\n")) {
+      // A four-space indent is a verbatim BEFORE/AFTER block: the user's own
+      // bytes, which this file never rewrites.
+      if (line.startsWith("    ")) continue;
+      assert.equal(/\S {2,}\S/.test(line), false, `doubled space: ${line}`);
+      assert.equal(/\S[ \t]+[.,;:]/.test(line), false, `space before punctuation: ${line}`);
+      assert.equal(/\([ \t]/.test(line), false, `stranded opening bracket: ${line}`);
+    }
+  }
+});
+
+test("redaction still runs over the text an identifier was removed from", () => {
+  const reason = `the log line carrying ${SEEDED.githubPat} could not be parsed, so nothing was measured (DIS-006).`;
+  const doc = generateReportDocument({
+    range: { from: null, to: null },
+    clis: [],
+    rules: [{ id: "repeat-tool", name: "Repeated tool work", severity: "warn", evidence: { status: "unknown", reason, values: [] } }],
+    fixes: [],
+    trend: { direction: "unknown", reason },
+  });
+  assert.equal(doc.markdown.includes(SEEDED.githubPat), false, "a secret survived inside reshaped text");
+  assert.match(doc.markdown, /\[REDACTED\]/);
+  assert.equal(doc.redactions > 0, true, "the redaction was not counted");
+  assert.deepEqual(doc.markdown.match(INTERNAL_ID) ?? [], []);
+  assert.match(doc.markdown, /could not be parsed, so nothing was measured\./);
+});
+
+test("a user's own BEFORE text is copied, not copy-edited", () => {
+  // The exemption, stated as a test: a fix's BEFORE block is the user's file.
+  // Tidying our wording out of their bytes would be a worse falsehood than the
+  // one the stripping removes, so verbatim content is rendered untouched.
+  const before = "# notes\nkeep ref BP-9001 for my own filing  (mine)\n";
+  const md = reportOf({
+    fixes: [{ id: "claude-output-hygiene", name: "Output hygiene instruction", target: "~/.claude/CLAUDE.md", appliedAt: "2026-09-21T10:00:00.000Z", status: "applied", before }],
+  });
+  assert.match(md, /^ {4}keep ref BP-9001 for my own filing {2}\(mine\)$/m);
+});
+
+// --------------------------------------------------------------------------
+// SECTION 5 NAMES WHAT IT HOLDS
+// --------------------------------------------------------------------------
+
+const REVERTED_HISTORY = Object.freeze([
+  { id: "claude-auto-compact", name: "Enable auto-compaction", target: "~/.claude/settings.json", appliedAt: "2026-09-19T09:00:00.000Z", status: "reverted", before: null, undoPath: "~/.session-rx/undo/20260919T090000Z" },
+  { id: "claude-output-hygiene", name: "Output hygiene instruction", target: "~/.claude/CLAUDE.md", appliedAt: "2026-09-19T09:05:00.000Z", status: "reverted", before: null, undoPath: "~/.session-rx/undo/20260919T090500Z" },
+  { id: "claude-batch-commands", name: "Batch commands instruction", target: "~/.claude/CLAUDE.md", appliedAt: "2026-09-19T09:10:00.000Z", status: "reverted", before: null, undoPath: "~/.session-rx/undo/20260919T091000Z" },
+  { id: "claude-worker-cap", name: "Worker cap instruction", target: "~/.claude/CLAUDE.md", appliedAt: "2026-09-19T09:15:00.000Z", status: "reverted", before: null, undoPath: "~/.session-rx/undo/20260919T091500Z" },
+  { id: "claude-compact-contract", name: "Compact contract instruction", target: "~/.claude/CLAUDE.md", appliedAt: "2026-09-19T09:20:00.000Z", status: "reverted", before: null, undoPath: "~/.session-rx/undo/20260919T092000Z" },
+  { id: "claude-auto-compact", name: "Enable auto-compaction", target: "~/.claude/settings.json", appliedAt: "2026-09-20T11:00:00.000Z", status: "applied", before: null, undoPath: "~/.session-rx/undo/20260920T110000Z" },
+  { id: "claude-output-hygiene", name: "Output hygiene instruction", target: "~/.claude/CLAUDE.md", appliedAt: "2026-09-20T11:05:00.000Z", status: "applied", before: null, undoPath: "~/.session-rx/undo/20260920T110500Z" },
+]);
+
+test("a history where five of seven were undone does not read as seven fixes applied", () => {
+  const md = reportOf({ fixes: REVERTED_HISTORY });
+
+  assert.equal(sectionTitles(md, 2).includes("5. Fixes applied"), false, "the heading still claims every entry was applied");
+  assert.equal(sectionTitles(md, 2).includes("5. Fix history"), true);
+  assert.match(md, /7 fix\(es\) recorded: 2 still in place, 5 applied and then undone\. Not all of them are in effect/);
+});
+
+test("every per-entry status is left exactly as the caller recorded it", () => {
+  const md = reportOf({ fixes: REVERTED_HISTORY });
+
+  assert.equal((md.match(/^- Status: reverted$/gm) ?? []).length, 5);
+  assert.equal((md.match(/^- Status: applied$/gm) ?? []).length, 2);
+  // and the reverted entries are still listed: an undone fix is real history
+  for (let index = 1; index <= REVERTED_HISTORY.length; index += 1) {
+    assert.match(md, new RegExp(`^### 5\\.${index} `, "m"), `entry ${index} was dropped`);
+  }
+});
+
+test("a history where every entry is applied still says so", () => {
+  assert.equal(happyInput.fixes.every((fix) => fix.status === "applied"), true, "precondition");
+  assert.match(generateReport(happyInput), /## 5\. Fixes applied\n/);
+  assert.match(generateReport(happyInput), /fix\(es\) recorded\. Each one shows the BEFORE state it replaced\./);
+});
+
+// --------------------------------------------------------------------------
+// The analyzer's own vocabulary, guarded on the REPORT path.
+//
+// tests/analyzer.test.js sweeps every file in src/analyzer/ for this same
+// vocabulary and carves exactly one file out: rules.js, whose `reason` and
+// `derivation` strings are the evidence of record and which the UI renders
+// only inside a collapsed <details>. That carve-out is sound for the UI and
+// stays where it is. It does not hold here. A report has no collapsed detail,
+// and it is the artifact people paste into issues and send to colleagues —
+// which is how "A denominator of zero is unknown for the same reason" reached
+// a shared document unnoticed. The carve-out never anticipated Markdown.
+//
+// So this guard reads no file. It RENDERS: every rule is evaluated over a
+// matrix of sessions and contexts, each result goes through the real
+// generator, and the Markdown that comes out is what gets searched. A word
+// fails here whichever field carried it — `threshold.derivation`,
+// `evidence.reason`, `evidence.derivation`, an evidence row's `label` — and a
+// field the generator starts rendering later is covered without being named.
+//
+// Both halves assert a FLOOR on how much they inspected, and the document
+// half asserts a sentence it must have found, so a guard that quietly
+// examines nothing cannot pass green.
+// --------------------------------------------------------------------------
+
+/**
+ * The analyzer's words for its own internals. A reader of their own report has
+ * no glossary, so none of these may reach one.
+ *
+ * `\b` is deliberate: a field identifier is not a finding. `isSidechain` is the
+ * real on-disk field whose absence one rule exists to explain, and a rule that
+ * names it is being traceable, not jargon-y.
+ */
+const SHARED_VOCABULARY = Object.freeze([
+  /\bsidechain/i, /\blinkage/i, /\bdenominator/i, /\bnumerator/i, /\bcorpus\b/i, /\bmagnitude\b/i,
+]);
+
+/**
+ * `verdict` is guarded at the SOURCE that would leak it, not in the rendered
+ * document, and that is not a loophole: the generator prints its own
+ * `| Rule | Severity | Verdict | Why |` heading. That is the document's word
+ * for the honesty contract's three states, written by the report for its
+ * reader — not analyzer vocabulary arriving through a rule. Banning it in the
+ * output would only ever fail on the generator's own heading; banning it in
+ * rule text stops the thing that actually leaks.
+ */
+const RULE_TEXT_VOCABULARY = Object.freeze([...SHARED_VOCABULARY, /\bverdict/i]);
+
+const INTERNAL_ID_IN_REPORT = /DIS-\d|BP-\d|\bF-\d/;
+
+/** Session shapes chosen so that every unmeasured branch a rule has is reached. */
+const VOCABULARY_SESSIONS = Object.freeze([
+  // One per CLI: the sub-agent and tool-result rules branch on this alone.
+  { cli: "claude", sessionId: "v-claude" },
+  { cli: "codex", sessionId: "v-codex" },
+  { cli: "gemini", sessionId: "v-gemini" },
+  { cli: "kimi", sessionId: "v-kimi" },
+  { cli: "opencode", sessionId: "v-opencode" },
+  { cli: "some-other-cli", sessionId: "v-other" },
+  // One per window shape: each is a different reason from `windowDenominator`.
+  { cli: "claude", sessionId: "v-floor", model: "an-unlisted-model", window: { tokens: 91000, source: "observed-floor" }, turns: [{ ts: 1, context: { inputTokens: 80000 } }] },
+  { cli: "claude", sessionId: "v-promoted", window: { tokens: 300000, source: "observed-promoted" }, turns: [{ ts: 1, context: { inputTokens: 250000 } }] },
+  { cli: "claude", sessionId: "v-unsupported", window: { tokens: 200000, source: "model-id-table" }, turns: [{ ts: 1, context: { inputTokens: 10000 } }] },
+  { cli: "claude", sessionId: "v-no-window", turns: [{ ts: 1, context: { inputTokens: 10000 } }] },
+  { cli: "claude", sessionId: "v-no-readings", window: { tokens: 200000, source: "model-table" }, turns: [{ ts: 1 }, { ts: 2 }] },
+  { cli: "kimi", sessionId: "v-native-over-one", turns: [{ ts: 1, context: { fraction: 1.4 } }] },
+  // Cache counters, one branch each: reads only, creations only, both at zero.
+  { cli: "claude", sessionId: "v-reads-only", turns: [{ ts: 1, cacheRead: 900 }] },
+  { cli: "claude", sessionId: "v-creates-only", turns: [{ ts: 1, cacheCreate: 900 }] },
+  { cli: "claude", sessionId: "v-cache-zero", turns: [{ ts: 1, cacheRead: 0, cacheCreate: 0 }] },
+  // A measured session, so the observed/not-observed derivations and every
+  // evidence row label are rendered too, not only the unknown reasons.
+  {
+    cli: "claude",
+    sessionId: "v-measured",
+    window: { tokens: 200000, source: "model-table" },
+    startedAt: "2026-01-01T00:00:00.000Z",
+    endedAt: "2026-01-01T02:00:00.000Z",
+    turns: [
+      { ts: 1, context: { inputTokens: 180000 }, cacheRead: 100, cacheCreate: 900 },
+      { ts: 2, context: { inputTokens: 190000 }, cacheRead: 200, cacheCreate: 800 },
+    ],
+  },
+]);
+
+/** Analyzer contexts, chosen the same way: one per branch a rule reads from ctx. */
+const VOCABULARY_CONTEXTS = Object.freeze([
+  {},
+  { corpusComplete: true, childLinkageAvailable: true },
+  { corpusComplete: false, sidechainTurns: 4, sessionMeta: { subagentSessionIds: [] } },
+  { corpusComplete: true, sessionMeta: { subagentSessionIds: null } },
+  { corpusComplete: true, childLinkageAvailable: false, sessionMeta: { subagentSessionIds: [] } },
+  { promotion: { ladder: "none" } },
+  { promotion: { ladder: "vendor" }, corpusComplete: true },
+]);
+
+/** Every RuleResult the analyzer can produce over the matrix above. */
+function everyRuleResult() {
+  const out = [];
+  for (const session of VOCABULARY_SESSIONS) {
+    for (const ctx of VOCABULARY_CONTEXTS) {
+      for (const rule of RULES) out.push(evaluateRule(rule, session, ctx));
+    }
+  }
+  return out;
+}
+
+/** The strings a rule SUPPLIES that the report renders, as `[where, text]`. */
+function renderedRuleStrings(result) {
+  const out = [];
+  const push = (where, value) => {
+    if (typeof value === "string" && value.trim()) out.push([where, value]);
+  };
+  push("name", result?.name);
+  push("threshold.derivation", result?.threshold?.derivation);
+  push("evidence.reason", result?.evidence?.reason);
+  push("evidence.derivation", result?.evidence?.derivation);
+  (result?.evidence?.values ?? []).forEach((value, index) => push(`evidence.values[${index}].label`, value?.label));
+  return out;
+}
+
+test("no rule text the shared report renders uses the analyzer's own vocabulary", () => {
+  const findings = new Set();
+  let checked = 0;
+  for (const result of everyRuleResult()) {
+    for (const [where, text] of renderedRuleStrings(result)) {
+      checked += 1;
+      for (const word of RULE_TEXT_VOCABULARY) {
+        if (word.test(text)) findings.add(`${result.id}.${where} leaks ${word} -> ${JSON.stringify(text)}`);
+      }
+    }
+  }
+  assert.ok(checked >= 300, `only ${checked} rendered rule strings were read — the matrix is not reaching the rules`);
+  assert.deepEqual(
+    [...findings],
+    [],
+    `a rule sends the analyzer's own vocabulary into the report:\n  ${[...findings].join("\n  ")}\n`
+    + "Reword the sentence in plain English, keeping what it claims. Do NOT shrink the list to get green.",
+  );
+});
+
+test("the rendered Markdown report carries none of it either — the path the file sweep exempts", () => {
+  const documents = [];
+  const shapes = new Set();
+  for (const result of everyRuleResult()) {
+    const shape = JSON.stringify(renderedRuleStrings(result));
+    if (shapes.has(shape)) continue;
+    shapes.add(shape);
+    // As the analyzer produced it: section 4's Why column renders the reason.
+    documents.push(reportOf({ rules: [result] }));
+    // Forced to a finding: section 3 renders the threshold, the derivation and
+    // every evidence row — fields the unknown path never reaches.
+    documents.push(reportOf({ rules: [{ ...result, evidence: { ...result.evidence, status: "observed" } }] }));
+  }
+  const rendered = documents.join("\n");
+
+  // Floors first: a guard that inspected nothing must not read as a pass.
+  assert.ok(shapes.size >= 20, `only ${shapes.size} distinct rule shapes were rendered`);
+  assert.ok(documents.length >= 40, `only ${documents.length} documents were rendered`);
+  assert.ok(rendered.length >= 50000, `only ${rendered.length} characters of report were searched`);
+  assert.ok(rendered.includes("- Threshold: "), "no threshold line was rendered — section 3 never ran");
+  assert.ok(
+    rendered.includes("no cache traffic is not a good cache rate"),
+    "the sentence this guard was written for is not in the rendered text — the matrix stopped reaching it",
+  );
+
+  for (const word of SHARED_VOCABULARY) {
+    const hits = rendered.match(new RegExp(word.source, "gi")) ?? [];
+    assert.deepEqual([...new Set(hits)], [], `${word} reached the rendered report ${hits.length} time(s)`);
+  }
+  assert.equal(INTERNAL_ID_IN_REPORT.test(rendered), false, "an internal identifier reached the rendered report");
 });
