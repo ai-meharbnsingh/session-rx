@@ -18,6 +18,16 @@
  *    whichever way the arrow points.  (`sortSessions` in src/server.js takes the
  *    same position for the server-side sort.)
  *
+ * 3. THE TABLE IS A PAGE, AND IT SAYS SO.  `/api/sessions` returned the whole
+ *    matched corpus in one body — 1,236 sessions / 43.8MB measured on a heavy
+ *    real corpus — for a table showing about twenty rows.  It now serves twenty
+ *    at a time and this page fetches the next twenty when the reader reaches
+ *    the bottom.  Everything the toolbar and the header sentence count is
+ *    therefore a count of what has been LOADED, never of what exists, and both
+ *    numbers are printed side by side.  The CLI filter and the column sort run
+ *    over the loaded rows only; saying "12 of 1,236" when 40 rows are in hand
+ *    would be exactly the overstatement this product exists not to make.
+ *
  * The verdict rendering — including the whole `unknown` treatment — is imported
  * from the health page rather than re-implemented, so the two pages cannot
  * drift apart on the one rule that matters.
@@ -47,7 +57,23 @@ import {
   windowValueNode,
 } from './health.js';
 
-/** Sort, filter and expansion state survive a re-render; the data does not. */
+/**
+ * Rows per request, mirroring `SESSIONS_PAGE_LIMIT` in src/server.js.  Stated
+ * explicitly rather than left to the server's default, so a page that has
+ * fetched N times knows exactly which offset it has not yet asked for.
+ */
+const PAGE_SIZE = 20;
+
+/**
+ * Sort, filter, expansion AND paging state survive a re-render; only the rows
+ * themselves arrive from outside.
+ *
+ * `requested` holds every offset already sent, so a sentinel that fires twice
+ * — which it will, because appending rows moves it back into view — cannot
+ * fetch the same page twice.  `error` holds the last failed page rather than
+ * clearing it: a load that failed silently stops the list, and this list is
+ * the product's evidence surface.
+ */
 const state = {
   sortKey: 'date',
   order: 'desc',
@@ -55,7 +81,17 @@ const state = {
   expanded: new Set(),
   mount: null,
   data: null,
+  seeded: undefined,
   ctx: {},
+  sessions: [],
+  seen: new Set(),
+  total: null,
+  nextOffset: null,
+  hasMore: false,
+  requested: new Set(),
+  loading: false,
+  error: null,
+  observer: null,
 };
 
 /**
@@ -339,25 +375,41 @@ function sessionRows(session, api, redraw) {
 // Toolbar
 // ---------------------------------------------------------------------------
 
-/** CLI filter and the sort reset, plus the honest row count. */
-function toolbar(sessions, shown, redraw) {
+/**
+ * CLI filter and the sort reset, plus the honest row count.
+ *
+ * Every number here counts LOADED rows.  While more pages remain, each one says
+ * so in the caption — `claude (18 loaded)`, not `claude (18)` — because the
+ * filter cannot see a session this page has not fetched, and a bare count reads
+ * as a corpus total.  Once the last page is in, the qualifier drops, since the
+ * count is then the whole match.
+ */
+function toolbar(loaded, shown, total, redraw) {
   const bar = el('div', 'toolbar');
+  const partial = state.hasMore;
 
   const label = el('label', 'toolbar-filter');
   label.append(el('span', 'meta-label', 'CLI'));
   const select = el('select');
-  select.setAttribute('aria-label', 'Filter sessions by CLI');
-  const clis = [...new Set(sessions.map((session) => session?.cli).filter((cli) => typeof cli === 'string' && cli))].sort();
+  select.setAttribute(
+    'aria-label',
+    partial
+      ? 'Filter the sessions loaded so far by CLI. Sessions not yet loaded are not counted.'
+      : 'Filter sessions by CLI',
+  );
+  const clis = [...new Set(loaded.map((session) => session?.cli).filter((cli) => typeof cli === 'string' && cli))].sort();
   const option = (value, caption) => {
     const node = el('option', null, caption);
     node.value = value;
     if (state.cli === value) node.selected = true;
     return node;
   };
-  select.append(option('all', `All CLIs (${sessions.length})`));
+  select.append(option('all', partial
+    ? `All CLIs (${groupInt(loaded.length) ?? '0'} of ${groupInt(total) ?? '0'} loaded)`
+    : `All CLIs (${groupInt(loaded.length) ?? '0'})`));
   for (const cli of clis) {
-    const count = sessions.filter((session) => session?.cli === cli).length;
-    select.append(option(cli, `${cli} (${count})`));
+    const count = loaded.filter((session) => session?.cli === cli).length;
+    select.append(option(cli, partial ? `${cli} (${groupInt(count) ?? '0'} loaded)` : `${cli} (${groupInt(count) ?? '0'})`));
   }
   select.addEventListener('change', () => {
     state.cli = select.value;
@@ -369,14 +421,180 @@ function toolbar(sessions, shown, redraw) {
   bar.append(el('span', 'toolbar-spacer'));
 
   const column = COLUMN_BY_KEY.get(state.sortKey);
+  const counted = partial
+    ? `${groupInt(shown.length) ?? '0'} shown of ${groupInt(loaded.length) ?? '0'} loaded, of ${groupInt(total) ?? '0'} matched`
+    : `${groupInt(shown.length) ?? '0'} of ${groupInt(loaded.length) ?? '0'} shown`;
   bar.append(
     el(
       'span',
       'chart-sub',
-      `${shown.length} of ${sessions.length} shown · sorted by ${column?.label ?? 'date'} ${state.order === 'asc' ? 'ascending' : 'descending'}`,
+      `${counted} · sorted by ${column?.label ?? 'date'} ${state.order === 'asc' ? 'ascending' : 'descending'}`,
     ),
   );
   return bar;
+}
+
+// ---------------------------------------------------------------------------
+// Paging
+// ---------------------------------------------------------------------------
+
+/**
+ * Take one page of rows into `state`, ignoring any session already held.
+ *
+ * The de-duplication is not decoration: each request re-scans the corpus, so a
+ * session written between two requests shifts every later row by one and page 2
+ * would otherwise repeat page 1's last entry.  A repeated row is a lie about
+ * how many sessions exist, which is the one thing this table may not tell.
+ *
+ * @param {object} payload a `/api/sessions` body
+ * @param {boolean} reset true for the first page, replacing whatever was held
+ * @returns {void}
+ */
+function absorb(payload, reset) {
+  const rows = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  if (reset) {
+    state.sessions = [];
+    state.seen = new Set();
+    state.requested = new Set([0]);
+  }
+  for (const session of rows) {
+    const id = String(session?.sessionId ?? '');
+    // A row with no id cannot be de-duplicated, so it is kept as-is rather than
+    // dropped — an unidentifiable session is still a session that was read.
+    if (id && state.seen.has(id)) continue;
+    if (id) state.seen.add(id);
+    state.sessions.push(session);
+  }
+  state.total = Number.isFinite(payload?.total) ? payload.total : state.sessions.length;
+  state.hasMore = payload?.hasMore === true;
+  state.nextOffset = Number.isFinite(payload?.nextOffset) ? payload.nextOffset : null;
+  if (!state.hasMore) state.nextOffset = null;
+}
+
+/**
+ * Fetch the next page, at most once per offset and at most one at a time.
+ *
+ * Three guards, each closing a different failure: `loading` stops two in-flight
+ * requests from appending out of order; `requested` stops the same offset being
+ * fetched twice when the sentinel re-enters view after rows are appended; and
+ * `hasMore` / a null `nextOffset` stops the list requesting past its end
+ * forever.  A failure leaves the offset UNrequested so Retry can ask again.
+ *
+ * @param {{get: Function}} api the request helper from app.js
+ * @param {Function} redraw
+ * @returns {Promise<void>}
+ */
+async function loadNextPage(api, redraw) {
+  if (state.loading || state.error) return;
+  if (!state.hasMore) return;
+  const offset = state.nextOffset;
+  if (!Number.isFinite(offset) || state.requested.has(offset)) return;
+
+  state.requested.add(offset);
+  state.loading = true;
+  redraw();
+  try {
+    const payload = await api.get(`/api/sessions?limit=${PAGE_SIZE}&offset=${offset}`);
+    absorb(payload, false);
+    state.error = null;
+  } catch (error) {
+    // app.js's request helper has already turned a dead server or a stale CSRF
+    // nonce into a sentence a person can act on; it is shown verbatim.
+    state.error = error?.message || 'The next page of sessions could not be loaded.';
+    state.requested.delete(offset);
+  } finally {
+    state.loading = false;
+    redraw();
+  }
+}
+
+/**
+ * The strip below the table: sentinel, spinner text, failure, or end-of-list.
+ *
+ * The sentinel is an `IntersectionObserver` target rather than a scroll
+ * handler, so nothing runs per scroll event.  Where `IntersectionObserver` does
+ * not exist — an old browser, or a test DOM — the same strip renders an
+ * explicit button instead, because a list that silently stops at twenty rows
+ * while claiming 1,236 exist is worse than a list with a button in it.
+ *
+ * @param {{get: Function}} api
+ * @param {Function} redraw
+ * @returns {HTMLElement|null}
+ */
+function pager(api, redraw) {
+  if (state.error) {
+    const strip = el('div', 'sessions-pager');
+    strip.dataset.state = 'error';
+    strip.setAttribute('role', 'alert');
+    strip.append(el('span', null, state.error));
+    const retry = el('button', 'button button-sm', 'Retry');
+    retry.type = 'button';
+    retry.dataset.action = 'retry-page';
+    retry.addEventListener('click', () => {
+      state.error = null;
+      loadNextPage(api, redraw);
+    });
+    strip.append(retry);
+    return strip;
+  }
+
+  if (!state.hasMore) {
+    const strip = el('div', 'sessions-pager');
+    strip.dataset.state = 'end';
+    strip.append(el(
+      'span',
+      null,
+      `End of the list — all ${groupInt(state.sessions.length) ?? '0'} session${state.sessions.length === 1 ? '' : 's'} matched in this scan are loaded.`,
+    ));
+    return strip;
+  }
+
+  const strip = el('div', 'sessions-pager');
+  strip.dataset.state = state.loading ? 'loading' : 'idle';
+  strip.dataset.nextOffset = String(state.nextOffset ?? '');
+  strip.setAttribute('aria-live', 'polite');
+  const remaining = Number.isFinite(state.total) ? state.total - state.sessions.length : null;
+  strip.append(el(
+    'span',
+    null,
+    state.loading
+      ? 'Loading the next 20 sessions…'
+      : `${groupInt(remaining) ?? 'More'} more session${remaining === 1 ? '' : 's'} to load.`,
+  ));
+
+  const manual = el('button', 'button button-sm', 'Load more');
+  manual.type = 'button';
+  manual.dataset.action = 'load-more';
+  manual.disabled = state.loading === true;
+  manual.addEventListener('click', () => loadNextPage(api, redraw));
+  strip.append(manual);
+  return strip;
+}
+
+/**
+ * Point the observer at the current strip, replacing any earlier one.
+ *
+ * `draw()` rebuilds the whole subtree, so the previous target is detached DOM
+ * and the previous observer must be disconnected with it or it leaks one
+ * observer per redraw — and a leaked observer on a detached node never fires,
+ * which would look exactly like the list quietly ending.
+ *
+ * @param {HTMLElement|null} target
+ * @param {{get: Function}} api
+ * @param {Function} redraw
+ * @returns {void}
+ */
+function observe(target, api, redraw) {
+  if (state.observer) {
+    state.observer.disconnect();
+    state.observer = null;
+  }
+  const Observer = globalThis.IntersectionObserver;
+  if (typeof Observer !== 'function' || !target || !state.hasMore || state.error) return;
+  state.observer = new Observer((entries) => {
+    if (entries.some((entry) => entry?.isIntersecting)) loadNextPage(api, redraw);
+  }, { rootMargin: '200px' });
+  state.observer.observe(target);
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +650,7 @@ function draw() {
   if (!mount) return;
   const api = state.ctx?.api ?? appApi;
   const data = state.data ?? {};
-  const all = Array.isArray(data?.sessions) ? data.sessions : [];
+  const all = state.sessions;
   const filtered = state.cli === 'all' ? all : all.filter((session) => session?.cli === state.cli);
   const sorted = sortRows(filtered);
 
@@ -442,12 +660,19 @@ function draw() {
   title.id = 'sessions-title';
   stack.append(title);
 
-  const total = Number.isFinite(data?.total) ? data.total : all.length;
+  const total = Number.isFinite(state.total) ? state.total : all.length;
+  // Two counts, never one: what is on this page, and what the scan matched.
+  // The first sentence is the whole reason the page is allowed to paginate —
+  // collapsing it to "1,236 sessions" over a 20-row table, or to "20 sessions"
+  // over a 1,236-session corpus, would each be a different false claim.
   stack.append(
     el(
       'p',
       'note',
-      `${groupInt(all.length) ?? '0'} session${all.length === 1 ? '' : 's'} returned of ${groupInt(total) ?? '0'} matched in this scan. `
+      (state.hasMore
+        ? `Showing ${groupInt(all.length) ?? '0'} of ${groupInt(total) ?? '0'} session${total === 1 ? '' : 's'} matched in this scan — more load as you scroll. `
+          + 'The CLI filter and the column sort below apply to the rows loaded so far, not to the whole scan. '
+        : `${groupInt(all.length) ?? '0'} session${all.length === 1 ? '' : 's'} matched in this scan, all loaded. `)
         + 'A dash in any column means the value was not recorded — it is not a zero. '
         + 'Sorting always places those rows last, in both directions, because "not measured" is neither the best nor the worst value.',
     ),
@@ -463,20 +688,25 @@ function draw() {
       ),
     );
     mount.append(stack);
+    observe(null, api, draw);
     return;
   }
 
   const card = el('section', 'card');
   const head = el('div', 'card-head');
-  head.append(toolbar(all, sorted, draw));
+  head.append(toolbar(all, sorted, total, draw));
   card.append(head);
   card.append(drawTable(sorted, api, draw));
   stack.append(card);
 
   if (!sorted.length) {
-    stack.append(el('p', 'empty-state', `No session in this scan came from ${state.cli}.`));
+    stack.append(el('p', 'empty-state', `No session loaded so far came from ${state.cli}.`));
   }
+
+  const strip = pager(api, draw);
+  if (strip) stack.append(strip);
   mount.append(stack);
+  observe(strip, api, draw);
 }
 
 /**
@@ -492,6 +722,15 @@ export function renderSessions(mount, data, ctx = {}) {
   state.mount = mount;
   state.data = data;
   state.ctx = ctx;
+  // app.js caches the first page and re-renders from that same object on every
+  // return to this tab, so a re-render must not re-seed from it and throw away
+  // pages 2..n. The payload identity is the test: a NEW body is a new first
+  // page, the same body is the same first page.
+  if (state.data !== state.seeded) {
+    state.seeded = state.data;
+    state.error = null;
+    absorb(data ?? {}, true);
+  }
   draw();
 }
 

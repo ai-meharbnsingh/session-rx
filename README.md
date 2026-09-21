@@ -12,6 +12,15 @@ Requires Node.js 20 or newer. The command picks a free loopback port, starts a
 local server, and opens your browser. `--port <n>` binds an exact port,
 `--no-open` just prints the URL, and `--help` lists the rest.
 
+```
+npx session-rx clean
+```
+
+Removes SessionRx's own undo history in `~/.session-rx/`. It prints what it
+would remove and stops; `--yes` performs it. Once that history is gone, the
+fixes SessionRx has already applied can no longer be undone by SessionRx —
+your own files are left exactly as they are either way.
+
 ## What it does
 
 It reads the session logs your AI coding CLIs already write, runs six health
@@ -108,7 +117,8 @@ Every fix is Preview, then Apply, then Undo.
 - **Undo** restores those bytes. It refuses to run if the undo record is
   missing or no longer matches the file it came from. Your files are restored
   exactly; SessionRx keeps its own history under `~/.session-rx/`, which is
-  not removed by an undo.
+  not removed by an undo. Nothing removes that directory on its own —
+  `session-rx clean` is the only thing that does, and only when you run it.
 
 Fixes are idempotent. Each one carries a marker, and `check()` reads that
 marker, so a fix that is already applied is not offered again and cannot be

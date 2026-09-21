@@ -202,6 +202,18 @@ h4 { margin-bottom: 4px; font-size: 12px; color: var(--muted); text-transform: u
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .toolbar-spacer { flex: 1 1 auto; }
 
+/* The sessions table's paging strip: the IntersectionObserver sentinel, the
+ * "loading" line, the failure with its Retry, and the end-of-list statement.
+ * It is always present while rows remain, because an invisible sentinel and a
+ * list that has genuinely ended look identical to a reader. */
+.sessions-pager {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px;
+  min-height: 44px; padding: 12px 0;
+  color: var(--subtle); font-size: 12px;
+}
+.sessions-pager[data-state="error"] { color: var(--crit); }
+.sessions-pager[data-state="end"] { color: var(--muted); }
+
 /* ------------------------------------------------------ health page summary */
 
 /* BRIEF ITEM 1: four counts + one action, before any session card. Compact

@@ -144,6 +144,28 @@ export const DEFAULT_SCAN_LIMIT = 250;
  * many of the already-analyzed sessions get put in the response body.
  */
 export const HEALTH_CARD_LIMIT = 10;
+
+/**
+ * Sessions actually SERIALIZED by `/api/sessions` in one page, when the caller
+ * names no page size.
+ *
+ * The same fix as `HEALTH_CARD_LIMIT` above, for the same reason and with the
+ * same boundary. Measured on a heavy real corpus (2026-09-21, this machine):
+ * one `/api/sessions` call returned 1,236 sessions in 45,948,574 bytes — 43.8MB
+ * of JSON, most of it absolute paths, for a table that shows about twenty rows
+ * before the reader has to scroll. The page now asks for those twenty and
+ * fetches the next twenty when the reader reaches the bottom.
+ *
+ * What this constant does NOT touch, and must never be made to touch: the SCAN.
+ * The corpus is still read under `DEFAULT_SCAN_LIMIT`/`?scan=`, still analyzed
+ * whole, and `corpusComplete` in `src/analyzer/health.js` still derives from
+ * THAT bound — `subagent-concurrency` flips to `unknown` when the corpus is
+ * incomplete, so narrowing the scan here would silently rewrite verdicts across
+ * every session. Only the slice that reaches the wire is narrowed, and `total`
+ * keeps reporting the whole match so the page can say how many it is not
+ * showing.
+ */
+export const SESSIONS_PAGE_LIMIT = 20;
 const BODY_LIMIT = "256kb";
 const SORT_FIELDS = new Set(["startedAt", "endedAt", "score", "turnCount", "cli", "project", "sessionId"]);
 
@@ -313,6 +335,26 @@ function parseLimit(raw) {
   const value = Number(raw);
   if (value < 1) throw new HttpError(400, "limit must be at least 1");
   return Math.min(value, MAX_LIMIT);
+}
+
+/**
+ * `?offset=` — the row a page starts at, counted AFTER filter and sort.
+ *
+ * Malformed is REJECTED and oversized is CLAMPED, and the difference is
+ * deliberate. `offset=abc`, `offset=-1`, `offset=1.5` and `offset=NaN` are
+ * caller bugs: reading any of them as 0 would silently serve page 1 to a client
+ * that believes it is on page 9, so they get a 400 that names the bad value.
+ * An offset merely past the end of the corpus is not a bug — a list can shrink
+ * between two requests — so it is answered with an empty page. Values beyond
+ * `Number.MAX_SAFE_INTEGER` are clamped to it rather than rejected, because
+ * past-the-end is past-the-end and the arithmetic below stays exact.
+ */
+function parseOffset(raw) {
+  if (raw === undefined || raw === null || raw === "") return 0;
+  if (typeof raw !== "string") throw new HttpError(400, "offset must be supplied at most once");
+  if (!/^\d+$/.test(raw)) throw new HttpError(400, `offset must be a non-negative integer: ${raw}`);
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
 function parseCsvList(raw) {
@@ -775,7 +817,11 @@ export function createApp(options = {}) {
   app.get("/api/sessions", route(async (req, res) => {
     const from = parseIsoDate(singleValue(req.query.from, "from"), "from");
     const to = parseIsoDate(singleValue(req.query.to, "to"), "to");
-    const limit = parseLimit(singleValue(req.query.limit, "limit"));
+    // `limit` now bounds ONE PAGE and defaults to `SESSIONS_PAGE_LIMIT` rather
+    // than to "everything matched". `parseLimit` keeps its own split: a
+    // malformed limit is a 400, an oversized one is clamped to `MAX_LIMIT`.
+    const limit = parseLimit(singleValue(req.query.limit, "limit")) ?? SESSIONS_PAGE_LIMIT;
+    const offset = parseOffset(singleValue(req.query.offset, "offset"));
     // Documented addition: BP-005.02 is silent on how much of the corpus is read.
     const scan = parseLimit(singleValue(req.query.scan, "scan"));
     const sortRaw = singleValue(req.query.sort, "sort");
@@ -787,11 +833,13 @@ export function createApp(options = {}) {
       throw new HttpError(400, "order must be asc or desc");
     }
 
-    // Two separate bounds, because conflating them is how a UI ends up
-    // paginating against a lie: `limit` bounds the RESPONSE ROWS, `scan`
-    // bounds how much of each corpus was read. `total` is the number of
-    // sessions matching the filter WITHIN THE SCAN, and `scan.atLimit` says
-    // whether older unread sessions exist.
+    // Three separate bounds, because conflating them is how a UI ends up
+    // paginating against a lie: `limit`/`offset` bound ONE PAGE of response
+    // rows, `scan` bounds how much of each corpus was read. `total` is the
+    // number of sessions matching the filter WITHIN THE SCAN, and
+    // `scan.atLimit` says whether older unread sessions exist. A page is a
+    // window onto `total`; `total` is a window onto the scan; neither is ever
+    // published as the size of the corpus.
     const result = await analyzeFor(res, { since: from, limit: scan });
     if (!result) return;
 
@@ -802,10 +850,29 @@ export function createApp(options = {}) {
       to,
     });
     const sorted = sortSessions(matched, sortRaw ?? "startedAt", orderRaw ?? "desc");
+    // PAGINATION IS THE LAST STEP. Filter, then sort, THEN cut the page: the
+    // second page of a `cli=claude`, `sort=score` list has to be the second
+    // twenty of THAT list. Slicing before either would make page 2 the second
+    // twenty of the raw corpus, filtered afterwards into a page that is short,
+    // out of order, and overlaps page 1.
+    const page = sorted.slice(offset, offset + limit);
+    const consumed = offset + page.length;
+    const hasMore = consumed < matched.length;
     await sendJson(res, 200, {
-      sessions: limit === null ? sorted : sorted.slice(0, limit),
+      sessions: page,
+      // `total` is the whole filtered match, not the page — it is what the UI
+      // says it is not showing, so it may never shrink to the page size.
       total: matched.length,
-      returned: limit === null ? sorted.length : Math.min(limit, sorted.length),
+      returned: page.length,
+      // Echoed so a client can tell a short page (end of list) from a page it
+      // asked to be short, without re-deriving either from its own request.
+      offset,
+      limit,
+      hasMore,
+      // `null`, not `total`, at the end of the list: an absent next page is not
+      // a next page that happens to be empty, and a client that loops on
+      // `nextOffset` must be able to stop on falsiness alone.
+      nextOffset: hasMore ? consumed : null,
       scan: result.scan,
       diagnostics: result.analysis.diagnostics ?? [],
     });

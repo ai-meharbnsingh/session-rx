@@ -28,6 +28,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -40,6 +41,28 @@ import { listenOnFreePort, parseArgs } from "../src/cli.js";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(HERE, "..");
 const PUBLIC_DIR = path.join(PROJECT_ROOT, "public");
+const CLI_PATH = path.join(PROJECT_ROOT, "src", "cli.js");
+
+/**
+ * Run the real CLI as a real process. Used only for paths that return before
+ * any server is bound (`--help`, `clean`) — see the file header on why
+ * `main()` is never called in-process here. `SESSION_RX_HOME` is always
+ * pinned to a temp dir so a subprocess cannot reach the developer's own
+ * `~/.session-rx`.
+ */
+function runCli(args, { home, expectFailure = false } = {}) {
+  try {
+    const stdout = execFileSync(process.execPath, [CLI_PATH, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, SESSION_RX_HOME: home ?? os.tmpdir(), SESSION_RX_NO_OPEN: "1" },
+      timeout: 20000,
+    });
+    return { code: 0, stdout };
+  } catch (error) {
+    if (!expectFailure) throw error;
+    return { code: error.status, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+  }
+}
 
 /**
  * Never expected to actually run in this file: no test below issues an HTTP
@@ -228,6 +251,77 @@ describe("BP-010 GATE-PERF — cold start under three seconds (fixture mode)", (
       elapsedMs < 3000,
       `cold start took ${elapsedMs.toFixed(1)}ms, must be under 3000ms per BP-010 GATE-PERF`,
     );
+  });
+});
+
+describe("parseArgs — subcommands", () => {
+  // `clean` is the first and only subcommand. The mechanism is deliberately
+  // small: the first argument is a command only if it is a known verb, and
+  // everything else keeps parsing exactly as it did when the CLI was flags
+  // only. The two tests below are the regression proof of that second half.
+  it("no subcommand means serve — bare `session-rx` behaves exactly as before", () => {
+    const options = parseArgs([], {});
+    assert.equal(options.command, "serve");
+    assert.equal(options.port, null);
+    assert.equal(options.open, true);
+    assert.equal(options.yes, false);
+  });
+
+  it("`session-rx --port N` is still the server, with the port pinned", () => {
+    const options = parseArgs(["--port", "7415"], {});
+    assert.equal(options.command, "serve");
+    assert.equal(options.port, 7415);
+    assert.equal(options.open, true);
+  });
+
+  it("`clean` selects the command and defaults to the dry run", () => {
+    const options = parseArgs(["clean"], {});
+    assert.equal(options.command, "clean");
+    assert.equal(options.yes, false, "clean must never perform anything without --yes");
+  });
+
+  it("`clean --yes` (and `-y`) arms the removal", () => {
+    assert.equal(parseArgs(["clean", "--yes"]).yes, true);
+    assert.equal(parseArgs(["clean", "-y"]).yes, true);
+  });
+
+  it("`clean --help` asks for the usage text rather than cleaning anything", () => {
+    const options = parseArgs(["clean", "--help"]);
+    assert.equal(options.command, "clean");
+    assert.equal(options.help, true);
+    assert.equal(options.yes, false);
+  });
+
+  it("an unknown flag after `clean` throws, naming the subcommand", () => {
+    assert.throws(() => parseArgs(["clean", "--force"]), /unknown option for `session-rx clean`: --force/);
+  });
+
+  it("--yes is a clean-only flag: it is not a server flag", () => {
+    assert.throws(() => parseArgs(["--yes"]), /unknown option: --yes/);
+  });
+
+  it("SESSION_RX_PORT is not consulted for clean — it binds nothing", () => {
+    const options = parseArgs(["clean"], { SESSION_RX_PORT: "7420" });
+    assert.equal(options.command, "clean");
+    assert.equal(options.port, null);
+  });
+});
+
+describe("the CLI as a real process — help and clean", () => {
+  it("--help lists the clean command, what performs it, and what it costs", () => {
+    const { code, stdout } = runCli(["--help"]);
+    assert.equal(code, 0);
+    assert.match(stdout, /session-rx clean \[--yes\]/, "usage must show the subcommand");
+    assert.match(stdout, /clean\s+remove SessionRx's own undo history/);
+    assert.match(stdout, /can no longer be undone/, "--help must say what cleaning costs");
+  });
+
+  it("`clean` against a home with no state directory exits 0 and starts no server", async () => {
+    const home = await isolatedHome();
+    const { code, stdout } = runCli(["clean"], { home });
+    assert.equal(code, 0, "a missing state directory is not an error");
+    assert.match(stdout, /Nothing to clean/);
+    assert.ok(!/is serving/.test(stdout), "clean must return before anything is bound");
   });
 });
 

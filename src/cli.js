@@ -20,6 +20,8 @@ import { realpathSync } from "node:fs";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+import { STATE_DIR_NAME } from "./fixes/base.js";
+import { runCleanCommand } from "./fixes/clean.js";
 import { startServer } from "./server.js";
 
 const STARTED_AT = process.hrtime.bigint();
@@ -27,9 +29,29 @@ const STARTED_AT = process.hrtime.bigint();
 /** First choice, then fallbacks, then `0` = "OS, give me anything free". */
 const PORT_CANDIDATES = [7331, 7332, 7431, 7531, 0];
 
+/**
+ * Subcommands, kept as a plain set on purpose.
+ *
+ * `session-rx` started life as flags only, and the first word of `argv` being
+ * a verb rather than a flag is the entire mechanism: if it is in this set it
+ * names the command and the remaining arguments are parsed as that command's
+ * flags, otherwise the whole of `argv` is parsed exactly as before and the
+ * command is `serve`. That keeps `session-rx`, `session-rx --port 7400` and
+ * every existing flag byte-identical in behaviour, and it is deliberately not
+ * a command framework — one verb does not need a router.
+ */
+const COMMANDS = new Set(["clean"]);
+
 const USAGE = `SessionRx — diagnose and fix inefficient AI coding sessions.
 
 Usage: session-rx [options]
+       session-rx clean [--yes]
+
+Commands:
+  clean          remove SessionRx's own undo history in ~/${STATE_DIR_NAME}.
+                 Shows what it would remove and stops; --yes performs it.
+                 Nothing else ever removes that directory, and once it is
+                 gone the fixes already applied can no longer be undone.
 
 Options:
   --port <n>     bind this exact port (fails if it is taken)
@@ -48,24 +70,39 @@ network requests.`;
 
 export function parseArgs(argv, env = {}) {
   const options = {
+    command: "serve",
     port: null,
     open: env.SESSION_RX_NO_OPEN !== "1" && env.SESSION_RX_NO_OPEN !== "true",
     help: false,
     version: false,
     hostInfo: false,
+    yes: false,
   };
-  if (typeof env.SESSION_RX_PORT === "string" && env.SESSION_RX_PORT !== "") {
+
+  let flags = argv;
+  if (argv.length > 0 && COMMANDS.has(argv[0])) {
+    options.command = argv[0];
+    flags = argv.slice(1);
+  }
+
+  if (options.command === "serve" && typeof env.SESSION_RX_PORT === "string" && env.SESSION_RX_PORT !== "") {
     options.port = readPort(env.SESSION_RX_PORT, "SESSION_RX_PORT");
   }
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+  for (let i = 0; i < flags.length; i += 1) {
+    const arg = flags[i];
+    if (options.command === "clean") {
+      if (arg === "--yes" || arg === "-y") options.yes = true;
+      else if (arg === "-h" || arg === "--help") options.help = true;
+      else throw new Error(`unknown option for \`session-rx clean\`: ${arg}\n\n${USAGE}`);
+      continue;
+    }
     if (arg === "--no-open") options.open = false;
     else if (arg === "--open") options.open = true;
     else if (arg === "-h" || arg === "--help") options.help = true;
     else if (arg === "-v" || arg === "--version") options.version = true;
     else if (arg === "--host-info") options.hostInfo = true;
     else if (arg === "--port") {
-      options.port = readPort(argv[i + 1], "--port");
+      options.port = readPort(flags[i + 1], "--port");
       i += 1;
     } else if (arg.startsWith("--port=")) {
       options.port = readPort(arg.slice("--port=".length), "--port");
@@ -143,6 +180,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (options.version) {
     process.stdout.write(`${await readVersion()}\n`);
     return 0;
+  }
+
+  if (options.command === "clean") {
+    // No server, no browser, no port: clean only ever touches the state
+    // directory, so it returns before anything is bound or opened.
+    return runCleanCommand({ home: env.SESSION_RX_HOME, yes: options.yes });
   }
 
   const candidates = options.port === null ? PORT_CANDIDATES : [options.port];

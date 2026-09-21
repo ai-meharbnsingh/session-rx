@@ -38,6 +38,7 @@ import {
   FIX_CATALOG,
   HEALTH_CARD_LIMIT,
   LOOPBACK_HOST,
+  SESSIONS_PAGE_LIMIT,
   createApp,
   csrfFailure,
   filterSessions,
@@ -785,6 +786,233 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
         "not-observed",
         `session ${session.sessionId}: corpusComplete must still be true after the payload-size fix`,
       );
+    }
+  });
+});
+
+describe("BP-005.02 — /api/sessions is paginated", () => {
+  // Measured 2026-09-21 on a heavy real corpus: one unpaginated /api/sessions
+  // returned 1,236 sessions in 45,948,574 bytes — 43.8MB, most of it absolute
+  // paths, for a table that shows about twenty rows. This fixture only needs
+  // to clear SESSIONS_PAGE_LIMIT, not reproduce that scale.
+  const CLAUDE_SESSIONS = SESSIONS_PAGE_LIMIT + 5;
+  const CODEX_SESSIONS = 3;
+  const TOTAL = CLAUDE_SESSIONS + CODEX_SESSIONS;
+
+  const claudeId = (day) => `dddddddd-0000-4000-8000-${String(day).padStart(12, "0")}`;
+  const codexId = (day) => `eeeeeeee-0000-4000-8000-${String(day).padStart(12, "0")}`;
+
+  /**
+   * Two CLIs on DISJOINT days, codex holding the newest ones.
+   *
+   * That arrangement is what makes the filter-then-paginate assertion bite: if
+   * the page were cut before the filter, `?cli=claude` page 1 would be the
+   * newest 20 sessions overall (3 codex + 17 claude) filtered down to 17 rows,
+   * and page 2 would then overlap it. Each session names no parent, so
+   * `childLinkageAvailable` is true and `subagent-concurrency` can report a
+   * MEASURED zero rather than `unknown` — see the corpusComplete guard below.
+   */
+  function collectors() {
+    const claudeSessions = [];
+    const claudeMeta = {};
+    for (let day = 1; day <= CLAUDE_SESSIONS; day += 1) {
+      const sessionId = claudeId(day);
+      claudeSessions.push(testSession({ sessionId, startedAt: ISO(day, 9), endedAt: ISO(day, 11) }));
+      claudeMeta[sessionId] = { parentSessionId: null };
+    }
+    const claude = new FakeCollector("claude", claudeSessions);
+    claude.sessionMeta = claudeMeta;
+
+    const codexSessions = [];
+    const codexMeta = {};
+    for (let index = 1; index <= CODEX_SESSIONS; index += 1) {
+      const day = CLAUDE_SESSIONS + index;
+      const sessionId = codexId(day);
+      codexSessions.push(testSession({
+        cli: "codex",
+        sessionId,
+        project: "-Users-demo-other",
+        cwd: "/Users/demo/other",
+        startedAt: ISO(day, 9),
+        endedAt: ISO(day, 11),
+      }));
+      codexMeta[sessionId] = { parentSessionId: null };
+    }
+    const codex = new FakeCollector("codex", codexSessions);
+    codex.sessionMeta = codexMeta;
+
+    return [claude, codex];
+  }
+
+  const days = (body) => body.sessions.map((session) => new Date(session.startedAt).getUTCDate());
+  const ids = (body) => body.sessions.map((session) => session.sessionId);
+
+  it("P1: the default page is the NEWEST SESSIONS_PAGE_LIMIT, newest first", async () => {
+    const running = await server({ collectors: collectors() });
+    const res = await running.get("/api/sessions");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.sessions.length, SESSIONS_PAGE_LIMIT, `this fixture has ${TOTAL} sessions, more than one page`);
+    assert.equal(res.json.limit, SESSIONS_PAGE_LIMIT);
+    assert.equal(res.json.offset, 0);
+    assert.equal(res.json.returned, SESSIONS_PAGE_LIMIT);
+    // Days 1..TOTAL exist; the newest page is TOTAL down to TOTAL-19.
+    const expected = Array.from({ length: SESSIONS_PAGE_LIMIT }, (_, index) => TOTAL - index);
+    assert.deepEqual(days(res.json), expected, "the default page must be the newest sessions, strictly newest first");
+  });
+
+  it("P2: total is the true match count, not the page size", async () => {
+    const running = await server({ collectors: collectors() });
+    const res = await running.get("/api/sessions");
+    assert.equal(res.json.total, TOTAL, "total counts every session matching the filter within the scan");
+    assert.ok(res.json.total > res.json.sessions.length, "the true total must exceed one page once the corpus exceeds it");
+    assert.equal(res.json.hasMore, true);
+    assert.equal(res.json.nextOffset, SESSIONS_PAGE_LIMIT);
+  });
+
+  it("P3: offset/limit pages are disjoint, ordered, and cover the whole set", async () => {
+    const running = await server({ collectors: collectors() });
+    const collectedIds = [];
+    let offset = 0;
+    let guard = 0;
+    for (;;) {
+      guard += 1;
+      assert.ok(guard <= TOTAL + 2, "paging must terminate, not loop");
+      const res = await running.get(`/api/sessions?limit=7&offset=${offset}`);
+      assert.equal(res.status, 200);
+      assert.equal(res.json.offset, offset);
+      assert.equal(res.json.limit, 7);
+      assert.equal(res.json.returned, res.json.sessions.length);
+      collectedIds.push(...ids(res.json));
+      if (!res.json.hasMore) {
+        assert.equal(res.json.nextOffset, null, "the last page offers no next offset to loop on");
+        break;
+      }
+      assert.equal(res.json.nextOffset, offset + res.json.sessions.length);
+      offset = res.json.nextOffset;
+    }
+    assert.equal(collectedIds.length, TOTAL, "every session is reachable by paging");
+    assert.equal(new Set(collectedIds).size, TOTAL, "no session appears on two pages");
+
+    const whole = await running.get(`/api/sessions?limit=${TOTAL}`);
+    assert.deepEqual(collectedIds, ids(whole.json), "paged order must equal the order of the unpaged list");
+  });
+
+  it("P4: the page is cut AFTER the filter, not before", async () => {
+    const running = await server({ collectors: collectors() });
+    // codex holds the 3 NEWEST sessions. A page cut before the filter would
+    // return 17 claude rows here, having spent 3 of its 20 on codex.
+    const first = await running.get("/api/sessions?cli=claude");
+    assert.equal(first.status, 200);
+    assert.equal(first.json.total, CLAUDE_SESSIONS, "total counts the filtered match, not the corpus");
+    assert.equal(first.json.sessions.length, SESSIONS_PAGE_LIMIT, "a full page of claude rows, none spent on codex");
+    for (const session of first.json.sessions) assert.equal(session.cli, "claude");
+    const firstExpected = Array.from({ length: SESSIONS_PAGE_LIMIT }, (_, index) => CLAUDE_SESSIONS - index);
+    assert.deepEqual(days(first.json), firstExpected);
+
+    const second = await running.get(`/api/sessions?cli=claude&offset=${SESSIONS_PAGE_LIMIT}`);
+    assert.equal(second.json.returned, CLAUDE_SESSIONS - SESSIONS_PAGE_LIMIT);
+    assert.equal(second.json.hasMore, false);
+    for (const session of second.json.sessions) assert.equal(session.cli, "claude");
+    const overlap = ids(first.json).filter((id) => ids(second.json).includes(id));
+    assert.deepEqual(overlap, [], "page 2 of a filtered list must not repeat page 1");
+  });
+
+  it("P5: the page is cut AFTER the sort, not before", async () => {
+    const running = await server({ collectors: collectors() });
+    const res = await running.get("/api/sessions?cli=claude&sort=startedAt&order=asc&limit=5&offset=5");
+    assert.equal(res.status, 200);
+    // Ascending, claude only: days 1..5 are page 1, so offset 5 is days 6..10.
+    assert.deepEqual(days(res.json), [6, 7, 8, 9, 10]);
+  });
+
+  it("P6: a malformed limit or offset is REJECTED, never read as a default", async () => {
+    const running = await server({ collectors: collectors() });
+    const bad = [
+      "/api/sessions?limit=abc",
+      "/api/sessions?limit=0",
+      "/api/sessions?limit=-1",
+      "/api/sessions?limit=NaN",
+      "/api/sessions?limit=1.5",
+      "/api/sessions?offset=abc",
+      "/api/sessions?offset=-1",
+      "/api/sessions?offset=NaN",
+      "/api/sessions?offset=1.5",
+      "/api/sessions?offset=1e3",
+    ];
+    for (const target of bad) {
+      const res = await running.get(target);
+      assert.equal(res.status, 400, `${target} must be refused, not silently read as page 1`);
+      assert.ok(typeof res.json.error === "string" && res.json.error.length > 0, `${target} must say what was wrong`);
+    }
+  });
+
+  it("P7: an oversized limit is CLAMPED, and an oversized offset lands past the end", async () => {
+    const running = await server({ collectors: collectors() });
+    const huge = await running.get("/api/sessions?limit=99999999");
+    assert.equal(huge.status, 200, "a caller asking for everything gets everything the server is willing to send");
+    assert.equal(huge.json.limit, 5000, "clamped to the server's MAX_LIMIT rather than honoured");
+    assert.equal(huge.json.sessions.length, TOTAL);
+    assert.equal(huge.json.hasMore, false);
+
+    const beyond = await running.get("/api/sessions?offset=99999999999999999999999");
+    assert.equal(beyond.status, 200, "an offset beyond Number.MAX_SAFE_INTEGER is past the end, not malformed");
+    assert.deepEqual(beyond.json.sessions, []);
+    assert.equal(beyond.json.total, TOTAL, "the total is still the truth about what exists");
+  });
+
+  it("P8: an offset past the end is an empty page, not an error", async () => {
+    const running = await server({ collectors: collectors() });
+    const res = await running.get(`/api/sessions?offset=${TOTAL + 100}`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.sessions, []);
+    assert.equal(res.json.returned, 0);
+    assert.equal(res.json.total, TOTAL);
+    assert.equal(res.json.hasMore, false);
+    assert.equal(res.json.nextOffset, null);
+
+    const exactly = await running.get(`/api/sessions?offset=${TOTAL}`);
+    assert.equal(exactly.status, 200);
+    assert.deepEqual(exactly.json.sessions, [], "the first offset past the last row is already empty");
+    assert.equal(exactly.json.hasMore, false);
+  });
+
+  it("P9: a session that fell off page 1 is still reachable by id", async () => {
+    const running = await server({ collectors: collectors() });
+    const first = await running.get("/api/sessions");
+    // Day 1 is the OLDEST session in the fixture, so it cannot be on the
+    // newest-first first page.
+    const oldest = claudeId(1);
+    assert.equal(ids(first.json).includes(oldest), false, "this assertion is only meaningful if the id is off page 1");
+
+    const res = await running.get(`/api/sessions/${oldest}`);
+    assert.equal(res.status, 200, "pagination bounds a LIST; it must not make a session unaddressable");
+    assert.equal(res.json.session.sessionId, oldest);
+    assert.ok(res.json.scan, "the single-session route still states how much was scanned");
+  });
+
+  it("P10: a verdict gated on corpusComplete is unchanged — the SCAN was not narrowed", async () => {
+    const running = await server({ collectors: collectors() });
+    // Both pages, because a scan narrowed to the page size would leave page 1
+    // looking complete and page 2 looking empty.
+    for (const target of ["/api/sessions", `/api/sessions?offset=${SESSIONS_PAGE_LIMIT}`]) {
+      const res = await running.get(target);
+      assert.equal(res.status, 200);
+      assert.equal(res.json.scan.limitPerCollector, DEFAULT_SCAN_LIMIT, "the scan bound is the scan's, never the page's");
+      assert.equal(res.json.scan.atLimit, false, `${TOTAL} sessions is well under the scan bound`);
+      assert.ok(res.json.sessions.length > 0, `${target} must return rows for this assertion to mean anything`);
+      for (const session of res.json.sessions) {
+        const rule = session.rules.find((candidate) => candidate.id === "subagent-concurrency");
+        assert.ok(rule, `session ${session.sessionId} must carry the subagent-concurrency rule`);
+        // Had pagination narrowed the COLLECTION limit instead of the
+        // serialization slice, corpusComplete would flip false and this
+        // MEASURED zero would become `unknown` across the whole corpus. That
+        // silent rewrite is exactly what this assertion catches.
+        assert.equal(
+          rule.evidence.status,
+          "not-observed",
+          `session ${session.sessionId}: corpusComplete must still be true after pagination`,
+        );
+      }
     }
   });
 });
