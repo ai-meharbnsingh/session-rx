@@ -517,6 +517,335 @@ const CSP = [
 ].join("; ");
 
 // ---------------------------------------------------------------------------
+// Scan cache — read the corpus once, serve many pages from it
+// ---------------------------------------------------------------------------
+
+/**
+ * Collected corpora held in memory at once.
+ *
+ * Deliberately tiny, and bounded by MEMORY rather than by hit rate: one entry
+ * is a whole collected corpus, measured on a heavy real corpus (2026-09-21,
+ * this machine) at 1,236 sessions / 82.4MB serialized / 120MB of retained heap
+ * (heapUsed with the corpus held, after `--expose-gc`, minus the same reading
+ * without it). Three covers what the four pages actually ask for — the unfiltered
+ * scan every page shares, plus two date-windowed or explicitly-widened
+ * variants — and a fourth distinct scan evicts the least recently used one
+ * rather than adding to the pile. The bound is a constant: it does not grow
+ * with the size of the corpus, with uptime, or with the number of requests.
+ */
+export const SCAN_CACHE_MAX_ENTRIES = 3;
+
+/**
+ * Files the invalidation walk will stat before it refuses to answer.
+ *
+ * The walk exists to be cheap. Measured at ~14µs per file on this machine, so
+ * 100,000 files is ~1.4s — already at the edge of what may be spent checking
+ * whether a 4.7s scan is still true. Past it the check is no longer cheap, and
+ * a check that is not cheap is the wrong check: the signature comes back
+ * `null`, the cache disengages, and every request re-scans exactly as it did
+ * before this cache existed.
+ */
+export const SCAN_SIGNATURE_MAX_FILES = 100_000;
+
+/** Parallel `stat` calls in the invalidation walk (measured: 221ms serial -> 82ms). */
+const SIGNATURE_STAT_CONCURRENCY = 64;
+
+/** `stat` many paths at a bounded concurrency, in input order. */
+async function statMany(paths, concurrency) {
+  const out = new Array(paths.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= paths.length) return;
+      try {
+        const stat = await fs.stat(paths[index]);
+        out[index] = [stat.mtimeMs, stat.size];
+      } catch {
+        // A file that vanished between listing and stat is itself a change.
+        out[index] = null;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, paths.length)) }, worker));
+  return out;
+}
+
+/**
+ * A cheap fingerprint of the session files a scan would read.
+ *
+ * The scan PARSES those files, which is what costs seconds. This walks the same
+ * roots and reads only what the filesystem already knows — which files exist,
+ * how big they are, when they last changed — so the check that decides whether
+ * a cached scan is still true costs a fraction of the scan it guards. Measured
+ * on a heavy real corpus (2026-09-21, this machine): 20,218 files under 6,608
+ * directories across five collector roots, ~280ms warm, against 4,701ms for the
+ * `collectAll` it lets us skip.
+ *
+ * It never re-parses anything, and it is deliberately CONSERVATIVE: a touched
+ * file outside the newest-N window a collector would actually read still
+ * invalidates. Re-scanning when nothing that mattered changed costs time; not
+ * re-scanning when something did costs the truth.
+ *
+ * Two outcomes mean "do not cache", and neither of them means "nothing
+ * changed" — both return `signature: null` with a machine-readable `reason`:
+ *
+ *   - `no_source_root`: not one supported root could be read, so there is
+ *     nothing to observe. A scan whose source cannot be watched must never be
+ *     reused, because we could not tell when it stopped being true. (This is
+ *     also why a test double whose `detect()` names a path that does not exist
+ *     keeps getting a fresh scan per request without asking for one.)
+ *   - `corpus_too_large`: see `SCAN_SIGNATURE_MAX_FILES`.
+ *
+ * The detection SHAPE is hashed too — every collector's id, status and declared
+ * paths — so installing or removing a CLI invalidates even when no file under
+ * an already-known root moved.
+ *
+ * @param {object} detected the result of `registry.detectAll()`
+ * @returns {Promise<{signature: string|null, reason: string|null, files: number,
+ *   roots: string[], ms: number}>}
+ */
+export async function scanSourceSignature(detected, options = {}) {
+  const maxFiles = Number.isInteger(options.maxFiles) && options.maxFiles > 0 ? options.maxFiles : SCAN_SIGNATURE_MAX_FILES;
+  const concurrency = Number.isInteger(options.concurrency) && options.concurrency > 0 ? options.concurrency : SIGNATURE_STAT_CONCURRENCY;
+  const started = process.hrtime.bigint();
+  const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
+
+  const shape = [];
+  const roots = [];
+  for (const [status, list] of [
+    ["supported", detected?.supported],
+    ["detection-only", detected?.detectionOnly],
+    ["absent", detected?.absent],
+  ]) {
+    for (const entry of Array.isArray(list) ? list : []) {
+      const paths = (Array.isArray(entry?.paths) ? entry.paths : []).map((value) => String(value)).sort();
+      shape.push([status, String(entry?.id ?? ""), paths]);
+      // Only a SUPPORTED root holds sessions that a scan reads. A detected CLI
+      // with nothing readable contributes its status and no file walk.
+      if (status === "supported") roots.push(...paths);
+    }
+  }
+  shape.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+  const hash = crypto.createHash("sha256");
+  hash.update(JSON.stringify(shape));
+
+  let files = 0;
+  let observedRoots = 0;
+  for (const root of [...new Set(roots)].sort()) {
+    let stat;
+    try {
+      stat = await fs.stat(root);
+    } catch {
+      hash.update(JSON.stringify([root, "absent"]));
+      continue;
+    }
+    observedRoots += 1;
+    if (!stat.isDirectory()) {
+      files += 1;
+      hash.update(JSON.stringify([root, stat.mtimeMs, stat.size]));
+      continue;
+    }
+    let dirents;
+    try {
+      dirents = await fs.readdir(root, { recursive: true, withFileTypes: true });
+    } catch {
+      // A root we cannot enumerate is a root we cannot watch.
+      return { signature: null, reason: "root_unreadable", files, roots, ms: elapsed() };
+    }
+    const paths = [];
+    for (const dirent of dirents) {
+      if (!dirent.isFile()) continue;
+      paths.push(path.join(dirent.parentPath ?? dirent.path ?? root, dirent.name));
+    }
+    files += paths.length;
+    if (files > maxFiles) {
+      return { signature: null, reason: "corpus_too_large", files, roots, ms: elapsed() };
+    }
+    paths.sort();
+    const stamps = await statMany(paths, concurrency);
+    hash.update(JSON.stringify([root, paths, stamps]));
+  }
+
+  if (observedRoots === 0) {
+    return { signature: null, reason: "no_source_root", files, roots, ms: elapsed() };
+  }
+  return { signature: hash.digest("hex"), reason: null, files, roots, ms: elapsed() };
+}
+
+/**
+ * Freeze a whole object graph, in place.
+ *
+ * The cache never hands out the object it holds — every caller gets a copy —
+ * so nothing downstream ever meets a frozen corpus. This is the backstop that
+ * turns a mistake in THIS file into a loud `TypeError` at the moment of the
+ * write, instead of a page-3 response quietly disagreeing with page 2.
+ */
+function deepFreeze(node, seen) {
+  if (node === null || typeof node !== "object" || seen.has(node)) return node;
+  seen.add(node);
+  Object.freeze(node);
+  for (const value of Array.isArray(node) ? node : Object.values(node)) deepFreeze(value, seen);
+  return node;
+}
+
+/** The cache key: everything that changes WHAT a scan reads, and nothing else. */
+export function scanCacheKey({ since, limit }) {
+  const at = since instanceof Date ? since.toISOString() : since === undefined || since === null ? "" : String(since);
+  // `limit` is the RESOLVED per-collector bound, never the requested one: it is
+  // what `corpusComplete` — and therefore `subagent-concurrency` — is derived
+  // from, so a scan taken under one limit may never be served to another.
+  return JSON.stringify([at, limit ?? null]);
+}
+
+/**
+ * A bounded, in-process, ephemeral cache of collected corpora.
+ *
+ * WHY: `/api/sessions` pages twenty rows at a time, and every page used to
+ * re-read the whole corpus — measured at 5,397ms / 5,538ms / 5,448ms for
+ * offsets 0 / 20 / 40 of the same unchanged 1,236-session corpus. The scan is
+ * the cost; the paging is free. So the scan happens once.
+ *
+ * WHAT IT IS NOT: a second source of truth. Nothing is written to disk, there
+ * is no state directory entry, and a restart starts cold — which is correct.
+ * The files on disk remain the only record; this only avoids reading them again
+ * while they demonstrably have not changed.
+ *
+ * THE HAZARD IT IS BUILT AROUND: `annotateFixTitles` mutates its input in
+ * place, and it is not alone in being allowed to — every consumer of a collect
+ * has until now been handed a private object that no one else would ever see
+ * again. Sharing one changes that contract silently, and the damage would not
+ * look like a cache bug: it would look like page 3 having wrong data. So the
+ * cache NEVER hands out the object it holds. Every caller, on a hit and on a
+ * miss alike, gets a `structuredClone`, and the stored master is deep-frozen so
+ * that a write to it would throw here rather than surface as wrong data there.
+ */
+function createScanCache({ maxEntries = SCAN_CACHE_MAX_ENTRIES, enabled = true, signature = scanSourceSignature } = {}) {
+  const bound = Number.isInteger(maxEntries) && maxEntries > 0 ? maxEntries : SCAN_CACHE_MAX_ENTRIES;
+  /** key -> Promise<{master, copy}>. Insertion order is LRU order. */
+  const entries = new Map();
+  /** The signature every stored entry was taken under. */
+  let taken = null;
+  /** An in-flight walk, shared by whoever arrives during it. */
+  let walking = null;
+  /** Turned off for good the first time a corpus refuses to be copied. */
+  let copyable = true;
+  const stats = { hits: 0, misses: 0, invalidations: 0, evictions: 0, bypasses: 0, reason: null, signatureMs: null, files: null };
+
+  /**
+   * The current signature, computed at most once concurrently.
+   *
+   * Sharing a walk that is in flight RIGHT NOW adds no staleness that the walk
+   * did not already have: it is not atomic, and its answer already describes
+   * some moment inside its own duration. What it does avoid is two requests
+   * arriving together and paying for the same 280ms walk twice.
+   */
+  function fingerprint(detect) {
+    walking ??= Promise.resolve()
+      .then(() => detect())
+      .then((detected) => signature(detected))
+      .catch((error) => ({
+        signature: null,
+        reason: `signature_failed: ${error instanceof Error ? error.message : String(error)}`,
+        files: 0,
+        roots: [],
+        ms: 0,
+      }))
+      .finally(() => { walking = null; });
+    return walking;
+  }
+
+  function evict() {
+    while (entries.size > bound) {
+      const oldest = entries.keys().next().value;
+      entries.delete(oldest);
+      stats.evictions += 1;
+    }
+  }
+
+  return {
+    /** Read-only counters, for tests and for anyone asking what it did. */
+    stats: () => ({ ...stats, entries: entries.size, enabled: enabled && copyable, bound }),
+    clear() {
+      entries.clear();
+      taken = null;
+    },
+    /**
+     * @param {string} key from `scanCacheKey`
+     * @param {() => Promise<object>} detect `registry.detectAll`, for the signature
+     * @param {() => Promise<object>} produce the expensive scan
+     */
+    async read(key, detect, produce) {
+      if (!enabled || !copyable) {
+        stats.bypasses += 1;
+        return produce();
+      }
+
+      const current = await fingerprint(detect);
+      stats.signatureMs = current?.ms ?? null;
+      stats.files = current?.files ?? null;
+      if (!current?.signature) {
+        // Unwatchable source: serve a fresh scan and hold nothing.
+        stats.bypasses += 1;
+        stats.reason = current?.reason ?? "no_signature";
+        entries.clear();
+        taken = null;
+        return produce();
+      }
+      stats.reason = null;
+      if (taken !== current.signature) {
+        if (taken !== null && entries.size > 0) stats.invalidations += 1;
+        entries.clear();
+        taken = current.signature;
+      }
+
+      const hit = entries.get(key);
+      if (hit) {
+        entries.delete(key);
+        entries.set(key, hit);
+        stats.hits += 1;
+        const settled = await hit;
+        if (settled.copy === null) return settled.master;
+        return structuredClone(settled.master);
+      }
+
+      stats.misses += 1;
+      const pending = (async () => {
+        const master = await produce();
+        let copy = null;
+        try {
+          // Prove the corpus copies BEFORE anything is shared. A corpus that
+          // cannot be copied cannot be reused: handing the same object to a
+          // second request is exactly the corruption this cache exists to
+          // avoid, so the cache turns itself off and says why.
+          copy = structuredClone(master);
+        } catch (error) {
+          copyable = false;
+          stats.reason = `uncopyable: ${error instanceof Error ? error.message : String(error)}`;
+          return { master, copy: null };
+        }
+        deepFreeze(master, new WeakSet());
+        return { master, copy };
+      })();
+      entries.set(key, pending);
+      // A failed scan is never cached: the next request retries it, the same
+      // way `createLoader` refuses to cache a failed import.
+      pending.catch(() => { if (entries.get(key) === pending) entries.delete(key); });
+      evict();
+
+      const settled = await pending;
+      if (settled.copy === null) {
+        entries.delete(key);
+        return settled.master;
+      }
+      return settled.copy;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -528,6 +857,11 @@ const CSP = [
  * @param {object} [options.modules] specifier or module-object overrides
  * @param {Array}  [options.fixCatalog] fix descriptors (`factory` allowed)
  * @param {() => Date} [options.now]
+ * @param {false|object} [options.scanCache] `false` turns the scan cache off
+ *   entirely, so every request re-reads the corpus; an object overrides
+ *   `maxEntries` / `signature`. On by default. A caller that needs a
+ *   guaranteed-fresh scan per request asks for it here rather than relying on
+ *   the cache happening not to fire.
  * @returns {{app: import('express').Express, state: object}}
  */
 export function createApp(options = {}) {
@@ -540,6 +874,13 @@ export function createApp(options = {}) {
     hostAllowlist: new Set(),
     fixCatalog: Array.isArray(options.fixCatalog) ? options.fixCatalog : FIX_CATALOG,
     scanLimit: Number.isInteger(options.scanLimit) && options.scanLimit > 0 ? options.scanLimit : DEFAULT_SCAN_LIMIT,
+    scanCache: createScanCache(
+      options.scanCache === false
+        ? { enabled: false }
+        : options.scanCache && typeof options.scanCache === "object"
+          ? options.scanCache
+          : {},
+    ),
     now: typeof options.now === "function" ? options.now : () => new Date(),
     load: null,
     setAddress(port, host = LOOPBACK_HOST) {
@@ -691,13 +1032,28 @@ export function createApp(options = {}) {
   /**
    * Collect once for a request, surfacing per-collector diagnostics and the
    * scan bound that produced the numbers.
+   *
+   * "Once" now means once per CORPUS, not once per request: the scan behind it
+   * goes through `state.scanCache`, which re-reads the files only when the
+   * files themselves have changed. What comes back is always this request's own
+   * copy — the cache never hands out the object it holds — so `analyzeAll`,
+   * `annotateFixTitles` and everything downstream keep the private object they
+   * have always had. Nothing else in this function changed: the scan bound, the
+   * `atLimit` derivation and the note are computed from the returned corpus
+   * exactly as before, so `corpusComplete` and every verdict that depends on it
+   * are untouched by whether this request read the disk or not.
    */
   async function collectFor(res, query) {
     const registry = await require$(res, "registry", "the collector registry");
     if (!registry) return null;
     const requested = query.limit ?? null;
     const limit = requested ?? state.scanLimit;
-    const collected = await registry.collectAll({ since: query.since ?? undefined, limit });
+    const since = query.since ?? undefined;
+    const collected = await state.scanCache.read(
+      scanCacheKey({ since, limit }),
+      () => (typeof registry.detectAll === "function" ? registry.detectAll() : null),
+      () => registry.collectAll({ since, limit }),
+    );
     const supported = Array.isArray(collected?.supported) ? collected.supported : [];
     const atLimit = supported.some((entry) => (entry?.sessions?.length ?? 0) >= limit);
     return {
@@ -714,6 +1070,21 @@ export function createApp(options = {}) {
     };
   }
 
+  /**
+   * The ANALYSIS is deliberately not cached, and this is the note saying why so
+   * that it is a decision rather than an oversight.
+   *
+   * Measured on a heavy real corpus (2026-09-21, this machine): the collect it
+   * sits on top of is 4,701ms, `analyzeAll` over its output is 599ms. Caching
+   * the collect removes the 4,701ms. Caching the analysis as well would remove
+   * most of the 599ms and buy two hazards for it: `analyzeAll` publishes the
+   * `generatedAt` it is handed (`src/analyzer/health.js`), which is THIS
+   * request's clock and would be served stale to the next one; and
+   * `annotateFixTitles` below mutates the analysis in place, so a shared
+   * analysis would need its own defensive copy — the cost the caching was
+   * meant to avoid, on the tree where a wrong verdict would actually show.
+   * Not worth it for 12% of a request that is already fixed.
+   */
   async function analyzeFor(res, query) {
     const collectedFor = await collectFor(res, query);
     if (!collectedFor) return null;
