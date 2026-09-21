@@ -193,6 +193,8 @@ const RULE = (over) => ({
   severity: "warn",
   fix: "claude-output-hygiene",
   fixTitle: "Output hygiene instruction",
+  fixCli: "claude",
+  fixCliName: "Claude Code",
   threshold: { value: 0.85, derivation: "cacheRead / (cacheRead + cacheCreate) < 0.85" },
   magnitude: null,
   plain: null,
@@ -202,6 +204,7 @@ const RULE = (over) => ({
 
 const SESSION = (over) => ({
   cli: "claude",
+  cliName: "Claude Code",
   sessionId: "sess-1",
   project: null,
   cwd: null,
@@ -570,6 +573,31 @@ test("every rule still offers exactly [Preview] [Apply] [Skip] when observed, an
   const passOnly = render(PAYLOAD({ sessions: [SESSION({ rules: [RULE({})] })] }));
   const passButtons = buttonText(passOnly).filter((t) => t !== "Review fixes");
   assert.deepEqual(passButtons, [], "an unmeasured/passing check must offer no fix action");
+});
+
+test("a fix states its registry display names only when both names differ", () => {
+  const observed = RULE({
+    evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
+  });
+  const codex = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [observed] })] }), { api: {} });
+  const note = withClass(codex, "verdict-fix-scope")[0];
+  assert.ok(note);
+  assert.equal(note.textContent, "Changes Claude Code's config, not Codex's. Affects future Claude Code sessions only.");
+  assert.ok(!/DIS-\d|BP-\d|\bF-\d|\bsidechain|\blinkage|\bdenominator|\bcorpus|\bmagnitude/i.test(note.textContent));
+
+  const claude = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [observed] })] }), { api: {} });
+  assert.equal(withClass(claude, "verdict-fix-scope").length, 0);
+
+  const openCode = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [RULE({ fixCli: "opencode", fixCliName: "OpenCode", evidence: observed.evidence })] })] }), { api: {} });
+  const openCodeNote = withClass(openCode, "verdict-fix-scope")[0];
+  assert.ok(openCodeNote);
+  assert.equal(openCodeNote.textContent, "Changes OpenCode's config, not Claude Code's. Affects future OpenCode sessions only.");
+
+  const missingTarget = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [RULE({ fixCli: null, fixCliName: null, evidence: observed.evidence })] })] }), { api: {} });
+  assert.equal(withClass(missingTarget, "verdict-fix-scope").length, 0);
+
+  const missingSource = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: null, rules: [observed] })] }), { api: {} });
+  assert.equal(withClass(missingSource, "verdict-fix-scope").length, 0);
 });
 
 test("the scan-limit disclosure and the sub-agent set-aside note both survive in the rendered output", () => {

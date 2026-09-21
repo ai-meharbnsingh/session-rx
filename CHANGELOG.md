@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-21
+
+### Fixed
+
+- **A fix offered on a Codex or Gemini session never said it writes Claude Code's config.** The README stated the limitation; the card did not. A finding on a Codex session offered "Batch commands instruction" with nothing indicating the write lands in `~/.claude/`. Nothing was ever written silently — Apply opens a modal showing the absolute target path — but the user had to infer "Claude Code's config" from a file path on a card about a different CLI. The card now states it outright, in the fix offer, above the buttons: *"Changes Claude Code's config, not Codex's. Affects future Claude Code sessions only."* Same-CLI findings render no note, and a fix whose target CLI is unknown renders no note rather than a guess.
+- The CLI display names in that sentence are published by the server from the collector registry, the single place that already owns them. An earlier draft capitalized the id client-side and produced "Claude", "Gemini" and "Opencode" instead of "Claude Code", "Gemini CLI" and "OpenCode".
+
+### Changed
+
+- The fix catalogue now records each fix's target CLI, and the API publishes it as `fixCli` / `fixCliName` beside `fixTitle`, so no client keeps a second copy of that catalogue.
+
+### Repository (not shipped in the npm package)
+
+- A Copilot test fixture was silently excluded by a blanket `*.log` rule in `.gitignore`. The test passed on the author's machine and failed on every fresh clone, against the project's own requirement that the suite pass on a clean checkout. Fixtures are now exempted; real logs are still ignored.
+- The changelog's "Six health rules" list named three rules and three fixes, leaving cache-hit, large-tool-result and long-rising-context undocumented. Both lists are now keyed to their ids in `src/`.
+
 ## [0.1.0] - 2026-09-21
 
 ### Added

@@ -136,6 +136,15 @@ export function fixTitle(rule) {
   return typeof id === 'string' && id.length > 0 ? id : 'this fix';
 }
 
+function fixCliNote(session, rule) {
+  if (session?.cli !== rule?.fixCli) {
+    if (typeof session?.cliName !== 'string' || typeof rule?.fixCliName !== 'string') return null;
+  } else return null;
+  const sourceCli = session.cliName;
+  const targetCli = rule.fixCliName;
+  return `Changes ${targetCli}'s config, not ${sourceCli}'s. Affects future ${targetCli} sessions only.`;
+}
+
 // ---------------------------------------------------------------------------
 // DOM helpers — the only path text takes into the document
 // ---------------------------------------------------------------------------
@@ -747,6 +756,8 @@ export function verdictNode(session, rule, api = null, rerender = null) {
     const offer = el('div', 'verdict-offer');
     offer.append(el('span', 'verdict-arrow', '→'));
     offer.append(el('span', 'verdict-fix', fixTitle(rule)));
+    const scopeNote = fixCliNote(session, rule);
+    if (scopeNote) offer.append(el('span', 'verdict-fix-scope', scopeNote));
     offer.append(verdictActions(session, rule, api, rerender));
     body.append(offer);
   }

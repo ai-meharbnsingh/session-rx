@@ -41,6 +41,9 @@ const definitions = [
   ["copilot", "GitHub Copilot CLI", "./copilot.js", "CopilotCollector"],
 ];
 
+/** The registry-owned display names used by API annotations as well as detection. */
+export const COLLECTOR_SPECS = definitions;
+
 const stubs = [
   new ExistenceProbeCollector("grok-amp", "Grok / Amp", [".grok", ".config/grok", ".amp", ".config/amp", ".cache/amp"]),
 ];

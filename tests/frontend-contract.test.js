@@ -450,7 +450,7 @@ test("style.css defines every token the components use, with no remote font", ()
   // The surface the blueprint names must all be styled, not just tokenised.
   for (const selector of [
     ".card", ".score-bar", ".table-wrap", ".chart-container", ".heatmap",
-    ".modal", ".diff", ".badge-unknown", ".verdict-unknown",
+    ".modal", ".diff", ".badge-unknown", ".verdict-unknown", ".verdict-fix-scope",
   ]) {
     assert.ok(css.includes(selector), `style.css must style ${selector}`);
   }
@@ -560,6 +560,8 @@ const RULE = (over) => ({
   // The API publishes the human name next to the id (server.js
   // `annotateFixTitles`); the page no longer keeps its own copy.
   fixTitle: "Output hygiene instruction",
+  fixCli: "claude",
+  fixCliName: "Claude Code",
   threshold: { value: 0.85, derivation: "cacheRead / (cacheRead + cacheCreate) < 0.85" },
   magnitude: null,
   evidence: { status: "not-observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },

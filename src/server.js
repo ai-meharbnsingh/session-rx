@@ -82,37 +82,43 @@ export const DEFAULT_MODULES = Object.freeze({
  * with a reason rather than silently dropped from the list.
  */
 export const FIX_CATALOG = Object.freeze([
-  { id: "claude-auto-compact", title: "Enable auto-compaction", kind: "json-merge", blueprint: "BP-004.01", specifier: "./fixes/claude/auto-compact.js" },
-  { id: "claude-output-hygiene", title: "Output hygiene instruction", kind: "append-section", blueprint: "BP-004.02", specifier: "./fixes/claude/output-hygiene.js" },
-  { id: "claude-batch-commands", title: "Batch commands instruction", kind: "append-section", blueprint: "BP-004.03", specifier: "./fixes/claude/batch-commands.js" },
-  { id: "claude-worker-cap", title: "Worker cap instruction", kind: "append-section", blueprint: "BP-004.04", specifier: "./fixes/claude/worker-cap.js" },
-  { id: "claude-compact-contract", title: "Compact contract instruction", kind: "append-section", blueprint: "BP-004.05", specifier: "./fixes/claude/compact-contract.js" },
+  { id: "claude-auto-compact", title: "Enable auto-compaction", cli: "claude", kind: "json-merge", blueprint: "BP-004.01", specifier: "./fixes/claude/auto-compact.js" },
+  { id: "claude-output-hygiene", title: "Output hygiene instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.02", specifier: "./fixes/claude/output-hygiene.js" },
+  { id: "claude-batch-commands", title: "Batch commands instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.03", specifier: "./fixes/claude/batch-commands.js" },
+  { id: "claude-worker-cap", title: "Worker cap instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.04", specifier: "./fixes/claude/worker-cap.js" },
+  { id: "claude-compact-contract", title: "Compact contract instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.05", specifier: "./fixes/claude/compact-contract.js" },
 ]);
 
 /**
- * Publish each rule's fix TITLE next to its id, so no client keeps a second
- * copy of this catalogue.
+ * Publish each rule's fix title and target CLI next to its id, and each session's
+ * display name, so no client keeps a second copy of either catalogue.
  *
  * The offer line needs a human name; `rule.fix` is an id. The page used to hold
  * its own id -> title map with a drift test reading THIS file to keep the two
  * honest — which is two catalogues and a test standing between them, exactly
  * the shape F-021 recorded. The title is a server fact, so the server states
- * it. An id absent from the catalogue publishes `fixTitle: null` rather than a
- * guessed name, and the client falls back to the id itself.
+ * it. An id absent from the catalogue publishes `fixTitle: null` and
+ * `fixCliName: null` rather than guessed values. An unknown session CLI gets
+ * `cliName: null`; the client renders no cross-CLI note without both names.
  *
  * Mutates in place: these objects are built fresh by `analyzeAll` per request.
  *
  * @param {Array<object>|undefined} sessions
- * @param {Map<string, string>} titles
+ * @param {Map<string, {title?: string, cli?: string}>} fixes
+ * @param {Map<string, string>} displayNames
  */
-function annotateFixTitles(sessions, titles) {
+export function annotateFixTitles(sessions, fixes, displayNames = new Map()) {
   for (const session of Array.isArray(sessions) ? sessions : []) {
+    session.cliName = typeof session?.cli === "string" ? displayNames.get(session.cli) ?? null : null;
     for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
       if (!rule || typeof rule !== "object") continue;
-      rule.fixTitle = typeof rule.fix === "string" ? titles.get(rule.fix) ?? null : null;
+      const fix = typeof rule.fix === "string" ? fixes.get(rule.fix) : undefined;
+      rule.fixTitle = typeof fix?.title === "string" ? fix.title : null;
+      rule.fixCli = typeof fix?.cli === "string" ? fix.cli : null;
+      rule.fixCliName = typeof fix?.cli === "string" ? displayNames.get(fix.cli) ?? null : null;
     }
     // A sub-agent session carries the same six verdicts and the same offers.
-    annotateFixTitles(session?.subagentSessions, titles);
+    annotateFixTitles(session?.subagentSessions, fixes, displayNames);
   }
 }
 
@@ -1094,13 +1100,20 @@ export function createApp(options = {}) {
       generatedAt: state.now().toISOString(),
       limit: collectedFor.limit,
     });
-    const titles = new Map(
-      state.fixCatalog
-        .filter((fix) => typeof fix?.id === "string" && typeof fix?.title === "string")
-        .map((fix) => [fix.id, fix.title]),
+    const registry = await require$(res, "registry", "the collector registry");
+    if (!registry) return null;
+    const displayNames = new Map(
+      (Array.isArray(registry.COLLECTOR_SPECS) ? registry.COLLECTOR_SPECS : [])
+        .filter((spec) => Array.isArray(spec) && typeof spec[0] === "string" && typeof spec[1] === "string")
+        .map(([id, displayName]) => [id, displayName]),
     );
-    annotateFixTitles(analysis.sessions, titles);
-    annotateFixTitles(analysis.subagentSessions, titles);
+    const fixes = new Map(
+      state.fixCatalog
+        .filter((fix) => typeof fix?.id === "string")
+        .map((fix) => [fix.id, { title: fix.title, cli: fix.cli }]),
+    );
+    annotateFixTitles(analysis.sessions, fixes, displayNames);
+    annotateFixTitles(analysis.subagentSessions, fixes, displayNames);
     return { ...collectedFor, analysis };
   }
 
