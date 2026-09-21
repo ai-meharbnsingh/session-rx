@@ -1452,10 +1452,32 @@ export function createApp(options = {}) {
     const sessions = filterSessions(result.analysis.sessions, { cli, from, to });
     const health = await require$(res, "health", "the session health analyzer");
     if (!health) return;
+    const rawById = new Map();
+    for (const entry of Array.isArray(result.collected?.supported) ? result.collected.supported : []) {
+      for (const raw of Array.isArray(entry?.sessions) ? entry.sessions : []) {
+        if (raw?.sessionId !== null && raw?.sessionId !== undefined) rawById.set(String(raw.sessionId), raw);
+      }
+    }
+    let totalContextReadTokens = 0;
+    let contextSessionsMeasured = 0;
+    let contextSessionsExcluded = 0;
+    for (const session of sessions) {
+      const raw = rawById.get(String(session?.sessionId)) ?? null;
+      const readings = (Array.isArray(raw?.turns) ? raw.turns : [])
+        .map((turn) => turn?.context?.inputTokens)
+        .filter((value) => typeof value === "number" && Number.isFinite(value));
+      if (readings.length === 0) {
+        contextSessionsExcluded += 1;
+        continue;
+      }
+      contextSessionsMeasured += 1;
+      totalContextReadTokens += readings.reduce((sum, value) => sum + value, 0);
+    }
     const reportInput = health.buildReportInput({
       sessions,
       clis: result.analysis.collectors,
       generatedAt: state.now().toISOString(),
+      contextMeasurement: { totalContextReadTokens, contextSessionsMeasured, contextSessionsExcluded },
       trend: await reportTrend(result.collected, { from, to, cli }),
     });
     // `buildReportInput` coerces a non-array `fixes` to `[]`, and `[]` is what

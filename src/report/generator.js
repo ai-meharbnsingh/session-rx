@@ -353,6 +353,13 @@ function fmtNumber(value, unit) {
   return decimals ? `${groupInt(whole)}.${decimals}` : groupInt(whole);
 }
 
+function fmtContextTotal(value) {
+  if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B tokens`;
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M tokens`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K tokens`;
+  return `${groupInt(value)} tokens`;
+}
+
 /** L4: an inferred window says so wherever its number appears. */
 function windowNote(source) {
   const key = str(source);
@@ -413,9 +420,61 @@ function evidenceTable(values) {
     "| --- | --- | --- | --- |",
   ];
   for (const entry of rows) {
-    lines.push(`| ${cell(entry?.label)} | ${cell(fmtEvidenceValue(entry))} | ${cell(entry?.sessionId)} | ${cell(windowNote(entry?.windowSource))} |`);
+    let value = fmtEvidenceValue(entry);
+    if (str(entry?.label).trim() === "cache hit rate") {
+      const count = rows.find((candidate) =>
+        str(candidate?.label).trim() === "turns carrying a cache-read count" &&
+        str(candidate?.sessionId).trim() === str(entry?.sessionId).trim() &&
+        typeof candidate?.value === "number" && Number.isFinite(candidate.value),
+      );
+      if (count && count.value < 5) {
+        value += " — rate is not meaningful at fewer than 5 cache-read-carrying turns";
+      }
+    }
+    lines.push(`| ${cell(entry?.label)} | ${cell(value)} | ${cell(entry?.sessionId)} | ${cell(windowNote(entry?.windowSource))} |`);
   }
   return lines;
+}
+
+function evidenceSummary(rule, values) {
+  const rows = asArray(values);
+  const observed = rows.find((entry) => str(entry?.label).trim() === "sessions where this was observed");
+  const count = typeof observed?.value === "number" && Number.isFinite(observed.value)
+    ? groupInt(observed.value)
+    : null;
+  const name = str(rule?.name).trim().toLowerCase();
+
+  if (name.includes("rising context")) {
+    const trends = rows
+      .filter((entry) => ["slope", "context trend"].includes(str(entry?.label).trim()) && typeof entry?.value === "number" && Number.isFinite(entry.value))
+      .sort((a, b) => b.value - a.value);
+    const worstTrend = trends[0];
+    const elapsed = rows
+      .filter((entry) => str(entry?.label).trim() === "session elapsed" && typeof entry?.value === "number" && Number.isFinite(entry.value) &&
+        (!worstTrend || str(entry?.sessionId).trim() === str(worstTrend?.sessionId).trim()))
+      .sort((a, b) => b.value - a.value)[0];
+    if (count && elapsed && worstTrend) {
+      const rate = str(worstTrend?.label).trim() === "context trend"
+        ? ` at +${fmtEvidenceValue(worstTrend)}`
+        : ` at +${fmtEvidenceValue(worstTrend)}/hour`;
+      return `${count} sessions had rising context; the worst ran ${fmtEvidenceValue(elapsed)}${rate}.`;
+    }
+    if (count && elapsed) {
+      return `${count} sessions had rising context; the worst ran ${fmtEvidenceValue(elapsed)}.`;
+    }
+  }
+
+  if (count) return `${count} sessions showed ${name || "this condition"}; the measured details are below.`;
+  return "This finding was observed; the measured details are below.";
+}
+
+function cacheLengthNote(values) {
+  const rows = asArray(values);
+  const hasRate = rows.some((entry) => str(entry?.label).trim() === "cache hit rate");
+  const hasTurnCount = rows.some((entry) => str(entry?.label).trim() === "turns carrying a cache-read count");
+  return hasRate && !hasTurnCount
+    ? "The report could not see how many turns carried a cache-read count, so it could not assess whether the rate was meaningful for session length."
+    : null;
 }
 
 function renderHeader(data) {
@@ -446,6 +505,22 @@ function renderRange(range) {
   lines.push(`| Sessions analysed | ${countCell(sessions)} |`);
   // L8: the excluded count is printed, never merely implied.
   lines.push(`| Sub-agent sessions set aside | ${countCell(subagents)} |`);
+  const contextTotal = range?.totalContextReadTokens;
+  const contextMeasured = range?.contextSessionsMeasured;
+  const contextExcluded = range?.contextSessionsExcluded;
+  lines.push("");
+  if (typeof contextTotal === "number" && Number.isFinite(contextTotal) &&
+      typeof contextMeasured === "number" && Number.isFinite(contextMeasured) && contextMeasured > 0) {
+    const excluded = typeof contextExcluded === "number" && Number.isFinite(contextExcluded)
+      ? `; ${groupInt(contextExcluded)} session${contextExcluded === 1 ? "" : "s"} excluded because their turns carried no context token count`
+      : "";
+    lines.push(`Total context read across all turns: ${fmtContextTotal(contextTotal)}${excluded}`);
+  } else {
+    const excluded = typeof contextExcluded === "number" && Number.isFinite(contextExcluded)
+      ? ` (${groupInt(contextExcluded)} session${contextExcluded === 1 ? "" : "s"} excluded because their turns carried no context token count)`
+      : "";
+    lines.push(`Total context read across all turns: could not be measured${excluded}`);
+  }
   if (!from || !to) {
     lines.push("");
     lines.push("The range is incomplete: at least one bound could not be read from the session records.");
@@ -470,6 +545,16 @@ function renderClis(clis) {
     lines.push("");
     return lines;
   }
+  for (const row of rows) {
+    const note = str(row?.note);
+    const allEmpty = /(?:not one of the \d+ sessions read for this CLI recorded a single turn|the one session read for this CLI recorded no turns at all)/.test(note);
+    if (typeof row?.sessions === "number" && Number.isFinite(row.sessions) && row.sessions > 0 && allEmpty) {
+      const cli = str(row?.cli).trim();
+      const label = cli ? `${cli.charAt(0).toUpperCase()}${cli.slice(1)} CLI` : "This CLI";
+      lines.push(`${label}: ${groupInt(row.sessions)} sessions found, all empty — no turns to analyse.`);
+    }
+  }
+  if (rows.length > 0) lines.push("");
   lines.push("| CLI | Sessions | Sub-agent sessions set aside | Support | Note |");
   lines.push("| --- | --- | --- | --- | --- |");
   for (const row of rows) {
@@ -522,9 +607,22 @@ function renderFindings(rules) {
     const how = str(rule?.evidence?.derivation).trim();
     if (how) lines.push(`- Derivation: ${cell(how)}`);
     lines.push("");
+    const values = rule?.evidence?.values;
+    lines.push(evidenceSummary(rule, values));
+    lines.push("");
+    lines.push("<details>");
+    lines.push("<summary>Evidence details</summary>");
+    lines.push("");
     lines.push("Evidence — the numbers actually measured in these sessions:");
     lines.push("");
-    lines.push(...evidenceTable(rule?.evidence?.values));
+    lines.push(...evidenceTable(values));
+    lines.push("");
+    lines.push("</details>");
+    const cacheNote = str(rule?.id).trim() === "cache-hit" ? cacheLengthNote(values) : null;
+    if (cacheNote) {
+      lines.push("");
+      lines.push(cacheNote);
+    }
     lines.push("");
     const sources = asArray(rule?.evidence?.sources).map((source) => str(source).trim()).filter(Boolean);
     lines.push(`- Sources: ${sources.length ? sources.join("; ") : NOT_RECORDED}`);

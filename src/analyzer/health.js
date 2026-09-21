@@ -373,15 +373,20 @@ export function buildReportInput(input = {}) {
     if (ended !== null && (to === null || ended > to)) to = ended;
   }
 
+  const range = {
+    from: from === null ? null : new Date(from).toISOString(),
+    to: to === null ? null : new Date(to).toISOString(),
+    sessions: sessions.length,
+    subagentSessions: setAsideCount(sessions, input?.subagentSessions),
+  };
+  if (input?.contextMeasurement && typeof input.contextMeasurement === "object") {
+    Object.assign(range, input.contextMeasurement);
+  }
+
   return {
     generatedAt: str(input?.generatedAt) || null,
     parserVersion,
-    range: {
-      from: from === null ? null : new Date(from).toISOString(),
-      to: to === null ? null : new Date(to).toISOString(),
-      sessions: sessions.length,
-      subagentSessions: setAsideCount(sessions, input?.subagentSessions),
-    },
+    range,
     clis: Array.isArray(input?.clis) ? input.clis : [],
     rules: aggregateRules(sessions, parserVersion),
     fixes: Array.isArray(input?.fixes) ? input.fixes : [],

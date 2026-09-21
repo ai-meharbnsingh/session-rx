@@ -30,7 +30,7 @@ checks against each recent session, and offers a local fix for the ones that
 fail. The six checks are context pressure, cache hit rate, repeated tool work,
 large tool results, long rising context, and sub-agent concurrency.
 
-![The Health page: summary counts and a session card showing all three verdicts side by side — PROBLEM FOUND in amber with Preview/Apply buttons, COULD NOT BE MEASURED twice in hatched grey each stating it is not a pass, and PASSED three times in green](docs/assets/screenshot-health.png)
+![The Health page: summary counts and a session card showing all three verdicts side by side — PROBLEM FOUND in amber with Preview/Apply buttons, COULD NOT BE MEASURED twice in hatched grey each stating it is not a pass, and PASSED three times in green](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-health.png)
 
 ### Every check returns one of three answers
 
