@@ -50,9 +50,10 @@ export function notMeasured(reason = 'this value was not recorded') {
   return node;
 }
 
+const svgNs = ['http:', String.fromCharCode(47, 47), 'www.w3.org/2000/svg'].join('');
+const createSvg = (tag) => typeof document.createElementNS === 'function' ? document.createElementNS(svgNs, tag) : document.createElement(tag);
+
 export function sparkline(values, className = '') {
-  const svgNs = ['http:', String.fromCharCode(47, 47), 'www.w3.org/2000/svg'].join('');
-  const createSvg = (tag) => typeof document.createElementNS === 'function' ? document.createElementNS(svgNs, tag) : document.createElement(tag);
   const svg = createSvg('svg');
   svg.setAttribute('viewBox', '0 0 120 34'); svg.setAttribute('class', `sparkline ${className}`.trim()); svg.setAttribute('aria-hidden', 'true');
   const nums = values.filter((value) => Number.isFinite(value));
@@ -62,6 +63,22 @@ export function sparkline(values, className = '') {
   const poly = createSvg('polyline');
   poly.setAttribute('points', points); poly.setAttribute('fill', 'none'); poly.setAttribute('vector-effect', 'non-scaling-stroke');
   svg.append(poly); return svg;
+}
+
+export function icon(name) {
+  const svg = createSvg('svg');
+  svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8'); svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round'); svg.setAttribute('aria-hidden', 'true');
+  const shapes = {
+    sessions: [['path', { d: 'M6 3.5h8l4 4V20.5H6z' }], ['path', { d: 'M14 3.5v4h4M9 11h6M9 14.5h6M9 18h4' }]],
+    problems: [['path', { d: 'm12 4 9 16H3z' }], ['path', { d: 'M12 9v5M12 17.5h.01' }]],
+    fixes: [['path', { d: 'M14.5 5.5a4 4 0 0 0-5.1 5.1L4.7 15.3a2.1 2.1 0 1 0 3 3l4.7-4.7a4 4 0 0 0 5.1-5.1l-2.2 2.2-2.8-2.8z' }]],
+    unmeasured: [['path', { d: 'M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.3A10.8 10.8 0 0 1 12 5c5 0 8.8 4.3 10 7a14.7 14.7 0 0 1-3.1 4.3M6.1 6.1C3.9 7.5 2.5 9.7 2 12c.5 2.3 2 4.6 4.3 6.1A10.8 10.8 0 0 0 12 19c1.1 0 2.2-.2 3.2-.5' }]],
+    health: [['polyline', { points: '3,12 7,12 9,6 13,18 15,12 21,12' }]],
+    trends: [['polyline', { points: '3,17 9,11 13,14 21,6' }], ['polyline', { points: '16,6 21,6 21,11' }]]
+  }[name] || [];
+  shapes.forEach(([tag, attributes]) => { const shape = createSvg(tag); Object.entries(attributes).forEach(([key, value]) => shape.setAttribute(key, value)); svg.append(shape); });
+  return svg;
 }
 
 export function metricDelta(metric) {
