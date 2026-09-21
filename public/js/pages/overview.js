@@ -1,126 +1,133 @@
 import { rangeQuery, registerPage } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
-import { button, cliIcon, dateText, duration, el, healthNode, icon, metricDelta, number, observedRules, plainText, ruleLabel, severity, sparkline } from '../components/ui.js';
+import { button, cliIcon, dateText, duration, el, healthNode, icon, largestRemainder, number, ruleLabel, sparkline } from '../components/ui.js';
 
-// Each summary card carries its own colour, matched to what the number means:
-// blue for a plain count, amber for problems, green for available fixes, grey
-// for what could not be measured. Grey is deliberate — "not measured" must read
-// as its own state, not as a dimmer kind of pass.
-const iconBadge = (name) => { const badge = el('span', 'rx-icon'); badge.append(icon(name)); return badge; };
-const card = (title, iconName, value, subtitle, values, delta, tone = 'accent') => {
-  const box = el('article', `rx-card summary-card tone-${tone}`);
-  const titleRow = el('div', 'rx-card-title'); titleRow.append(iconBadge(iconName), el('h3', '', title));
-  box.append(titleRow, el('strong', 'rx-number', value), el('span', 'rx-label', subtitle));
-  if (delta) box.append(el('span', 'rx-delta', delta));
-  box.append(sparkline(values, `tone-${tone}`)); return box;
-};
-
+// Keep the namespace indirection: the frontend contract pins it.
 const svgNs = ['http:', String.fromCharCode(47, 47), 'www.w3.org/2000/svg'].join('');
+const finite = (value) => Number.isFinite(value);
+const fmt = (value) => finite(value) ? value.toLocaleString('en-US') : 'not measured';
+const iconBadge = (name) => { const badge = el('span', 'rx-icon'); badge.append(icon(name)); return badge; };
 
-function largestRemainderPercentages(values, total) {
-  if (!Number.isFinite(total) || total <= 0) return null;
-  const raw = values.map((value) => value / total * 100);
-  const percentages = raw.map(Math.floor);
-  let remainder = 100 - percentages.reduce((sum, value) => sum + value, 0);
-  [...raw.keys()].sort((a, b) => raw[b] - Math.floor(raw[b]) - (raw[a] - Math.floor(raw[a])) || a - b).slice(0, remainder).forEach((index) => { percentages[index] += 1; });
-  return percentages;
-}
-
-function issueDistribution(ruleTotals, population) {
-  const items = (Array.isArray(ruleTotals) ? ruleTotals : [])
-    .filter((rule) => rule && typeof rule.id === 'string')
-    .sort((a, b) => (Number.isFinite(b.observed) ? b.observed : -1) - (Number.isFinite(a.observed) ? a.observed : -1) || String(a.name || a.id).localeCompare(String(b.name || b.id)));
-  const observedTotal = items.reduce((sum, item) => sum + (Number.isFinite(item.observed) ? item.observed : 0), 0);
-  const percentages = largestRemainderPercentages(items.map((item) => Number.isFinite(item.observed) ? item.observed : 0), observedTotal);
-  return { items, observedTotal, population, percentages };
-}
-
-const distributionPalette = ['#6f9bf7', '#b58cf2', '#4fc3b3', '#ef8f6b', '#d16ba5', '#7e9bd6', '#56a8c7', '#c38bd8', '#e48b9d', '#63b89f', '#8d86d8', '#d49a78'];
-const distributionColorsByRule = new Map([['long-rising-context', '#4fc3b3'], ['large-tool-result', '#7e9bd6'], ['repeat-tool', '#c38bd8'], ['context-pressure', '#6f9bf7'], ['cache-hit', '#b58cf2'], ['subagent-concurrency', '#ef8f6b']]);
-function distributionColor(ruleId) {
-  if (distributionColorsByRule.has(ruleId)) return distributionColorsByRule.get(ruleId);
-  let hash = 2166136261;
-  for (const character of String(ruleId)) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
-  return distributionPalette[(hash >>> 0) % distributionPalette.length];
-}
-
-function donut(health, trends) {
-  const sessions = health?.sessions || [];
-  let passed = 0, observed = 0, unknown = 0, total = 0;
-  sessions.forEach((session) => { passed += session?.score?.passed || 0; observed += session?.score?.observed || 0; unknown += session?.score?.unknown || 0; total += session?.score?.total || 0; });
-  const measured = Math.max(0, total - unknown), circumference = 2 * Math.PI * 58;
-  const wrap = el('div', 'health-grid donut-wrap'); const donutColumn = el('div', 'donut-column');
-  const svg = document.createElementNS(svgNs, 'svg'); svg.setAttribute('viewBox', '0 0 150 150'); svg.setAttribute('class', 'donut'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', `${passed} of ${measured} measured checks passed`);
-  const track = document.createElementNS(svgNs, 'circle'); track.setAttribute('cx','75'); track.setAttribute('cy','75'); track.setAttribute('r','58'); track.setAttribute('class','donut-track'); svg.append(track);
-  let offset = 0;
-  for (const [value, cls] of [[observed, 'donut-observed'], [passed, 'donut-pass'], [unknown, 'donut-unknown']]) {
-    if (!value || !total) continue;
-    const ring = document.createElementNS(svgNs, 'circle');
-    ring.setAttribute('cx', '75'); ring.setAttribute('cy', '75'); ring.setAttribute('r', '58');
-    ring.setAttribute('class', cls); ring.setAttribute('pathLength', '100');
-    ring.setAttribute('stroke-dasharray', `${value / total * 100} 100`);
-    ring.setAttribute('stroke-dashoffset', String(-offset / circumference * 100));
-    svg.append(ring); offset += value / total * circumference;
+function deltaChip(comparison, key) {
+  const metric = comparison?.deltas?.[key];
+  if (comparison?.available !== true || !metric || !finite(metric.changePercent)) {
+    const chip = el('span', 'rx-delta is-muted', 'not comparable'); chip.title = comparison?.reason || 'The previous window could not be compared.'; return chip;
   }
-  const label = document.createElementNS(svgNs, 'text');
-  label.setAttribute('class', 'donut-label'); label.setAttribute('x', '75'); label.setAttribute('y', '75');
-  label.textContent = measured ? `${passed}/${measured}` : '—'; svg.append(label);
-  const sub = document.createElementNS(svgNs, 'text');
-  sub.setAttribute('class', 'donut-sub'); sub.setAttribute('x', '75'); sub.setAttribute('y', '91');
-  sub.textContent = 'measured'; svg.append(sub); donutColumn.append(svg, el('p', 'donut-coverage', `Covers ${sessions.length} ${sessions.length === 1 ? 'session' : 'sessions'}`));
-  const stateLine = el('p', 'health-states'); const percentages = largestRemainderPercentages([passed, observed, unknown], total); if (percentages) stateLine.append(el('span', 'state-pass', `${percentages[0]}% passed`), el('span', 'state-observed', `${percentages[1]}% problems found`), el('span', 'state-unknown', `${percentages[2]}% could not be measured`)); else stateLine.textContent = 'Nothing to summarise.'; donutColumn.append(stateLine);
-  const distribution = issueDistribution(health?.ruleTotals, health?.ruleTotalsSessions); const distributionColumn = el('div', 'distribution-column'); distributionColumn.append(el('h3', '', 'Issue distribution'));
-  const populationText = Number.isFinite(distribution.population) ? ` across ${distribution.population.toLocaleString('en-US')} sessions in this window` : ' in this window';
-  distributionColumn.append(el('p', 'distribution-note', `Share of observed findings${populationText}`));
-  if (!distribution.observedTotal) distributionColumn.append(el('p', 'not-measured', 'No observed findings were found in this window.'));
-  else distribution.items.forEach((item, index) => { const observed = Number.isFinite(item.observed) ? item.observed : 0; const unknownForRule = Number.isFinite(item.unknown) ? item.unknown : null; const row = el('div', 'distribution-row'); row.style.setProperty('--distribution-color', distributionColor(item.id)); const label = el('div', 'distribution-label'); const dot = el('span', 'distribution-dot'); dot.setAttribute('aria-hidden', 'true'); const copy = el('span'); copy.append(el('span', '', item.name || item.id)); if (observed === 0) copy.append(el('span', 'distribution-status', ' — no problem was found')); if (unknownForRule !== null && unknownForRule > 0) copy.append(el('span', 'distribution-status', ` — could not be measured on ${unknownForRule.toLocaleString('en-US')} ${unknownForRule === 1 ? 'session' : 'sessions'}`)); label.append(dot, copy); row.append(label, el('strong', '', `${distribution.percentages[index]}%`)); const trackBar = el('div', 'bar-track'); const fill = el('div', 'bar-fill distribution-fill'); fill.style.width = `${distribution.percentages[index]}%`; trackBar.append(fill); row.append(trackBar); distributionColumn.append(row); });
-  const callout = el('aside', 'trend-callout'); callout.append(el('h3', '', 'Trend')); if (trends?.trend?.direction === 'unknown') callout.append(el('p', 'trend-unknown', 'The trend could not be determined for this window.')); if (trends?.trend?.summary) callout.append(el('p', 'trend-summary', trends.trend.summary)); else callout.append(el('p', 'trend-summary', 'The trend could not be determined for this window.'));
-  // The callout sits under the donut rather than across the foot of the card: the donut column is the shorter of the two,
-  // and a one-line trend statement is the only thing in this card short enough to belong there.
-  donutColumn.append(callout); wrap.append(donutColumn, distributionColumn); return wrap;
+  const change = metric.changePercent; const chip = el('span', `rx-delta ${change > 0 ? 'is-up' : change < 0 ? 'is-down' : 'is-flat'}`, `${change > 0 ? '↑' : change < 0 ? '↓' : '→'} ${Math.abs(change)}%`); chip.title = `Compared with the previous window: ${change}%`; return chip;
+}
+
+function summaryCard(title, iconName, value, subtitle, series, comparison, key, tone) {
+  const box = el('article', `rx-card summary-card tone-${tone}`); const titleRow = el('div', 'rx-card-title'); titleRow.append(iconBadge(iconName), el('h3', '', title));
+  const valueRow = el('div', 'summary-value-row'); valueRow.append(el('strong', 'rx-number', value), deltaChip(comparison, key)); box.append(titleRow, valueRow, el('span', 'rx-label', subtitle));
+  if (Array.isArray(series)) box.append(sparkline(series, `tone-${tone}`, { bars: true })); return box;
+}
+
+function donut(totals, comparison) {
+  const passed = totals?.notObservedChecks; const measured = totals?.measuredChecks; const unknown = totals?.unknownChecks; const ratio = finite(passed) && finite(measured) && measured > 0 ? passed / measured : null;
+  const wrap = el('div', 'health-grid'); const column = el('div', 'donut-column'); const svg = document.createElementNS(svgNs, 'svg'); svg.setAttribute('viewBox', '0 0 150 150'); svg.setAttribute('class', 'donut'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', ratio === null ? 'Measured check pass rate not measured' : `${Math.round(ratio * 100)} percent of measured checks passed`);
+  const track = document.createElementNS(svgNs, 'circle'); track.setAttribute('cx', '75'); track.setAttribute('cy', '75'); track.setAttribute('r', '58'); track.setAttribute('class', 'donut-track'); svg.append(track);
+  if (ratio !== null) { const ring = document.createElementNS(svgNs, 'circle'); ring.setAttribute('cx', '75'); ring.setAttribute('cy', '75'); ring.setAttribute('r', '58'); ring.setAttribute('class', 'donut-pass'); ring.setAttribute('pathLength', '100'); ring.setAttribute('stroke-dasharray', `${ratio * 100} 100`); svg.append(ring); }
+  const label = document.createElementNS(svgNs, 'text'); label.setAttribute('class', 'donut-label'); label.setAttribute('x', '75'); label.setAttribute('y', '75'); label.textContent = ratio === null ? 'not measured' : String(Math.round(ratio * 100)); svg.append(label);
+  const sub = document.createElementNS(svgNs, 'text'); sub.setAttribute('class', 'donut-sub'); sub.setAttribute('x', '75'); sub.setAttribute('y', '91'); sub.textContent = '% passed'; svg.append(sub);
+  column.append(svg, el('p', 'donut-caption', ratio === null ? 'Measured check pass rate could not be determined.' : `${fmt(measured)} measured · ${fmt(unknown)} could not be measured`));
+  const donutDelta = el('p', 'donut-delta'); donutDelta.append(deltaChip(comparison, 'notObservedChecks')); column.append(donutDelta);
+  const distribution = el('div', 'distribution-column'); distribution.append(el('h3', '', 'Issue distribution')); const items = Array.isArray(totals?.ruleTotals) ? totals.ruleTotals : []; const total = items.reduce((sum, item) => sum + (finite(item?.observed) ? item.observed : 0), 0);
+  if (!total) distribution.append(el('p', 'not-measured', 'No observed findings were measured in this window.'));
+  else { const sorted = items.filter((item) => item && typeof item.id === 'string').sort((a, b) => (b.observed || 0) - (a.observed || 0)); const percentages = largestRemainder(sorted.map((item) => (item.observed || 0) / total * 100)); sorted.forEach((item, index) => { const share = (item.observed || 0) / total * 100; const row = el('div', 'distribution-row'); row.style.setProperty('--distribution-color', `var(--distribution-${(index % 6) + 1})`); const labelNode = el('div', 'distribution-label'); labelNode.append(el('span', 'distribution-dot'), el('span', '', item.name || item.id)); row.append(labelNode, el('strong', '', `${percentages[index]}%`)); const bar = el('div', 'bar-track'); const fill = el('div', 'bar-fill distribution-fill'); fill.style.width = `${share}%`; bar.append(fill); row.append(bar); if (finite(item.unknown) && item.unknown > 0) row.append(el('small', 'distribution-status', `could not be measured on ${fmt(item.unknown)} ${item.unknown === 1 ? 'session' : 'sessions'}`)); distribution.append(row); }); }
+  wrap.append(column, distribution); return wrap;
 }
 
 function lineChart(items, valueKey, tone) {
-  const height = 120; const svg = document.createElementNS(svgNs, 'svg'); svg.setAttribute('viewBox', `0 0 280 ${height}`); svg.setAttribute('preserveAspectRatio', 'xMidYMid meet'); svg.setAttribute('class', `trend-chart tone-${tone}`); svg.setAttribute('role', 'img');
-  const values = items.map((item) => item?.hasData && Number.isFinite(item?.[valueKey]) ? item[valueKey] : null); const valid = values.filter((value) => value !== null); if (!valid.length) return svg;
-  const min = Math.min(...valid); const max = Math.max(...valid); const span = max - min || 1; const top = 10; const baseline = height - 8; const range = baseline - top; let segment = [];
-  values.forEach((value, index) => { if (value === null) { if (segment.length) { appendLine(svg, segment, baseline); segment = []; } return; } segment.push(`${12 + index / Math.max(1, values.length - 1) * 256},${baseline - ((value - min) / span) * range}`); }); if (segment.length) appendLine(svg, segment, baseline); return svg;
+  const svg = document.createElementNS(svgNs, 'svg'); svg.setAttribute('viewBox', '0 0 280 120'); svg.setAttribute('class', `trend-chart tone-${tone}`); svg.setAttribute('role', 'img'); const values = (Array.isArray(items) ? items : []).map((item) => item?.hasData && finite(item?.[valueKey]) ? item[valueKey] : null); const valid = values.filter((value) => value !== null); if (!valid.length) return svg;
+  const min = Math.min(...valid); const span = Math.max(...valid) - min || 1; const baseline = 112; let segment = []; const flush = () => { if (!segment.length) return; const first = segment[0].split(',')[0]; const last = segment.at(-1).split(',')[0]; const area = document.createElementNS(svgNs, 'polygon'); area.setAttribute('points', `${segment.join(' ')} ${last},${baseline} ${first},${baseline}`); area.setAttribute('class', 'trend-area'); svg.append(area); const line = document.createElementNS(svgNs, 'polyline'); line.setAttribute('points', segment.join(' ')); line.setAttribute('fill', 'none'); line.setAttribute('vector-effect', 'non-scaling-stroke'); svg.append(line); segment = []; };
+  values.forEach((value, index) => { if (value === null) return flush(); segment.push(`${12 + index / Math.max(1, values.length - 1) * 256},${baseline - ((value - min) / span) * 92}`); }); flush(); return svg;
 }
 
-function appendLine(svg, points, baseline) { const firstX = points[0].split(',')[0]; const last = points[points.length - 1]; const lastX = last.split(',')[0]; const area = document.createElementNS(svgNs, 'polygon'); area.setAttribute('points', `${points.join(' ')} ${lastX},${baseline} ${firstX},${baseline}`); area.setAttribute('class', 'trend-area'); svg.append(area); const poly = document.createElementNS(svgNs, 'polyline'); poly.setAttribute('points', points.join(' ')); poly.setAttribute('fill', 'none'); poly.setAttribute('vector-effect', 'non-scaling-stroke'); svg.append(poly); }
-function latestValue(items, valueKey, formatter) { const point = [...(items || [])].reverse().find((item) => item?.hasData && Number.isFinite(item?.[valueKey])); return point ? formatter(point[valueKey]) : null; }
-
-function trendTone(metric, betterWhen) {
-  if (!metric || !Number.isFinite(metric.from) || !Number.isFinite(metric.to)) return 'accent';
-  const published = String(metric.direction || '').toLowerCase();
-  if (published === 'improving') return 'pass';
-  if (published === 'worsening' || published === 'declining') return 'warn';
-  if (published === 'flat' || published === 'stable' || published === 'unknown') return 'accent';
-  const delta = metric.to - metric.from;
-  if (delta === 0) return 'accent';
-  // The analyzer publishes these metric meanings: fewer turns above the 70% context window is better, while a higher cache hit rate is better.
-  return (betterWhen === 'lower' ? delta < 0 : delta > 0) ? 'pass' : 'warn';
+function trendLevel(metric, key) {
+  if (metric?.available !== true || !finite(metric.to)) return null;
+  return key === 'spend' ? number(metric.to) : `${metric.to}%`;
 }
 
-function trendsPreview(trends) {
-  const section = el('section', 'rx-card'); const head = el('div','rx-card-head'); const title = el('div', 'rx-section-title tone-accent'); const windowDays = trends?.window?.days; const days = Number.isFinite(windowDays) ? windowDays : Array.isArray(trends?.days) ? trends.days.length : null; title.append(iconBadge('trends'), el('h2', '', days === null ? 'Trends' : `Trends (last ${days} days)`)); if (days === null) title.append(el('p', 'trend-window-unknown', 'Window length could not be determined.')); head.append(title, el('a','', 'View all')); head.lastChild.href = '#/trends'; section.append(head);
-  const metrics = Array.isArray(trends?.trend?.metrics) ? trends.trend.metrics : []; const metricFor = (label) => metrics.find((metric) => metric?.label === label); const charts = trends?.charts || {};
-  const definitions = [{ key: 'context', title: 'Context efficiency', valueKey: 'turnsAboveThreshold', metric: metricFor('turns above 70% of window'), betterWhen: 'lower', caption: 'Turns above 70% of window', format: (value) => `${value.toLocaleString('en-US')} turns` }, { key: 'spend', title: 'Token spend', valueKey: 'total', metric: null, caption: 'Total context read across all turns', format: (value) => value.toLocaleString('en-US') }, { key: 'cache', title: 'Cache hit rate', valueKey: 'hitRate', metric: metricFor('cache hit rate'), betterWhen: 'higher', caption: 'Cache hits (%)', format: (value) => `${value.toFixed(2)}%` }];
-  const grid = el('div', 'trend-grid'); definitions.forEach((definition) => { const tone = definition.metric ? trendTone(definition.metric, definition.betterWhen) : 'accent'; const box = el('article', `trend-card tone-${tone}`); box.append(el('h3', '', definition.title)); const delta = metricDelta(definition.metric); const latest = latestValue(charts[definition.key], definition.valueKey, definition.format); box.append(el('strong', 'trend-value', delta || latest || 'not measured')); box.append(lineChart(charts[definition.key] || [], definition.valueKey, tone)); box.append(el('p', 'trend-note', definition.caption)); grid.append(box); }); section.append(grid); return section;
+function trendChange(metric, key) {
+  if (metric?.available !== true || !finite(metric.to)) return null;
+  if (!finite(metric.changePercent)) return el('span', 'trend-empty', metric.reason || 'The change could not be measured.');
+  const change = metric.changePercent;
+  const arrow = change > 0 ? '↑' : change < 0 ? '↓' : '→';
+  const relative = key === 'context' || key === 'cache' ? ' relative' : '';
+  return el('span', `trend-change ${change > 0 ? 'is-up' : change < 0 ? 'is-down' : 'is-flat'}`, `${arrow} ${change > 0 ? '+' : ''}${Math.abs(change)}%${relative ? ' relative change' : ''}`);
 }
+
+export function trendCard(title, key, deltas, charts, valueKey, caption, tone) {
+  const metric = deltas?.[key];
+  const level = trendLevel(metric, key);
+  const box = el('article', `trend-card tone-${tone}`);
+  if (level === null) box.append(el('h3', '', title), el('span', 'trend-empty', metric?.reason || 'This trend could not be measured.'));
+  else {
+    const levelNode = el('strong', 'trend-level', level);
+    levelNode.title = `Mean over ${metric.secondHalfDays} measured days in the newer half.`;
+    box.append(el('h3', '', title), levelNode, trendChange(metric, key));
+  }
+  box.append(lineChart(charts?.[key], valueKey, tone), el('p', 'trend-note', caption));
+  return box;
+}
+
+function sectionTitle(title, iconName, tone = 'accent') { const node = el('div', `rx-section-title tone-${tone}`); node.append(iconBadge(iconName), el('h2', '', title)); return node; }
+function trendsPreview(payload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Trends', 'trends')); const link = el('a', '', 'View all →'); link.href = '#/trends'; head.append(link); section.append(head); const grid = el('div', 'trend-grid'); grid.append(trendCard('Context efficiency', 'context', payload?.trendDeltas, payload?.charts, 'turnsAboveThreshold', 'Turns above 70% of window', 'pass'), trendCard('Token spend', 'spend', payload?.trendDeltas, payload?.charts, 'total', 'Total tokens per day', 'accent'), trendCard('Cache hit rate', 'cache', payload?.trendDeltas, payload?.charts, 'hitRate', 'Cache hits (%)', 'pass')); section.append(grid); return section; }
+
+function topFixes(health, api, fixesPayload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Top fixes', 'fixes')); const link = el('a', '', 'View all fixes →'); link.href = '#/fixes'; head.append(link); section.append(head); const items = Array.isArray(health?.topFixes) ? health.topFixes.slice(0, 5) : []; if (!items.length) { section.append(el('p', 'not-measured', 'No ranked fixable findings were measured in this window.')); return section; }
+  items.forEach((item, index) => { const rule = { id: item.id, name: item.name, fix: item.fixId }; const row = el('div', 'fix-row'); row.append(el('span', 'rank', index + 1)); const copy = el('div'); copy.append(el('span', 'fix-title', item.name || item.id || 'Session check'), el('span', 'fix-sub', `${fmt(item.sessions)} sessions`)); row.append(copy); const rank = index < 2 ? 'High' : index < 4 ? 'Medium' : 'Low'; row.append(el('span', `impact-rank impact-${rank.toLowerCase()}`, `${rank} rank`)); const actions = el('div', 'fix-actions'); const preview = button('Preview', 'button button-sm'); const apply = button('Apply', 'button button-primary button-sm'); const skip = button('Skip', 'button button-sm'); const open = () => openFixModal({ fixId: item.fixId, rule, session: null, api, catalog: fixesPayload?.fixes }); preview.addEventListener('click', open); apply.addEventListener('click', open); skip.addEventListener('click', () => row.classList.add('is-skipped')); actions.append(preview, apply, skip); row.append(actions); section.append(row); }); return section; }
+
+function recentSessions(payload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Recent sessions', 'sessions')); const link = el('a', '', 'View all sessions →'); link.href = '#/sessions'; head.append(link); section.append(head); const sessions = Array.isArray(payload?.sessions) ? payload.sessions : []; if (!sessions.length) { section.append(el('p', 'not-measured', 'Recent sessions could not be measured.')); return section; } const table = el('div', 'rx-table-wrap'); const t = el('table', 'rx-table'); const hr = el('tr'); ['CLI', 'Started', 'Duration', 'Turns', 'Health', 'Key issue', 'Action'].forEach((label) => hr.append(el('th', '', label))); const thead = el('thead'); thead.append(hr); t.append(thead); const body = el('tbody');
+  sessions.slice(0, 8).forEach((session) => { const row = el('tr'); row.addEventListener('click', () => { location.hash = `#/sessions/${encodeURIComponent(session.sessionId || '')}`; }); const finding = (session.rules || []).find((rule) => rule?.evidence?.status === 'observed'); const issue = el('span', 'session-issue'); if (finding) issue.append(el('span', `distribution-dot issue-${finding.id || ''}`), el('span', '', ruleLabel(finding))); else issue.append(el('span', 'not-measured', 'no observed issue')); const cli = el('td'); cli.append(cliIcon(session.cliName || session.cli), document.createTextNode(` ${session.cliName || session.cli || 'Unknown CLI'}`)); const healthCell = el('td'); healthCell.append(healthNode(session.score, true)); const issueCell = el('td'); issueCell.append(issue); const action = button('View →', 'button button-sm'); action.addEventListener('click', (event) => { event.stopPropagation(); row.click(); }); const actionCell = el('td'); actionCell.append(action); row.append(cli, el('td', '', dateText(session.startedAt)), el('td', '', duration(session.startedAt, session.endedAt)), el('td', '', number(session.turnCount)), healthCell, issueCell, actionCell); body.append(row); }); t.append(body); table.append(t); section.append(table); return section; }
 
 async function renderOverview(mount, data, ctx = {}) {
   if (!mount) return;
-  const api = ctx.api; const health = data || await api.get(`/api/health${rangeQuery('/api/health')}`);
-  const [trends, fixesPayload] = await Promise.all([api.get('/api/trends'), api.get('/api/fixes')]);
-  const sessions = health?.sessions || []; const rules = observedRules(sessions); const unknown = sessions.reduce((sum, s) => sum + (s?.score?.unknown || 0), 0); const fixable = rules.filter((item) => item.rule?.fix).length;
-  const root = el('div','rx-page'); const hero = el('header','rx-hero'); const intro = el('div'); intro.append(el('h1','', 'Make your AI sessions more effective.'), el('p','', 'SessionRx reads local session evidence, finds what is getting in the way, and helps you fix it.')); const chips = el('div','rx-cli-list'); const supported = (health?.collectors || []).filter((item) => item?.support === 'supported' && Number.isFinite(item.sessions)); chips.append(el('span','rx-chip',`${supported.length} CLIs detected`)); supported.forEach((item) => chips.append(el('span','rx-chip',item.cli))); hero.append(intro,chips); root.append(hero);
-  const cumulativeSessions = sessions.map((_, index) => index + 1);
-  const summaries = el('div','rx-grid rx-grid-four'); summaries.append(card('Sessions analyzed', 'sessions', number(health?.sessionsTotal), 'sessions in this scan', cumulativeSessions, null, 'accent'), card('Problems found', 'problems', number(rules.length), 'observed rule findings', sessions.map((s) => (s.rules || []).filter((r) => r?.evidence?.status === 'observed').length), null, 'warn'), card('Fixes available', 'fixes', number(fixable), 'observed findings with a fix', sessions.map((s) => (s.rules || []).filter((r) => r?.evidence?.status === 'observed' && r.fix).length), null, 'pass'), card('Not measured', 'unmeasured', number(unknown), 'checks that could not be measured', sessions.map((s) => s?.score?.unknown || 0), null, 'unknown')); root.append(summaries);
-  const healthCard = el('section','rx-card'); const healthHead = el('div','rx-card-head'); const healthTitle = el('div', 'rx-section-title tone-pass'); healthTitle.append(iconBadge('health'), el('h2','', 'Health summary')); healthHead.append(healthTitle, el('span','rx-chip', `${unknown} could not be measured`)); healthCard.append(healthHead, donut(health, trends)); const calculation = document.createElement('details'); calculation.className = 'calculation-details'; calculation.append(el('summary', '', 'How is this calculated?'), el('p', '', `The donut counts passed, problem, and unknown checks across the ${sessions.length} sessions shown here. It shows passed checks out of checks that were measured; unknown checks are not a pass.`)); healthCard.append(calculation, el('p','local-note', health?.scan?.note || 'Health counts come from the analyzed sessions in this scan.'));
-  const healthTrendRow = el('div', 'rx-grid rx-grid-two overview-health-row'); healthTrendRow.append(healthCard, trendsPreview(trends)); root.append(healthTrendRow);
-  const lower = el('div','rx-grid rx-grid-two'); const fixes = el('section','rx-card'); fixes.append(el('h2','', 'Top fixes')); const distinct = new Map(); rules.forEach((item) => { const key = item.rule?.fix || ruleLabel(item.rule); if (!distinct.has(key)) distinct.set(key, item); }); const top = [...distinct.values()].slice(0,5); top.forEach((item,index) => { const row=el('div','fix-row'); row.append(el('span','rank',index+1)); const copy=el('div'); copy.append(el('span','fix-title',ruleLabel(item.rule))); const plain = plainText(item.rule); if (plain) copy.append(el('span','fix-sub',plain)); const actions=el('div'); const preview=button('Preview','button button-sm'); preview.addEventListener('click',()=>openFixModal({fixId:item.rule.fix,rule:item.rule,session:item.session,api})); const apply=button('Apply','button button-primary button-sm'); apply.addEventListener('click',()=>openFixModal({fixId:item.rule.fix,rule:item.rule,session:item.session,api})); actions.append(preview,apply); row.append(copy,actions); fixes.append(row); }); if (!top.length) fixes.append(el('p','not-measured','No observed fixable findings were measured.')); lower.append(fixes);
-  const recent=el('section','rx-card'); recent.append(el('h2','', 'Recent sessions')); const table=el('div','rx-table-wrap'); const t=el('table','rx-table'); const headRow=el('tr'); ['CLI','Started','Duration','Turns','Health','Finding'].forEach((label)=>headRow.append(el('th','',label))); const thead=el('thead'); thead.append(headRow); t.append(thead); const body=el('tbody'); sessions.slice(0,8).forEach((session)=>{const row=el('tr'); row.addEventListener('click',()=>{location.hash=`#/sessions/${encodeURIComponent(session.sessionId || '')}`;}); const finding=(session.rules||[]).find((r)=>r?.evidence?.status==='observed'); const cliCell=el('td'); cliCell.append(cliIcon(session.cliName || session.cli), document.createTextNode(` ${session.cliName || session.cli || 'Unknown CLI'}`)); row.append(cliCell,el('td','',dateText(session.startedAt)),el('td','',duration(session.startedAt,session.endedAt)),el('td','',number(session.turnCount))); const healthCell=el('td'); healthCell.append(healthNode(session.score,true)); row.append(healthCell,el('td','',finding ? ruleLabel(finding) : 'No problem observed')); body.append(row);}); t.append(body); table.append(t); recent.append(table); lower.append(recent); root.append(lower); mount.replaceChildren(root);
+  const api = ctx.api;
+  const health = data || await api.get(`/api/health${rangeQuery('/api/health')}`);
+  const [trends, sessionsPayload, fixesPayload] = await Promise.all([
+    api.get(`/api/trends${rangeQuery('/api/trends')}`),
+    api.get(`/api/sessions?limit=8${rangeQuery('/api/sessions').replace(/^\?/, '&')}`),
+    api.get('/api/fixes'),
+  ]);
+  const totals = health?.windowTotals || {};
+  const days = health?.comparison?.windowDays;
+  const dayText = finite(days) ? `${Math.round(days)} days` : 'the selected window';
+  const series = health?.windowSeries || {};
+  const root = el('div', 'rx-page');
+  const hero = el('header', 'rx-hero');
+  const intro = el('div');
+  intro.append(el('h1', '', 'Make your AI sessions more effective.'), el('p', '', 'SessionRx reads local session evidence, finds what is getting in the way, and helps you fix it.'));
+  const supported = (Array.isArray(health?.collectors) ? health.collectors : []).filter((collector) => collector?.support === 'supported');
+  const cliList = el('div', 'rx-cli-list');
+  const cliSummary = el('span', 'rx-cli-summary');
+  cliSummary.append(el('span', 'rx-cli-mark', 'ϟ'), el('strong', '', `${supported.length} CLIs detected`));
+  cliList.append(cliSummary);
+  supported.forEach((collector) => cliList.append(el('span', 'rx-chip', collector.cli || collector.id || 'Unknown CLI')));
+  hero.append(intro, cliList);
+  root.append(hero);
+  const cards = el('div', 'rx-grid rx-grid-four');
+  cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), `in the last ${dayText}`, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', number(totals.fixableFindings), 'actionable improvements', series.fixableFindings, health.comparison, 'fixableFindings', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), 'could not be analyzed', series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
+  root.append(cards);
+  const trend = trends?.trend;
+  const callout = el('aside', 'trend-callout');
+  callout.append(el('h3', '', trend?.direction === 'unknown' ? 'Trend could not be determined' : 'Trend'), el('p', 'trend-summary', trend?.direction === 'unknown' ? (trend.reason || 'The trend could not be determined for this window.') : (trend.summary || 'The trend summary was not published.')));
+  const healthCard = el('section', 'rx-card');
+  const healthHead = el('div', 'rx-card-head');
+  healthHead.append(sectionTitle('Health summary', 'health', 'pass'));
+  healthCard.append(healthHead, donut({ ...totals, ruleTotals: health?.ruleTotals }, health?.comparison));
+  healthCard.querySelector?.('.health-grid')?.append(callout);
+  if (!healthCard.querySelector) healthCard.append(callout);
+  const mid = el('div', 'rx-grid rx-grid-two overview-health-row');
+  mid.append(healthCard, trendsPreview(trends));
+  root.append(mid);
+  const lower = el('div', 'rx-grid rx-grid-two overview-lower');
+  lower.append(topFixes(health, api, fixesPayload), recentSessions(sessionsPayload));
+  root.append(lower);
+  const footer = el('footer', 'rx-footer');
+  const version = health?.version || globalThis.__SESSION_RX_BOOTSTRAP__?.version;
+  footer.textContent = `SessionRx${typeof version === 'string' && version ? ` · v${version}` : ''} · Reads local session evidence. Nothing leaves this machine.`;
+  root.append(footer);
+  mount.replaceChildren(root);
 }
 
 registerPage('overview', renderOverview);

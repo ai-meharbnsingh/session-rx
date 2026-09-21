@@ -231,6 +231,7 @@ class ShimElement {
 
 const documentShim = {
   createElement: (tag) => new ShimElement(tag),
+  createElementNS: (_namespace, tag) => new ShimElement(tag),
   createTextNode: (data) => new ShimText(data),
   createDocumentFragment: () => new ShimFragment(),
   getElementById: () => null,
@@ -282,8 +283,10 @@ function metaMap(card) {
 const healthPage = await import("../public/js/pages/health.js");
 const trendsPage = await import("../public/js/pages/trends.js");
 const fixModal = await import("../public/js/components/fix-modal.js");
-const chart = await import("../public/js/components/chart.js");
+  const chart = await import("../public/js/components/chart.js");
+const overviewPage = await import("../public/js/pages/overview.js");
 const app = await import("../public/js/app.js");
+const ui = await import("../public/js/components/ui.js");
 
 /** The shipping card, under its real signature. */
 const renderCard = (session, api = null, rerender = null) => healthPage.sessionCard(session, api, rerender);
@@ -291,6 +294,29 @@ const renderCard = (session, api = null, rerender = null) => healthPage.sessionC
 // ==========================================================================
 // A. Static contract
 // ==========================================================================
+
+test("overview issue distribution percentages sum to 100 with largest-remainder rounding", () => {
+  const rounded = ui.largestRemainder([44.4, 44.4, 6.7, 4.8, 0.7, 0]);
+  assert.equal(rounded.reduce((sum, value) => sum + value, 0), 100);
+  assert.deepEqual(rounded, [44, 44, 7, 5, 0, 0]);
+});
+
+test("overview trend cards render the current level and its change", () => {
+  const card = overviewPage.trendCard("Cache hit rate", "cache", {
+    cache: { available: true, to: 98.2, changePercent: -0.1, secondHalfDays: 6 },
+  }, { cache: [] }, "hitRate", "Cache hits (%)", "pass");
+  assert.match(card.textContent, /98\.2%/);
+  assert.match(card.textContent, /↓ 0\.1% relative change/);
+});
+
+test("overview trend cards print the published reason when unavailable", () => {
+  const reason = "one half has no measured days with data, so no percentage is published";
+  const card = overviewPage.trendCard("Token spend", "spend", {
+    spend: { available: false, to: null, reason },
+  }, { spend: [] }, "total", "Total tokens per day", "accent");
+  assert.match(card.textContent, new RegExp(reason));
+  assert.doesNotMatch(card.textContent, /not comparable|—|\b0\b/);
+});
 
 test("the comment stripper keeps code and strings, and drops only comments", () => {
   assert.equal(stripJsComments('a // innerHTML\nb'), "a \nb");

@@ -207,6 +207,29 @@ function stubRegistry(collectors) {
   };
 }
 
+function syntheticHealth(ruleSets) {
+  return {
+    analyzeAll(collected) {
+      const sessions = (collected.supported ?? []).flatMap((entry) => (entry.sessions ?? []).map((session) => ({
+        ...session,
+        rules: ruleSets[session.sessionId] ?? [],
+      })));
+      return {
+        sessions,
+        subagentSessions: [],
+        subagentSessionsSetAside: { total: 0, orphans: 0, byCli: [] },
+        collectors: (collected.supported ?? []).map((entry) => ({ cli: entry.id, sessions: entry.sessions.length })),
+        promotions: [],
+        diagnostics: collected.diagnostics ?? [],
+      };
+    },
+  };
+}
+
+function syntheticRule(id, { status = "unknown", fix = null, name = id } = {}) {
+  return { id, name, fix, evidence: { status } };
+}
+
 const DEFAULT_COLLECTORS = () => [
   new FakeCollector("claude", [testSession()]),
   new FakeCollector("codex", [secretBearingSession()]),
@@ -605,6 +628,24 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.equal(typeof res.json.sessionWindow.matched, "number");
   });
 
+  it("withholds a spend percentage when one half has no measured day", async () => {
+    const rows = [1, 2, 3, 4].map((day) => ({ date: `2026-09-${String(day).padStart(2, "0")}`, hasData: day > 2, total: day > 2 ? 10 : null, highContextPct: 20, hitRate: 90 }));
+    const running = await server({ modules: { trends: { buildTrends: () => ({ charts: { context: rows, spend: rows, cache: rows } }) } } });
+    const res = await running.get("/api/trends");
+    assert.equal(res.json.trendDeltas.spend.available, false);
+    assert.ok(res.json.trendDeltas.spend.reason.length > 0);
+    assert.equal(res.json.trendDeltas.spend.changePercent, null);
+  });
+
+  it("withholds cache percentage change when the older-half mean is zero", async () => {
+    const rows = [0, 0, 50, 50].map((hitRate, index) => ({ date: `2026-09-${index + 1}`, hasData: true, total: 10, highContextPct: 20, hitRate }));
+    const running = await server({ modules: { trends: { buildTrends: () => ({ charts: { context: rows, spend: rows, cache: rows } }) } } });
+    const res = await running.get("/api/trends");
+    assert.equal(res.json.trendDeltas.cache.available, true);
+    assert.equal(res.json.trendDeltas.cache.from, 0);
+    assert.equal(res.json.trendDeltas.cache.changePercent, null);
+  });
+
   it("publishes only sessionWindow on /api/health", async () => {
     const running = await server();
     const res = await running.get("/api/health");
@@ -850,6 +891,143 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
     const running = await server({ collectors: [manyCollector()] });
     const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(1, 0))}&to=${encodeURIComponent(ISO(TOTAL, 23))}`);
     for (const rule of res.json.ruleTotals) assert.equal(rule.observed + rule.notObserved + rule.unknown, res.json.ruleTotalsSessions, rule.id);
+  });
+});
+
+describe("/api/health window-wide totals and comparison", () => {
+  function fixture(sessions, ruleSets, options = {}) {
+    return server({
+      collectors: [new FakeCollector("claude", sessions)],
+      modules: { health: syntheticHealth(ruleSets) },
+      ...options,
+    });
+  }
+
+  it("counts windowTotals across the full window, not the ten serialized cards", async () => {
+    const sessions = Array.from({ length: HEALTH_CARD_LIMIT + 1 }, (_, index) => testSession({
+      sessionId: `window-${index}`,
+      startedAt: ISO(index + 1, 9),
+      endedAt: ISO(index + 1, 10),
+    }));
+    const ruleSets = { [`window-${HEALTH_CARD_LIMIT}`]: [syntheticRule("late-finding", { status: "observed", fix: "fix-late" })] };
+    const running = await fixture(sessions, ruleSets);
+    const res = await running.get("/api/health");
+    assert.equal(res.json.sessions.length, HEALTH_CARD_LIMIT);
+    assert.equal(res.json.windowTotals.sessions, HEALTH_CARD_LIMIT + 1);
+    assert.equal(res.json.windowTotals.observedFindings, 1);
+    assert.equal(res.json.windowTotals.fixableFindings, 1);
+  });
+
+  it("publishes inclusive per-day window series, including an empty measured day", async () => {
+    const sessions = [1, 3].map((day) => testSession({ sessionId: `series-${day}`, startedAt: ISO(day, day === 3 ? 0 : 9), endedAt: ISO(day, day === 3 ? 1 : 10) }));
+    const ruleSets = {
+      "series-1": [syntheticRule("observed", { status: "observed", fix: "fix" })],
+      "series-3": [syntheticRule("unknown", { status: "unknown" })],
+    };
+    const res = (await (await fixture(sessions, ruleSets)).get("/api/health?from=2026-09-01&to=2026-09-03")).json;
+    assert.equal(res.windowSeries.days.length, 3);
+    for (const key of ["sessions", "observedFindings", "fixableFindings", "unknownChecks"]) assert.equal(res.windowSeries[key].length, 3);
+    assert.deepEqual(res.windowSeries.sessions, [1, 0, 1]);
+    assert.deepEqual(res.windowSeries.observedFindings, [1, 0, 0]);
+    assert.deepEqual(res.windowSeries.fixableFindings, [1, 0, 0]);
+    assert.deepEqual(res.windowSeries.unknownChecks, [0, 0, 1]);
+    assert.equal(res.windowTotals.sessions, res.windowSeries.sessions.reduce((a, b) => a + b, 0));
+    assert.equal(res.windowTotals.observedFindings, res.windowSeries.observedFindings.reduce((a, b) => a + b, 0));
+    assert.equal(res.windowTotals.fixableFindings, res.windowSeries.fixableFindings.reduce((a, b) => a + b, 0));
+    assert.equal(res.windowTotals.unknownChecks, res.windowSeries.unknownChecks.reduce((a, b) => a + b, 0));
+  });
+
+  it("counts an unparsable startedAt as undated rather than placing it in a day", async () => {
+    const sessions = [testSession({ sessionId: "undated", startedAt: "not-a-date", endedAt: "not-a-date" }), testSession({ sessionId: "dated", startedAt: ISO(2, 9) })];
+    const res = (await (await fixture(sessions, {})).get("/api/health")).json;
+    assert.equal(res.windowSeries.undated, 1);
+    assert.deepEqual(res.windowSeries.sessions, [1]);
+  });
+
+  it("ranks topFixes and excludes unfixable and never-observed rules", async () => {
+    const sessions = [1, 2, 3].map((day) => testSession({
+      sessionId: `rank-${day}`,
+      startedAt: ISO(day, 9),
+      endedAt: ISO(day, 10),
+    }));
+    const ruleSets = {
+      "rank-1": [
+        syntheticRule("rule-a", { status: "observed", fix: "fix-a", name: "A" }),
+        syntheticRule("rule-b", { status: "observed", fix: "fix-b", name: "B" }),
+        syntheticRule("no-fix", { status: "observed" }),
+      ],
+      "rank-2": [syntheticRule("rule-a", { status: "observed", fix: "fix-a", name: "A" })],
+      "rank-3": [
+        syntheticRule("rule-a", { status: "observed", fix: "fix-a", name: "A" }),
+        syntheticRule("rule-b", { status: "not-observed", fix: "fix-b", name: "B" }),
+        syntheticRule("never", { status: "not-observed", fix: "fix-never" }),
+      ],
+    };
+    const res = (await (await fixture(sessions, ruleSets)).get("/api/health")).json;
+    assert.deepEqual(res.topFixes, [
+      { id: "rule-a", name: "A", fixId: "fix-a", sessions: 3, findings: 3 },
+      { id: "rule-b", name: "B", fixId: "fix-b", sessions: 1, findings: 1 },
+    ]);
+  });
+
+  it("withholds comparison when the previous window predates bounded coverage", async () => {
+    const sessions = [15, 16].map((day) => testSession({ sessionId: `bound-${day}`, startedAt: ISO(day, 9), endedAt: ISO(day, 10) }));
+    const ruleSets = Object.fromEntries(sessions.map((session) => [session.sessionId, [syntheticRule("finding", { status: "observed", fix: "fix" })]]));
+    const running = await fixture(sessions, ruleSets, { scanLimit: 2 });
+    const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(15, 0))}&to=${encodeURIComponent(ISO(17, 0))}`);
+    assert.equal(res.json.coverage.completeFrom, "2026-09-15");
+    assert.equal(res.json.comparison.available, false);
+    assert.ok(res.json.comparison.reason.length > 0);
+    assert.equal(res.json.comparison.previous, null);
+    assert.equal(res.json.comparison.deltas, null);
+  });
+
+  it("computes a complete previous-window comparison and its deltas", async () => {
+    const sessions = [14, 15, 16].map((day) => testSession({ sessionId: `complete-${day}`, startedAt: ISO(day, 9), endedAt: ISO(day, 10) }));
+    const ruleSets = {
+      "complete-14": [syntheticRule("finding", { status: "observed", fix: "fix" })],
+      "complete-15": [syntheticRule("finding", { status: "observed", fix: "fix" })],
+      "complete-16": [syntheticRule("finding", { status: "not-observed", fix: "fix" })],
+    };
+    const running = await fixture(sessions, ruleSets, { scanLimit: 10 });
+    const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(15, 0))}&to=${encodeURIComponent(ISO(17, 0))}`);
+    assert.equal(res.json.comparison.available, true);
+    assert.equal(res.json.comparison.windowDays, 3);
+    assert.equal(res.json.comparison.previous.sessions, 1);
+    assert.equal(res.json.comparison.previous.observedFindings, 1);
+    assert.deepEqual(res.json.comparison.deltas.observedFindings, { from: 1, to: 1, changePercent: 0 });
+    assert.deepEqual(res.json.comparison.deltas.notObservedChecks, { from: 0, to: 1, changePercent: null });
+  });
+
+  it("uses an inclusive comparison window and moves the previous window back by its full length", async () => {
+    const running = await fixture([testSession({ sessionId: "only", startedAt: ISO(8, 9), endedAt: ISO(8, 10) })], {}, { scanLimit: 1 });
+    const res = await running.get("/api/health?from=2026-09-08&to=2026-09-22");
+    assert.equal(res.json.comparison.windowDays, 15);
+    assert.match(res.json.comparison.reason ?? "", /previous 15 days/);
+  });
+
+  it("uses null rather than zero or Infinity for a percentage rising from zero", async () => {
+    const sessions = [14, 15].map((day) => testSession({ sessionId: `zero-${day}`, startedAt: ISO(day, 9), endedAt: ISO(day, 10) }));
+    const ruleSets = { "zero-15": [syntheticRule("finding", { status: "observed", fix: "fix" })] };
+    const running = await fixture(sessions, ruleSets, { scanLimit: 10 });
+    const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(15, 0))}&to=${encodeURIComponent(ISO(16, 0))}`);
+    assert.equal(res.json.comparison.deltas.observedFindings.changePercent, null);
+    assert.notEqual(res.json.comparison.deltas.observedFindings.changePercent, Infinity);
+  });
+
+  it("passes null since to the collector even when from/to filters are supplied", async () => {
+    let receivedSince = "not-called";
+    const collector = new FakeCollector("claude", [testSession()]);
+    collector.collect = async (options = {}) => {
+      receivedSince = options.since;
+      return collector.sessions;
+    };
+    const running = await server({
+      collectors: [collector],
+      modules: { health: syntheticHealth({}) },
+    });
+    await running.get(`/api/health?from=${encodeURIComponent(ISO(18, 0))}&to=${encodeURIComponent(ISO(19, 0))}`);
+    assert.equal(receivedSince, null);
   });
 });
 

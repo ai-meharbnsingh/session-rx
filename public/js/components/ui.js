@@ -7,6 +7,17 @@ export function el(tag, className = '', value) {
 
 export const text = (value) => document.createTextNode(value == null ? '' : String(value));
 export const number = (value) => Number.isFinite(value) ? value.toLocaleString('en-US') : '— not measured';
+/** Convert shares into whole percentages without losing the total to rounding. */
+export function largestRemainder(values, total = 100) {
+  const exact = values.map((value) => Math.max(0, Number(value) || 0));
+  const floors = exact.map((value) => Math.floor(value));
+  let remainder = total - floors.reduce((sum, value) => sum + value, 0);
+  [...exact.keys()]
+    .sort((a, b) => (exact[b] - floors[b]) - (exact[a] - floors[a]) || a - b)
+    .slice(0, Math.max(0, remainder))
+    .forEach((index) => { floors[index] += 1; remainder -= 1; });
+  return floors;
+}
 export const dateText = (value) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 'not measured' : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -53,12 +64,22 @@ export function notMeasured(reason = 'this value was not recorded') {
 const svgNs = ['http:', String.fromCharCode(47, 47), 'www.w3.org/2000/svg'].join('');
 const createSvg = (tag) => typeof document.createElementNS === 'function' ? document.createElementNS(svgNs, tag) : document.createElement(tag);
 
-export function sparkline(values, className = '') {
+export function sparkline(values, className = '', options = {}) {
   const svg = createSvg('svg');
   svg.setAttribute('viewBox', '0 0 120 34'); svg.setAttribute('class', `sparkline ${className}`.trim()); svg.setAttribute('aria-hidden', 'true');
   const nums = values.filter((value) => Number.isFinite(value));
   if (!nums.length) return svg;
   const min = Math.min(...nums), max = Math.max(...nums), span = max - min || 1;
+  if (options.bars) {
+    nums.forEach((value, index) => {
+      const rect = createSvg('rect');
+      const width = Math.max(3, 92 / nums.length); const x = 2 + index / Math.max(1, nums.length) * 116;
+      const height = Math.max(3, ((value - min) / span) * 25 + 5);
+      rect.setAttribute('x', String(x)); rect.setAttribute('y', String(30 - height)); rect.setAttribute('width', String(width)); rect.setAttribute('height', String(height)); rect.setAttribute('rx', '1.5');
+      svg.append(rect);
+    });
+    return svg;
+  }
   const points = nums.map((value, index) => `${(index / Math.max(1, nums.length - 1)) * 116 + 2},${30 - ((value - min) / span) * 25}`).join(' ');
   const poly = createSvg('polyline');
   poly.setAttribute('points', points); poly.setAttribute('fill', 'none'); poly.setAttribute('vector-effect', 'non-scaling-stroke');

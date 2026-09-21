@@ -52,6 +52,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
+import { dayKeysEndingAt, localDayKey } from "./analyzer/trends.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -438,6 +439,218 @@ function sessionWindow(sessions, { cli, project, from, to } = {}) {
     to: applied && to ? to.toISOString() : null,
     excludedUndated: applied ? base.filter((session) => sessionTime(session) === null).length : 0,
     matched: matchedSessions.length,
+  };
+}
+
+function calculateWindowTotals(sessions) {
+  const totals = {
+    sessions: sessions.length,
+    observedFindings: 0,
+    fixableFindings: 0,
+    unknownChecks: 0,
+    notObservedChecks: 0,
+    measuredChecks: 0,
+  };
+  for (const session of sessions) {
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      const status = rule?.evidence?.status;
+      if (status === "observed") {
+        totals.observedFindings += 1;
+        if (rule.fix) totals.fixableFindings += 1;
+      } else if (status === "not-observed") {
+        totals.notObservedChecks += 1;
+      } else {
+        totals.unknownChecks += 1;
+      }
+    }
+  }
+  totals.measuredChecks = totals.observedFindings + totals.notObservedChecks;
+  return totals;
+}
+
+function calculateTopFixes(sessions) {
+  const byRule = new Map();
+  for (const session of sessions) {
+    const observedRules = new Set();
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      if (!rule?.fix || rule?.evidence?.status !== "observed") continue;
+      const current = byRule.get(rule.id) ?? {
+        id: rule.id,
+        name: rule.name ?? null,
+        fixId: rule.fix,
+        sessions: 0,
+        findings: 0,
+      };
+      current.findings += 1;
+      byRule.set(rule.id, current);
+      observedRules.add(rule.id);
+    }
+    for (const ruleId of observedRules) byRule.get(ruleId).sessions += 1;
+  }
+  return [...byRule.values()].sort(
+    (a, b) => b.sessions - a.sessions || b.findings - a.findings || a.id.localeCompare(b.id),
+  );
+}
+
+function localCalendarDayCount(from, to) {
+  const start = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+  let count = 1;
+  while (start < end) {
+    start.setDate(start.getDate() + 1);
+    count += 1;
+  }
+  return count;
+}
+
+function calculateWindowSeries(sessions, query) {
+  const dated = sessions
+    .map((session) => {
+      const started = Date.parse(session?.startedAt ?? "");
+      return Number.isFinite(started) ? new Date(started) : null;
+    })
+    .filter(Boolean);
+  let days = [];
+  if (query.from instanceof Date && query.to instanceof Date) {
+    days = dayKeysEndingAt(query.to, localCalendarDayCount(query.from, query.to));
+  } else if (dated.length > 0) {
+    const keys = dated.map(localDayKey).sort();
+    const first = new Date(`${keys[0]}T12:00:00`);
+    const last = new Date(`${keys[keys.length - 1]}T12:00:00`);
+    days = dayKeysEndingAt(last, localCalendarDayCount(first, last));
+  }
+  const index = new Map(days.map((day, i) => [day, i]));
+  const series = {
+    days,
+    sessions: new Array(days.length).fill(0),
+    observedFindings: new Array(days.length).fill(0),
+    fixableFindings: new Array(days.length).fill(0),
+    unknownChecks: new Array(days.length).fill(0),
+    undated: 0,
+  };
+  for (const session of sessions) {
+    const started = Date.parse(session?.startedAt ?? "");
+    if (!Number.isFinite(started)) {
+      series.undated += 1;
+      continue;
+    }
+    const day = index.get(localDayKey(new Date(started)));
+    if (day === undefined) continue;
+    series.sessions[day] += 1;
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      const status = rule?.evidence?.status;
+      if (status === "observed") {
+        series.observedFindings[day] += 1;
+        if (rule.fix) series.fixableFindings[day] += 1;
+      } else if (status !== "not-observed") {
+        series.unknownChecks[day] += 1;
+      }
+    }
+  }
+  return series;
+}
+
+function calculateCoverage(result) {
+  const limit = result.scan.limitPerCollector;
+  const boundedClis = new Set(
+    (Array.isArray(result.analysis?.collectors) ? result.analysis.collectors : [])
+      .filter((collector) => Number.isInteger(collector?.sessions) && collector.sessions >= limit)
+      .map((collector) => collector.cli),
+  );
+  const oldestByCli = new Map();
+  for (const session of Array.isArray(result.analysis?.sessions) ? result.analysis.sessions : []) {
+    if (!boundedClis.has(session?.cli)) continue;
+    const startedAt = Date.parse(session?.startedAt ?? "");
+    if (!Number.isFinite(startedAt)) continue;
+    const existing = oldestByCli.get(session.cli);
+    if (existing === undefined || startedAt < existing) oldestByCli.set(session.cli, startedAt);
+  }
+  const oldest = [...oldestByCli.values()];
+  const completeFrom = oldest.length
+    ? new Date(Math.max(...oldest)).toISOString().slice(0, 10)
+    : null;
+  return {
+    atLimit: result.scan.atLimit,
+    completeFrom,
+    reason: completeFrom === null
+      ? null
+      : `the scan reached its ${limit}-per-CLI bound and did not read back before ${completeFrom}`,
+  };
+}
+
+function calculateComparison(query, coverage, scan, allSessions, windowTotals) {
+  const explicitWindow = query.from instanceof Date && query.to instanceof Date;
+  const windowDays = explicitWindow ? localCalendarDayCount(query.from, query.to) : null;
+  const windowMs = explicitWindow ? windowDays * 86400000 : null;
+  const previousFrom = explicitWindow ? new Date(query.from) : null;
+  if (previousFrom) previousFrom.setDate(previousFrom.getDate() - windowDays);
+  const previousTo = explicitWindow ? query.from : null;
+  const previousStart = previousFrom ? previousFrom.toISOString().slice(0, 10) : null;
+  const blockedByCoverage = coverage.completeFrom !== null
+    && previousStart < coverage.completeFrom;
+  const available = explicitWindow && !blockedByCoverage;
+  if (!available) {
+    const reason = !explicitWindow
+      ? "an explicit from and to window were not supplied, so the previous window cannot be compared"
+      : `the scan reached its ${scan.limitPerCollector}-per-CLI bound and did not read back to ${previousStart}, so the previous ${windowDays} days cannot be compared`;
+    return { available: false, reason, windowDays, previous: null, deltas: null };
+  }
+  const previous = calculateWindowTotals(filterSessions(allSessions, { from: previousFrom, to: new Date(previousTo.getTime() - 1) }));
+  const deltas = {};
+  for (const key of Object.keys(windowTotals)) {
+    const from = previous[key];
+    const to = windowTotals[key];
+    deltas[key] = {
+      from,
+      to,
+      changePercent: from === 0 ? null : Math.round(((to - from) / from) * 1000) / 10,
+    };
+  }
+  return { available: true, reason: null, windowDays, previous, deltas };
+}
+
+function calculateTrendDelta(rows, metric) {
+  const half = Math.floor(rows.length / 2);
+  const olderRows = rows.slice(0, half);
+  const newerRows = rows.slice(rows.length - half);
+  const older = olderRows.filter((row) => row?.hasData === true && Number.isFinite(row?.[metric])).map((row) => row[metric]);
+  const newer = newerRows.filter((row) => row?.hasData === true && Number.isFinite(row?.[metric])).map((row) => row[metric]);
+  const reasonPrefix = rows.length % 2 === 1 ? "the middle day was dropped; " : "";
+  const reason = (suffix) => `${reasonPrefix}${suffix}`;
+  if (older.length === 0 || newer.length === 0) {
+    return {
+      metric,
+      from: null,
+      to: null,
+      changePercent: null,
+      firstHalfDays: older.length,
+      secondHalfDays: newer.length,
+      available: false,
+      reason: reason("one half has no measured days with data, so no percentage is published"),
+    };
+  }
+  const mean = (values) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const from = Math.round(mean(older) * 100) / 100;
+  const to = Math.round(mean(newer) * 100) / 100;
+  return {
+    metric,
+    from,
+    to,
+    changePercent: from === 0 ? null : Math.round(((to - from) / from) * 1000) / 10,
+    firstHalfDays: older.length,
+    secondHalfDays: newer.length,
+    available: true,
+    reason: from === 0
+      ? reason("the older-half mean is 0, so a percentage change is undefined")
+      : reason("arithmetic over measured days only"),
+  };
+}
+
+function calculateTrendDeltas(charts) {
+  return {
+    context: calculateTrendDelta(charts.context ?? [], "highContextPct"),
+    spend: calculateTrendDelta(charts.spend ?? [], "total"),
+    cache: calculateTrendDelta(charts.cache ?? [], "hitRate"),
   };
 }
 
@@ -1081,7 +1294,7 @@ export function createApp(options = {}) {
     if (!registry) return null;
     const requested = query.limit ?? null;
     const limit = requested ?? state.scanLimit;
-    const since = query.since ?? undefined;
+    const since = query.since ?? null;
     const collected = await state.scanCache.read(
       scanCacheKey({ since, limit }),
       () => (typeof registry.detectAll === "function" ? registry.detectAll() : null),
@@ -1207,6 +1420,10 @@ export function createApp(options = {}) {
     const sessionWindowValue = sessionWindow(allSessions, query);
     const windowedSessions = filterSessions(allSessions, { from: query.from, to: query.to });
     const cardSessions = sortSessions(windowedSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
+    const windowTotals = calculateWindowTotals(windowedSessions);
+    const windowSeries = calculateWindowSeries(windowedSessions, query);
+    const coverage = calculateCoverage(result);
+    const comparison = calculateComparison(query, coverage, result.scan, allSessions, windowTotals);
     const ruleTotalsById = new Map();
     for (const session of windowedSessions) {
       const rules = Array.isArray(session?.rules) ? session.rules : [];
@@ -1234,6 +1451,11 @@ export function createApp(options = {}) {
       sessionsTotal: Array.isArray(result.analysis.sessions) ? result.analysis.sessions.length : null,
       ruleTotals,
       ruleTotalsSessions: Array.isArray(result.analysis.sessions) ? windowedSessions.length : null,
+      windowTotals,
+      windowSeries,
+      topFixes: calculateTopFixes(windowedSessions),
+      coverage,
+      comparison,
       collectors: result.analysis.collectors,
       // F-023/F-025: how many sessions were set aside as sub-agents of another
       // session. `sessions` above is the user's OWN sessions only, so without
@@ -1363,6 +1585,7 @@ export function createApp(options = {}) {
     // `tools: []` to satisfy the table would be a fabricated series.
     await sendJson(res, 200, {
       ...built,
+      trendDeltas: calculateTrendDeltas(built.charts ?? {}),
       scan: collectedFor.scan,
       sessionWindow: sessionWindow(collectedSessions(collectedFor.collected), { cli, from, to }),
       diagnostics: collectedFor.collected.diagnostics ?? [],

@@ -26,7 +26,7 @@ export const rangeQuery = (route) => {
   const params = new URLSearchParams({ [scanParam]: String(definition.scan) });
   if (definition.days) {
     const now = Date.now();
-    params.set(['f', 'r', 'o', 'm'].join(''), new Date(now - definition.days * 86400000).toISOString());
+    params.set(['f', 'r', 'o', 'm'].join(''), new Date(now - (definition.days - 1) * 86400000).toISOString());
     params.set('to', new Date(now).toISOString());
   }
   return `?${params.toString()}`;
