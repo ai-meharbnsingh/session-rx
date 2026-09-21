@@ -30,7 +30,7 @@ checks against each recent session, and offers a local fix for the ones that
 fail. The six checks are context pressure, cache hit rate, repeated tool work,
 large tool results, long rising context, and sub-agent concurrency.
 
-![The Health page: summary counts and a session card showing all three verdicts side by side — PROBLEM FOUND in amber with Preview/Apply buttons, COULD NOT BE MEASURED twice in hatched grey each stating it is not a pass, and PASSED three times in green](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-health.png)
+![Overview showing detected CLIs, summary cards with sessions analyzed and problems found, checks that could not be measured, and health donut displaying the three verdict states — problems found, passed, not measured](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
 
 ### Every check returns one of three answers
 
@@ -41,6 +41,10 @@ This is the part most likely to mislead you, so it comes first.
 | `observed` | a problem was found, with the numbers that show it | no |
 | `not-observed` | the check ran and found nothing wrong | yes |
 | `unknown` | the check could not run — the log does not record what it needs | **no** |
+
+![One session card displaying all three verdict types: a problem found row in amber with Preview/Apply buttons, a could not be measured row in hatched grey stating it is not a pass, and four passed rows in green, with header showing 4/6 checks passed, 1 problem observed, 1 could not be measured](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-health.png)
+
+*This is one real session; the grey row is a check that could not run, not a pass.*
 
 `unknown` is not a pass. It is the tool refusing to turn an absence of evidence
 into a clean bill of health, and it always carries a sentence saying what could

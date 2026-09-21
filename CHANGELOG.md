@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-09-21
+
+### Changed
+
+- **Three pages rebuilt against supplied mockups**: Overview, Sessions, and Fix Workflow. Overview is now the landing page; Health, Trends and Report untouched and still work.
+- **The score changed from a single number to passed-of-measured, because a single figure forces a choice about whether `unknown` counts as pass or fail.** Every mockup showed "78 Session Health" or "62/100". But a session's score is `{total, passed, observed, unknown}` — collapsing to one number forces a lie: count unknown as pass and the honesty rule vanishes; count it as failure and a check that could not run gets reported as failed. The donut now shows passed-of-measured, e.g., `44/48 measured`, with unknown count displayed beside it, never folded inside. This decision and four others are documented in `docs/UI_DATA_CONTRACT.md` and are binding on page modules: trend deltas render only where both `from` and `to` are supplied; "total tokens" is labelled "total context read across all turns" (its actual meaning); anything the mockups showed with no data source behind it was cut, never invented.
+- **Colour now carries meaning**: blue for a plain count, amber for problems, green for available fixes, grey with a dashed stroke for unmeasured. Session trend lines take their session's verdict colour. Finding pills are now actually pill-shaped instead of circles with text stacked vertically inside.
+
+### Fixed
+
+- **A chart invented its own data from a loop index.** The Fix page's "Occurrences in recent sessions" chart set bar heights from a for-loop counter — seven bars, fixed heights, unrelated to any measurement. This was the most serious bug in this release on the one tool whose whole claim is that it never shows a figure it cannot justify. The chart now draws real per-day counts from each finding's session start time. Where no session carries a start time it says so instead of drawing anything.
+- An internal rule identifier like `BP-003.04` escaped into user-facing body text. These ids are deliberate in the analyzer as evidence of record and render only inside collapsed evidence sections; they do not appear in prose a reader sees by default.
+- With only two days in range, the occurrence histogram drew two bars each as wide as the card. Bar width is now capped.
+- Overview page "Recent sessions" table inherited a 1,100px minimum width in a ~940px column, clipping its last column mid-word — "No problem observed" rendered as "No problem observec". The width floor is removed. The table now fits its container at 560px, 700px, 860px, 1000px, 1100px, 1280px and 1440px wide; the rule hiding two columns below 700px still applies.
+- "Top fixes" and "Recent sessions" cards sit side by side in CSS grid, which stretched both cards to the taller one's height. On machines whose scan found only one or two distinct fixes, the Top fixes card padded out with ~500px of empty space. Each card's height now follows its own content.
+
+### Repository (not shipped in the npm package)
+
+- README screenshots recaptured against the redesigned interface: new Overview page image, and replacement Health page showing one real session carrying all three verdicts at once.
+- Test suite: 828 passing, 0 failing.
+
 ## [0.1.1] - 2026-09-21
 
 ### Fixed
