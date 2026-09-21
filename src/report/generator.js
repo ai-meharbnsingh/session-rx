@@ -419,14 +419,20 @@ function evidenceTable(values) {
     "| Observation | Value | Session | Window |",
     "| --- | --- | --- | --- |",
   ];
-  for (const entry of rows) {
+  for (let index = 0; index < rows.length; index += 1) {
+    const entry = rows[index];
     let value = fmtEvidenceValue(entry);
     if (str(entry?.label).trim() === "cache hit rate") {
-      const count = rows.find((candidate) =>
-        str(candidate?.label).trim() === "turns carrying a cache-read count" &&
-        str(candidate?.sessionId).trim() === str(entry?.sessionId).trim() &&
-        typeof candidate?.value === "number" && Number.isFinite(candidate.value),
-      );
+      let count = null;
+      for (let next = index + 1; next < rows.length; next += 1) {
+        const candidate = rows[next];
+        if (str(candidate?.label).trim() === "cache hit rate") break;
+        if (str(candidate?.label).trim() === "turns carrying a cache-read count" &&
+            typeof candidate?.value === "number" && Number.isFinite(candidate.value)) {
+          count = candidate;
+          break;
+        }
+      }
       if (count && count.value < 5) {
         value += " — rate is not meaningful at fewer than 5 cache-read-carrying turns";
       }

@@ -1,8 +1,8 @@
-const ROUTES = new Set(['health', 'trends', 'sessions', 'report']);
+const ROUTES = new Set(['overview', 'health', 'trends', 'sessions', 'fixes', 'report']);
 const pages = new Map();
 
 export const store = {
-  data: { health: null, sessions: null, trends: null, report: null, collectors: null },
+  data: { overview: null, health: null, sessions: null, trends: null, fixes: null, report: null, collectors: null },
   loading: false,
   error: null,
 };
@@ -60,6 +60,7 @@ export const api = {
 
 const routeFromHash = () => {
   const candidate = globalThis.location.hash.replace(/^#\/?/, '').split('/')[0];
+  if (!candidate) return 'overview';
   return ROUTES.has(candidate) ? candidate : 'health';
 };
 
@@ -104,7 +105,7 @@ const loadCollectors = async () => {
 };
 
 const loadRouteData = async (route) => {
-  const endpoint = { health: '/api/health', trends: '/api/trends', sessions: '/api/sessions', report: '/api/report' }[route];
+  const endpoint = { overview: null, health: '/api/health', trends: '/api/trends', sessions: '/api/sessions', fixes: null, report: '/api/report' }[route];
   if (!endpoint || store.data[route]) return store.data[route];
   store.loading = true;
   showStatus('Loading local session evidence…', 'loading');
@@ -127,6 +128,19 @@ export const navigate = (route) => {
   globalThis.location.hash = `#/${next}`;
 };
 
+/** Runtime contract guard: source scans cannot catch evidence text that is
+ * legitimate in the rule catalogue but unsafe when it reaches a new page. */
+export function assertRenderedDomPlainLanguage(root) {
+  const text = root?.textContent || '';
+  const forbidden = /DIS-\d|BP-\d|\bF-\d|sidechain|linkage|denominator|corpus|magnitude|\{count\}|\{pct\}|\[object (?:HTML|SVG)/i;
+  const match = text.match(forbidden);
+  if (match) {
+    root.dataset.uiContractViolation = match[0];
+    return false;
+  }
+  return true;
+}
+
 const renderRoute = async () => {
   const route = routeFromHash();
   document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('is-active', tab.dataset.route === route));
@@ -134,11 +148,14 @@ const renderRoute = async () => {
   try {
     const data = await loadRouteData(route);
     const render = pages.get(route);
-    if (render) await render(document.querySelector(`#page-${route}`), data, { store, api, navigate });
+    if (render) {
+      const mount = document.querySelector(`#page-${route}`);
+      await render(mount, data, { store, api, navigate });
+      if (['overview', 'sessions', 'fixes'].includes(route)) assertRenderedDomPlainLanguage(mount);
+    }
     showStatus('', '');
   } catch (error) { showStatus(error.message || 'Unable to load session evidence.', 'error'); }
 };
 
 globalThis.addEventListener('hashchange', renderRoute);
 globalThis.addEventListener('DOMContentLoaded', () => { loadCollectors(); renderRoute(); });
-

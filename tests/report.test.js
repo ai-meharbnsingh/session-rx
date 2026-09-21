@@ -69,6 +69,47 @@ test("date range, per-CLI session counts and trend direction all appear", () => 
   assert.match(md, /Reason: mean session context rose/);
 });
 
+test("cache-length annotation pairs each rate with the next count in its row group", () => {
+  const md = reportOf({
+    rules: [{
+      id: "cache-hit",
+      name: "Low cache hit",
+      severity: "warn",
+      evidence: {
+        status: "observed",
+        values: [
+          { label: "cache hit rate", value: 0, unit: "ratio", sessionId: "session-a" },
+          { label: "cache reads", value: 0, unit: "tokens" },
+          { label: "turns carrying a cache-read count", value: 1, unit: "count" },
+          { label: "cache hit rate", value: 0.2, unit: "ratio", sessionId: "session-b" },
+          { label: "cache reads", value: 10, unit: "tokens" },
+          { label: "turns carrying a cache-read count", value: 8, unit: "count" },
+        ],
+      },
+    }],
+  });
+
+  assert.equal((md.match(/rate is not meaningful at fewer than 5 cache-read-carrying turns/g) ?? []).length, 1);
+  assert.match(md, /\| cache hit rate \| 0\.00 — rate is not meaningful at fewer than 5 cache-read-carrying turns \| session-a \|/);
+  assert.match(md, /\| cache hit rate \| 0\.20 \| session-b \|/);
+});
+
+test("cache-length fallback remains when no turn-count row exists", () => {
+  const md = reportOf({
+    rules: [{
+      id: "cache-hit",
+      name: "Low cache hit",
+      severity: "warn",
+      evidence: {
+        status: "observed",
+        values: [{ label: "cache hit rate", value: 0.2, unit: "ratio", sessionId: "session-a" }],
+      },
+    }],
+  });
+
+  assert.match(md, /The report could not see how many turns carried a cache-read count/);
+});
+
 // --------------------------------------------------------------------------
 // L8 / F-023: the sessions counted are the user's own, and the number left out
 // is printed rather than implied

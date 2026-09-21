@@ -40,6 +40,8 @@
  */
 
 import { registerPage, api as appApi } from '../app.js';
+import { openFixModal } from '../components/fix-modal.js';
+import { dateText, duration, el as uiEl, healthNode, cliIcon, ruleLabel, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
 import {
   callout,
   durationText,
@@ -92,6 +94,7 @@ const state = {
   loading: false,
   error: null,
   observer: null,
+  selected: null,
 };
 
 /**
@@ -125,6 +128,43 @@ const COLUMNS = [
       const when = whenText(session?.startedAt);
       if (when === null) td.append(notMeasured('no start timestamp was recorded for this session'));
       else td.append(text(when));
+      return td;
+    },
+  },
+  {
+    key: 'sessionId',
+    label: 'Session',
+    type: 'text',
+    value: (session) => session?.sessionId || null,
+    cell: (session) => { const td = el('td'); td.append(session?.sessionId ? text(session.sessionId) : notMeasured('no session id was recorded')); return td; },
+  },
+  {
+    key: 'findings',
+    label: 'Key findings',
+    type: 'text',
+    value: (session) => (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed').length,
+    cell: (session) => { const td = el('td'); const findings = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed'); if (!findings.length) td.append(el('span', 'finding-pill finding-clear', 'No problems')); else findings.slice(0, 3).forEach((rule) => td.append(el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, ruleLabel(rule)))); return td; },
+  },
+  {
+    key: 'trend',
+    label: 'Trend',
+    type: 'number',
+    value: (session) => session?.turns?.length || session?.turnCount || null,
+    cell: (session) => {
+      const td = el('td');
+      const values = (session?.turns || []).map((turn) => turn?.context?.inputTokens).filter(Number.isFinite);
+      if (values.length >= 2) {
+        // Colour the line by how the session scored, so the column reads at a
+        // glance instead of being twenty identical strokes.
+        const score = session?.score || {};
+        const measured = Math.max(0, (score.total || 0) - (score.unknown || 0));
+        const tone = measured === 0 ? 'unknown' : (score.observed || 0) >= 2 ? 'crit' : (score.observed || 0) === 1 ? 'warn' : 'pass';
+        td.append(uiSparkline(values, `tone-${tone}`));
+      } else {
+        // An empty cell reads as a rendering failure. A dash says what is true:
+        // fewer than two turns carried a context size, so there is no line to draw.
+        td.append(notMeasured('fewer than two turns in this session recorded a context size, so there is no trend to draw'));
+      }
       return td;
     },
   },
@@ -178,62 +218,8 @@ const COLUMNS = [
     },
   },
   {
-    key: 'cacheRead',
-    label: 'Cache read',
-    type: 'number',
-    num: true,
-    // The analyzer's own evidence, not a recount: `cache-hit` reports the summed
-    // cache reads whenever it could measure them at all.
-    value: (session) => {
-      const value = evidenceValueByLabel(ruleById(session, 'cache-hit'), 'cache reads');
-      return Number.isFinite(value?.value) ? value.value : null;
-    },
-    cell: (session) => {
-      const td = el('td', 'num');
-      const rule = ruleById(session, 'cache-hit');
-      const value = evidenceValueByLabel(rule, 'cache reads');
-      if (value) td.append(evidenceValueNode(value));
-      else td.append(notMeasured(rule?.evidence?.reason ?? 'no cache counter was recorded for this session'));
-      return td;
-    },
-  },
-  {
-    key: 'avgContext',
-    label: 'Avg context',
-    type: 'number',
-    num: true,
-    // Two honest shapes: absolute tokens, or — for a CLI that reports only a
-    // fraction (DIS-005) — the native fraction. They are not mixed on one
-    // scale: the fraction sorts on its own 0..1 range and the cell says which
-    // it is, because 0.42 and 42,000 are not comparable numbers.
-    value: (session) => {
-      const rule = ruleById(session, 'context-pressure');
-      const tokens = evidenceValueByLabel(rule, 'average per-turn context');
-      if (Number.isFinite(tokens?.value)) return tokens.value;
-      const fraction = evidenceValueByLabel(rule, 'average native context fraction reported by the CLI');
-      return Number.isFinite(fraction?.value) ? fraction.value : null;
-    },
-    cell: (session) => {
-      const td = el('td', 'num');
-      const rule = ruleById(session, 'context-pressure');
-      const tokens = evidenceValueByLabel(rule, 'average per-turn context');
-      if (tokens) {
-        td.append(evidenceValueNode(tokens));
-        return td;
-      }
-      const fraction = evidenceValueByLabel(rule, 'average native context fraction reported by the CLI');
-      if (fraction) {
-        td.append(evidenceValueNode(fraction));
-        td.append(el('span', 'inferred-tag', 'share, not tokens'));
-        return td;
-      }
-      td.append(notMeasured(rule?.evidence?.reason ?? 'no context reading was recorded for this session'));
-      return td;
-    },
-  },
-  {
     key: 'score',
-    label: 'Health score',
+    label: 'Health',
     type: 'number',
     num: true,
     // Passed count is the sort key. An unknown is NOT counted as passed, so a
@@ -242,20 +228,7 @@ const COLUMNS = [
     value: (session) => (Number.isFinite(session?.score?.passed) ? session.score.passed : null),
     cell: (session) => {
       const td = el('td', 'num');
-      const score = session?.score ?? {};
-      const total = Number.isFinite(score?.total) ? score.total : 0;
-      const passed = Number.isFinite(score?.passed) ? score.passed : null;
-      const unknown = Number.isFinite(score?.unknown) ? score.unknown : 0;
-      if (passed === null) {
-        td.append(notMeasured('no rule was scored for this session'));
-        return td;
-      }
-      td.append(el('strong', null, `${passed}/${total}`));
-      if (unknown > 0) {
-        const badge = el('span', 'badge badge-sm badge-unknown', `${unknown} unknown`);
-        badge.setAttribute('title', `${unknown} check(s) could not be measured. They are not passes.`);
-        td.append(badge);
-      }
+      td.append(healthNode(session?.score, true));
       return td;
     },
   },
@@ -350,6 +323,7 @@ function sessionRows(session, api, redraw) {
   const tr = el('tr');
   tr.dataset.sessionId = id;
   tr.dataset.cli = session?.cli ?? 'unknown';
+  tr.addEventListener('click', () => { state.selected = session; redraw(); });
 
   const toggleCell = el('td');
   const toggle = el('button', 'button button-quiet button-sm', expanded ? '−' : '+');
@@ -693,11 +667,24 @@ function draw() {
   }
 
   const card = el('section', 'card');
-  const head = el('div', 'card-head');
+  const head = el('div', 'card-head legacy-toolbar');
   head.append(toolbar(all, sorted, total, draw));
   card.append(head);
   card.append(drawTable(sorted, api, draw));
-  stack.append(card);
+  const layout = el('div', 'session-layout');
+  const filters = el('aside', 'rx-card filter-panel');
+  filters.append(el('h2', '', 'Filters'));
+  filters.append(el('p', 'filter-note', 'Counts describe loaded rows only.'));
+  const cliGroup = el('div', 'filter-group'); cliGroup.append(el('h3', '', 'CLI'));
+  const cliCounts = new Map(); all.forEach((session) => cliCounts.set(session?.cli, (cliCounts.get(session?.cli) || 0) + 1));
+  cliGroup.append(filterChoice('All sessions', all.length, state.cli === 'all', () => { state.cli = 'all'; draw(); }));
+  [...cliCounts.entries()].filter(([cli]) => cli).forEach(([cli,count]) => cliGroup.append(filterChoice(cli, count, state.cli === cli, () => { state.cli = cli; draw(); })));
+  filters.append(cliGroup);
+  const healthGroup = el('div','filter-group'); healthGroup.append(el('h3','','Health status')); healthGroup.append(filterChoice('Problems found', all.filter((s)=>(s?.score?.observed||0)>0).length, false, null), filterChoice('Could not be measured', all.filter((s)=>(s?.score?.unknown||0)>0).length, false, null)); filters.append(healthGroup);
+  const issueGroup = el('div','filter-group'); issueGroup.append(el('h3','','Issue type')); const issueNames = new Map(); all.forEach((s)=>(s.rules||[]).filter((r)=>r?.evidence?.status==='observed').forEach((r)=>issueNames.set(ruleLabel(r),(issueNames.get(ruleLabel(r))||0)+1))); [...issueNames.entries()].slice(0,5).forEach(([name,count])=>issueGroup.append(filterChoice(name,count,false,null))); filters.append(issueGroup); layout.append(filters);
+  layout.append(card);
+  if (state.selected) layout.append(detailPanel(state.selected, api, draw));
+  stack.append(layout);
 
   if (!sorted.length) {
     stack.append(el('p', 'empty-state', `No session loaded so far came from ${state.cli}.`));
@@ -707,6 +694,14 @@ function draw() {
   if (strip) stack.append(strip);
   mount.append(stack);
   observe(strip, api, draw);
+}
+
+function filterChoice(label, count, checked, onChange) {
+  const row = el('label','filter-option'); const input = el('input'); input.type='checkbox'; input.checked=checked; input.setAttribute('aria-label', label); if (onChange) input.addEventListener('change', onChange); row.append(input, el('span','',label), el('strong','',String(count))); return row;
+}
+
+function detailPanel(session, api, redraw) {
+  const panel = el('aside','rx-card detail-panel'); const close=uiButton('Close','button button-quiet'); close.addEventListener('click',()=>{state.selected=null; redraw();}); const head=el('div','rx-card-head'); head.append(el('h2','', 'Session details'),close); panel.append(head); const identity=el('div'); identity.append(cliIcon(session?.cliName || session?.cli),el('strong','',` ${session?.cliName || session?.cli || 'Unknown CLI'}`)); panel.append(identity,el('p','rx-label',dateText(session?.startedAt)),el('p','rx-label',`${duration(session?.startedAt,session?.endedAt)} · ${Number.isFinite(session?.turnCount) ? session.turnCount : 'not measured'} turns`),healthNode(session?.score)); const tabs=el('div','tab-strip'); ['Diagnosis','Evidence','Metrics','Timeline'].forEach((name,index)=>{const tab=uiButton(name,'tab-button'); if(index===0) tab.classList.add('is-active'); tabs.append(tab);}); panel.append(tabs); const observed=(session?.rules||[]).filter((r)=>r?.evidence?.status==='observed'); const unknown=(session?.rules||[]).filter((r)=>r?.evidence?.status==='unknown'); panel.append(el('h3','', 'Findings')); observed.forEach((rule)=>{const row=el('div','fix-row'); row.append(el('span','rank','!'),el('span','fix-title',ruleLabel(rule)),el('span','severity',rule?.severity==='error'?'High':'Medium')); panel.append(row);}); if (unknown.length) panel.append(el('p','not-measured',`${unknown.length} checks could not be measured. They are not passes.`)); const suggested=observed.filter((r)=>r.fix); if(suggested.length){panel.append(el('h3','', 'Suggested fixes')); suggested.forEach((rule)=>{const apply=uiButton('Review'); apply.addEventListener('click',()=>openFixModal({fixId:rule.fix,rule,session,api})); const row=el('div','fix-row'); row.append(el('span','fix-title',ruleLabel(rule)),apply); panel.append(row);});} return panel;
 }
 
 /**
