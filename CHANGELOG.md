@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Sessions table rendered roughly three rows per screen.** The health verdict is an honest ~60-character sentence, but its column was pinned at 78px under `table-layout: fixed` while the empty expand-row column took 372px, and `overflow-wrap: anywhere` broke the sentence mid-word. Measured at 1920px: the pill was 50px wide and up to 357px tall, average row height 288px. All ten columns are now sized, the pill wraps on word boundaries, and the same measurement gives a 242x56px pill and a 63px average row. The verdict text is unchanged — shortening it to buy column width would have traded a layout bug for an honesty bug.
+- **The "Fixes available" card's arrow could point the opposite way to its own number.** The value came from `distinctFixes.count` while its delta chip and sparkline came from `fixableFindings`, a different quantity: a window where distinct fixes fell from 4 to 3 rendered `3` with a 63.8% increase. The API publishes no previous-window figure for distinct fixes, so the chip now reads "not comparable" and names why, and the sparkline is gone. Sessions and Problems keep their deltas; they have the data.
+- **A per-hour token rate was published to a tenth of a token** (`1,279,557.4 tokens per hour`), across 45 evidence rows on five pages. It now publishes whole tokens per hour. A rate that could not be computed is still null, never 0.
+- **The token-spend headline still carried nine significant figures on a seven-day mean.** It now leads with three (`336M`) and prints the exact whole-token figure beneath it, so the precision is reduced without the value being hidden.
+- **One rule reported two different severities on the same screen.** The Sessions page kept its own severity map alongside the shared one, so `long-rising-context` — declared `critical` — read "High" in Key findings and "Medium" in the detail panel. Both now read the shared helper.
+- **"Fixes available" named two different quantities.** The Overview card counts distinct fixes; a stat on the Health page counted fixable findings under the identical label, so the wider scan showed the smaller number. The Health stat is now "Fixable findings". The count is unchanged.
+- **The date-range selector had no visible focus ring.** An `outline: 0` at higher specificity cancelled the global `:focus-visible` rule, leaving the one control that changes every number on every page invisible to keyboard users. It now shows a 2px outline on focus.
 - **A green "No problems" pill rendered on sessions where checks could not run.** Over 1,000 real sessions, 587 rows displayed it and 583 of those had at least one unmeasured check; 268 had zero checks pass. The verdict honours the honesty contract (unknown is never a pass), but the table did not. Sessions now show three distinct states: a pass only when no checks are unknown, an observed problem when findings exist, or an unmeasured state when unknown checks exist, with a count of how many of how many could not be measured.
 - **The session health badge computed a wrong denominator and disagreed between pages.** The Sessions table computed `passed/(total - unknown)` and rendered `4/5 measured` while the Health page computed the same session as `4/6`. The badge now uses the API's own `score.label` string, computed once and shared across all components, eliminating the discrepancy.
 - **Four summary cards lacked unit words, causing a count of checks to read as a count of sessions.** Cards now explicitly label their units: "sessions", "findings", "findings", and "checks".
@@ -42,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Repository (not shipped in the npm package)
 
 - README screenshots recaptured against the redesigned interface: new Overview page image, and replacement Health page showing one real session carrying all three verdicts at once.
-- Test suite verified on Node 22.23.2 and Node 26.7.0: 878 passing, 0 failing.
+- The README Overview screenshot was recaptured because the committed image still showed the nine-significant-figure token number and the Fixes-card sparkline that this release removes.
+- Test suite verified on Node 22.23.2 and Node 26.9.0: 885 passing, 0 failing.
 
 ## [0.1.1] - 2026-09-21
 
