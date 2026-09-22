@@ -47,11 +47,26 @@
  */
 
 import { MODEL_WINDOWS_VERSION, windowPromotions } from "../collectors/base.js";
+import { COLLECTOR_SPECS } from "../collectors/registry.js";
 import { RULES, evaluateRule } from "./rules.js";
 
 const SEVERITY_RANK = Object.freeze({ critical: 0, warn: 1, info: 2 });
 const STATUS_RANK = Object.freeze({ observed: 0, unknown: 1, "not-observed": 2 });
 const RULE_ORDER = new Map(RULES.map((rule, index) => [rule.id, index]));
+// The registry is the authority for collector capabilities.  Copilot's
+// registered reader is deliberately detection-only; keep that distinction
+// attached to the registry entry rather than treating every registered ID as
+// a parser merely because its reader module exists.
+const DETECTION_ONLY_READER_PATHS = new Set(
+  COLLECTOR_SPECS
+    .filter(([, , modulePath]) => modulePath === "./copilot.js")
+    .map(([, , modulePath]) => modulePath),
+);
+const PARSER_CLI_IDS = new Set(
+  COLLECTOR_SPECS
+    .filter(([, , modulePath]) => !DETECTION_ONLY_READER_PATHS.has(modulePath))
+    .map(([id]) => id),
+);
 
 /** Keys a collector may use for the parent-session linkage (BP-002.19). */
 const PARENT_KEYS = Object.freeze(["parentSessionId", "parentId", "parentID", "parent_id"]);
@@ -514,7 +529,7 @@ function aggregateRules(sessions, parserVersion) {
  * Analyze everything `registry.collectAll()` returned.
  *
  * @param {{supported?: Array<object>, detectionOnly?: Array<object>,
- *   absent?: Array<object>, diagnostics?: Array<object>}} collected
+ *   absent?: Array<object>, unreadable?: Array<object>, diagnostics?: Array<object>}} collected
  * @param {{generatedAt?: string|null, limit?: number|null, parserVersion?: string,
  *   fixes?: Array<object>, trend?: object}} [options]
  *   `limit` is the limit that was passed to `collectAll`, if any. It matters:
@@ -687,6 +702,7 @@ export function analyzeAll(collected = {}, options = {}) {
       sessions: readFailed ? null : ownHealth.length,
       subagentSessions: readFailed ? null : subagentHealth.length,
       support: "supported",
+      installed: true,
       note: notes.length ? notes.join(" ") : null,
     });
   }
@@ -697,19 +713,36 @@ export function analyzeAll(collected = {}, options = {}) {
       sessions: null,
       subagentSessions: null,
       support: "detection-only",
+      installed: true,
       note:
         "detected on this machine, but it exposes no session transcript to read, so nothing about its usage is measured here. " +
         "No sessions were read, which is not the same as no usage.",
     });
   }
 
-  for (const entry of Array.isArray(collected?.absent) ? collected.absent : []) {
+  for (const entry of Array.isArray(collected?.unreadable) ? collected.unreadable : []) {
     clis.push({
       cli: str(entry?.id) || "unknown",
       sessions: null,
       subagentSessions: null,
-      support: "unsupported",
-      note: "no installation was detected, so no file was read. The session count is not recorded rather than zero.",
+      support: "unreadable",
+      installed: null,
+      note: str(entry?.reason) || "SessionRx could not load the reader for this CLI, so installation could not be determined and no session was read.",
+    });
+  }
+
+  for (const entry of Array.isArray(collected?.absent) ? collected.absent : []) {
+    const cli = str(entry?.id) || "unknown";
+    const parserExists = PARSER_CLI_IDS.has(cli);
+    clis.push({
+      cli,
+      sessions: null,
+      subagentSessions: null,
+      support: parserExists ? "supported" : "detection-only",
+      installed: false,
+      note: parserExists
+        ? "SessionRx can read this CLI, but no installation was found. The session count is not recorded rather than zero."
+        : "SessionRx can detect this CLI, but no installation was found. The session count is not recorded rather than zero.",
     });
   }
 

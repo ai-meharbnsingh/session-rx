@@ -1101,7 +1101,41 @@ test("analyzeAll analyzes every supported session and reports every collector", 
   assert.equal(out.sessions.length, 5);
   assert.deepEqual(out.collectors.map((entry) => entry.cli), ["claude", "gemini", "opencode", "copilot", "grok-amp"]);
   assert.equal(out.collectors.find((entry) => entry.cli === "copilot").sessions, null, "a detection-only CLI has no session count, and null is not zero");
-  assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").support, "unsupported");
+  assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").support, "detection-only");
+  assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").installed, false);
+});
+
+test("collector support is identical whether the CLI is installed or absent", () => {
+  const cliSet = ["claude", "codex", "copilot", "gemini", "grok-amp"];
+  const installed = analyzeAll({
+    supported: [{ id: "claude", sessions: [contextHeavy] }],
+    detectionOnly: [{ id: "copilot" }],
+    absent: [{ id: "codex" }, { id: "gemini" }, { id: "grok-amp" }],
+  });
+
+  const absent = analyzeAll({
+    absent: cliSet.map((id) => ({ id, status: "absent" })),
+  });
+  const installedByCli = new Map(installed.collectors.map((entry) => [entry.cli, entry]));
+  const absentByCli = new Map(absent.collectors.map((entry) => [entry.cli, entry]));
+
+  assert.deepEqual([...installedByCli.keys()].sort(), cliSet.slice().sort());
+  assert.deepEqual([...absentByCli.keys()].sort(), cliSet.slice().sort());
+  for (const cli of cliSet) {
+    assert.equal(absentByCli.get(cli).support, installedByCli.get(cli).support, `${cli} support changed with installation state`);
+  }
+  assert.equal(installedByCli.get("claude").installed, true);
+  assert.equal(installedByCli.get("copilot").installed, true);
+  for (const cli of cliSet) assert.equal(absentByCli.get(cli).installed, false, `${cli} absent state changed`);
+  assert.equal(absentByCli.get("copilot").support, "detection-only");
+  assert.equal(absentByCli.get("codex").support, "supported");
+});
+
+test("an absent installation never carries a session count", () => {
+  const out = analyzeAll(corpus());
+  for (const entry of out.collectors) {
+    if (entry.installed === false) assert.equal(entry.sessions, null, `${entry.cli} has an absent installation and a session count`);
+  }
 });
 
 test("analyzeAll surfaces windowPromotions in the per-CLI note, rather than silently correcting the table", () => {
@@ -1390,8 +1424,9 @@ test("buildReportInput emits exactly the ReportInput contract shape", () => {
   assert.ok(["improving", "stable", "declining", "unknown"].includes(input.trend.direction));
 
   for (const cli of input.clis) {
-    assert.deepEqual(Object.keys(cli).sort(), ["cli", "note", "sessions", "subagentSessions", "support"]);
-    assert.ok(["supported", "detection-only", "unsupported"].includes(cli.support));
+    assert.deepEqual(Object.keys(cli).sort(), ["cli", "installed", "note", "sessions", "subagentSessions", "support"]);
+    assert.ok(["supported", "detection-only", "unreadable"].includes(cli.support));
+    assert.ok([true, false, null].includes(cli.installed));
     assert.ok(cli.sessions === null || Number.isInteger(cli.sessions));
     assert.ok(cli.subagentSessions === null || Number.isInteger(cli.subagentSessions));
     if (cli.sessions === null) assert.equal(cli.subagentSessions, null, "nothing read means the set-aside count is not recorded, not zero");

@@ -82,6 +82,7 @@
 
 import { registerPage, api as appApi } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
+import { icon } from '../components/ui.js';
 
 /** BP-001.24: the ten latest sessions across every detected CLI. */
 const SESSION_LIMIT = 10;
@@ -92,6 +93,12 @@ const SESSION_LIMIT = 10;
  * preference, and a remembered skip would silently hide a finding next run.
  */
 const skipped = new Set();
+
+function iconBadge(name) {
+  const badge = el('span', 'rx-icon');
+  badge.append(icon(name));
+  return badge;
+}
 
 /** Verdict presentation. `unknown` shares no channel with either other state. */
 const STATUS = Object.freeze({
@@ -899,6 +906,7 @@ export function sessionCard(session, api, rerender) {
 
   const head = el('header', 'card-head');
   const ident = el('div', 'health-ident');
+  ident.append(iconBadge('health'));
   ident.append(el('span', 'health-cli', session?.cli ?? 'unknown'));
   ident.append(el('span', 'health-session', session?.sessionId ?? '(no session id)'));
   head.append(ident);
@@ -954,7 +962,9 @@ export function collectorsPanel(collectors) {
   const panel = el('section', 'card card-pad panel-compact');
   panel.append(el('div', 'section-kicker', 'Sources'));
   const heading = el('div', 'panel-heading');
-  heading.append(el('h3', null, 'Detected CLIs'));
+  const title = el('div', 'rx-section-title tone-accent');
+  title.append(iconBadge('health'), el('h2', '', 'Detected CLIs'));
+  heading.append(title);
   panel.append(heading);
 
   const supported = rows.filter(

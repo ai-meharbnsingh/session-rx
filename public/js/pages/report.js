@@ -23,6 +23,19 @@
  */
 
 import { rangeQuery, registerPage, api as appApi } from '../app.js';
+import { icon } from '../components/ui.js';
+
+function iconBadge(name) {
+  const badge = el('span', 'rx-icon');
+  badge.append(icon(name));
+  return badge;
+}
+
+function sectionTitle(title, iconName, tone = 'accent') {
+  const node = el('div', `rx-section-title tone-${tone}`);
+  node.append(iconBadge(iconName), el('h2', '', title));
+  return node;
+}
 
 /** The last report fetched on this page, so a tab switch does not lose it. */
 const state = {
@@ -194,6 +207,7 @@ function draw() {
 
   const card = el('section', 'card');
   const head = el('div', 'card-head');
+  head.append(sectionTitle('Report', 'health'));
   const bar = el('div', 'toolbar');
 
   const button = el('button', 'button button-primary');

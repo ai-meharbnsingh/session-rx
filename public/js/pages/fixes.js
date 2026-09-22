@@ -1,6 +1,18 @@
 import { rangeQuery, registerPage } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
-import { button, el, observedRules, plainText, ruleLabel, severity } from '../components/ui.js';
+import { button, el, icon, observedRules, plainText, ruleLabel, severity } from '../components/ui.js';
+
+function iconBadge(name) {
+  const badge = el('span', 'rx-icon');
+  badge.append(icon(name));
+  return badge;
+}
+
+function sectionTitle(title, iconName, tone = 'accent') {
+  const node = el('div', `rx-section-title tone-${tone}`);
+  node.append(iconBadge(iconName), el('h2', '', title));
+  return node;
+}
 
 function diffView(diff) {
   const box = el('div', 'diff-box');
@@ -55,7 +67,7 @@ async function renderFixes(mount, data, ctx = {}) {
   const top = el('div', 'rx-card-head'); const back = el('a', '', 'Back to issues'); back.href = '#/health';
   top.append(back, issueNavigation(selectedIndex, items.length)); root.append(top);
   const layout = el('div', 'fix-layout');
-  const steps = el('aside', 'rx-card step-list'); steps.append(el('h2', '', 'Fix workflow'));
+  const steps = el('aside', 'rx-card step-list'); steps.append(sectionTitle('Fix workflow', 'fixes'));
   [['Diagnose', 'Issues detected from your sessions', 'done'], ['Review & Fix', 'Apply a targeted change', 'active'], ['Verify', 'Continue with a healthier setup', '']].forEach(([name, copy, kind], index) => { const step = el('div', `step ${kind}`); step.append(el('strong', '', `${index + 1}. ${name}`), el('small', '', copy)); steps.append(step); });
   const categories = el('div', 'filter-group'); categories.append(el('h3', '', 'Issue categories'));
   ['All issues', 'Configuration', 'Context & memory', 'Tool usage', 'Performance'].forEach((name) => categories.append(el('div', 'filter-option', `${name} (${categoryCount(name, items)})`)));
@@ -69,7 +81,7 @@ async function renderFixes(mount, data, ctx = {}) {
     const why = plainText(selected.rule, 'why'); if (why) { const section = el('section', 'rx-card'); section.append(el('h3', '', 'Why this happens'), el('p', '', why)); detail.append(section); }
     const benefit = plainText(selected.rule, 'benefit'); if (benefit) { const section = el('section', 'benefit'); section.append(el('h3', '', 'Expected benefit'), el('p', '', benefit)); detail.append(section); }
     const count = items.filter((item) => item.rule?.fix === selected.rule?.fix).length;
-    detail.append(el('h3', '', 'Occurrences in recent sessions'));
+    detail.append(sectionTitle('Occurrences in recent sessions', 'trends'));
     // Real per-day counts. The previous version invented bar heights from an
     // index, which drew a shape no data supported — on a tool whose whole claim
     // is that it never shows a number it cannot justify.
@@ -98,14 +110,14 @@ async function renderFixes(mount, data, ctx = {}) {
   }
   layout.append(detail);
 
-  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(el('h2', '', 'Proposed fix'), el('span', 'rx-chip', 'Safe change'), el('p', '', descriptor?.title || 'The selected fix'));
+  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(sectionTitle('Proposed fix', 'fixes'), el('span', 'rx-chip', 'Safe change'), el('p', '', descriptor?.title || 'The selected fix'));
   proposed.append(el('p', 'rx-label', preview?.targets?.[0]?.display || preview?.files_affected?.[0] || 'Target file not measured'));
   if (selected?.session && selected.session.cli !== descriptor?.cli) proposed.append(el('p', 'local-note', `This finding came from ${selected.session.cliName || selected.session.cli || 'one CLI'}; the proposed fix targets the configuration for another CLI.`));
   proposed.append(preview?.error ? el('p', 'not-measured', preview.error) : diffView(preview?.diff));
   const actions = el('div', 'toolbar'); [['Preview', 'button'], ['Apply fix', 'button button-primary'], ['Undo', 'button button-danger']].forEach(([label, className]) => { const action = button(label, className); action.addEventListener('click', () => openFixModal({ fixId, rule: selected?.rule, session: selected?.session, api })); actions.append(action); });
   actions.append(el('span', 'local-note', 'Only local files are changed. Nothing is sent anywhere.')); proposed.append(actions); layout.append(proposed); root.append(layout);
 
-  const other = el('section', 'rx-card'); other.append(el('h2', '', 'Other recommended fixes')); const strip = el('div', 'rx-grid rx-grid-three');
+  const other = el('section', 'rx-card'); other.append(sectionTitle('Other recommended fixes', 'fixes')); const strip = el('div', 'rx-grid rx-grid-even');
   catalog.filter((fix) => fix.id !== fixId).slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); review.addEventListener('click', () => { location.hash = `#/fixes?issue=${Math.max(0, items.findIndex((candidate) => candidate.rule?.fix === fix.id))}`; }); item.append(review); strip.append(item); });
   other.append(strip); root.append(other); mount.replaceChildren(root);
 }

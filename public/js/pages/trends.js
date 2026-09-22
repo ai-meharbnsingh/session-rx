@@ -38,6 +38,7 @@
 
 import { registerPage } from '../app.js';
 import { renderChart, destroyChart } from '../components/chart.js';
+import { icon } from '../components/ui.js';
 
 /** Canvases handed to the chart wrapper, destroyed before each re-render. */
 const liveCanvases = new Set();
@@ -55,6 +56,18 @@ const DIRECTION_KIND = Object.freeze({
   stable: 'info',
   unknown: 'unknown',
 });
+
+function iconBadge(name) {
+  const badge = el('span', 'rx-icon');
+  badge.append(icon(name));
+  return badge;
+}
+
+function sectionTitle(title, iconName, tone = 'accent') {
+  const node = el('div', `rx-section-title tone-${tone}`);
+  node.append(iconBadge(iconName), el('h2', '', title));
+  return node;
+}
 
 // ---------------------------------------------------------------------------
 // DOM helpers — the only path text takes into the document
@@ -139,7 +152,7 @@ function chartCard(spec) {
   container.dataset.chart = spec.id;
 
   const head = el('div', 'chart-head');
-  head.append(el('span', 'chart-title', spec.title));
+  head.append(sectionTitle(spec.title, 'trends'));
   if (spec.sub) head.append(el('span', 'chart-sub', spec.sub));
   container.append(head);
 
@@ -649,7 +662,7 @@ function verdictCard(trends) {
 
   const card = el('section', 'card card-pad');
   card.dataset.direction = direction;
-  card.append(el('div', 'section-kicker', 'Verdict'));
+  card.append(sectionTitle('Verdict', 'trends'));
   card.append(callout(kind, summary));
 
   const details = el('details', 'verdict-statistical-detail');
@@ -723,7 +736,7 @@ function verdictCard(trends) {
 function unknownsCard(trends) {
   const unknowns = Array.isArray(trends?.unknowns) ? trends.unknowns : [];
   const card = el('section', 'card card-pad');
-  card.append(el('div', 'section-kicker', 'What could not be measured'));
+  card.append(sectionTitle('What could not be measured', 'unmeasured', 'unknown'));
   const heading = el('div', 'panel-heading');
   heading.append(el('h3', null, 'Unknowns in this window'));
   card.append(heading);

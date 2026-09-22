@@ -41,7 +41,7 @@
 
 import { rangeQuery, registerPage, api as appApi } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
-import { dateText, duration, el as uiEl, healthNode, cliIcon, ruleLabel, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
+import { dateText, duration, el as uiEl, healthNode, cliIcon, icon, ruleLabel, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
 import {
   callout,
   durationText,
@@ -65,6 +65,12 @@ import {
  * fetched N times knows exactly which offset it has not yet asked for.
  */
 const PAGE_SIZE = 20;
+
+function iconBadge(name) {
+  const badge = el('span', 'rx-icon');
+  badge.append(icon(name));
+  return badge;
+}
 
 /**
  * Sort, filter, expansion AND paging state survive a re-render; only the rows
@@ -127,7 +133,7 @@ const COLUMNS = [
       const td = el('td');
       const when = whenText(session?.startedAt);
       if (when === null) td.append(notMeasured('no start timestamp was recorded for this session'));
-      else td.append(text(when));
+      else td.append(el('span', 'session-date', when));
       return td;
     },
   },
@@ -136,7 +142,16 @@ const COLUMNS = [
     label: 'Session',
     type: 'text',
     value: (session) => session?.sessionId || null,
-    cell: (session) => { const td = el('td'); td.append(session?.sessionId ? text(session.sessionId) : notMeasured('no session id was recorded')); return td; },
+    cell: (session) => {
+      const td = el('td');
+      if (!session?.sessionId) td.append(notMeasured('no session id was recorded'));
+      else {
+        const value = el('span', 'session-id', session.sessionId);
+        value.title = session.sessionId;
+        td.append(value);
+      }
+      return td;
+    },
   },
   {
     key: 'findings',
@@ -673,7 +688,9 @@ function draw() {
   card.append(drawTable(sorted, api, draw));
   const layout = el('div', 'session-layout');
   const filters = el('aside', 'rx-card filter-panel');
-  filters.append(el('h2', '', 'Filters'));
+  const filterTitle = el('div', 'rx-section-title tone-accent');
+  filterTitle.append(iconBadge('sessions'), el('h2', '', 'Filters'));
+  filters.append(filterTitle);
   filters.append(el('p', 'filter-note', 'Counts describe loaded rows only.'));
   const cliGroup = el('div', 'filter-group'); cliGroup.append(el('h3', '', 'CLI'));
   const cliCounts = new Map(); all.forEach((session) => cliCounts.set(session?.cli, (cliCounts.get(session?.cli) || 0) + 1));
@@ -701,7 +718,7 @@ function filterChoice(label, count, checked, onChange) {
 }
 
 function detailPanel(session, api, redraw) {
-  const panel = el('aside','rx-card detail-panel'); const close=uiButton('Close','button button-quiet'); close.addEventListener('click',()=>{state.selected=null; redraw();}); const head=el('div','rx-card-head'); head.append(el('h2','', 'Session details'),close); panel.append(head); const identity=el('div'); identity.append(cliIcon(session?.cliName || session?.cli),el('strong','',` ${session?.cliName || session?.cli || 'Unknown CLI'}`)); panel.append(identity,el('p','rx-label',dateText(session?.startedAt)),el('p','rx-label',`${duration(session?.startedAt,session?.endedAt)} · ${Number.isFinite(session?.turnCount) ? session.turnCount : 'not measured'} turns`),healthNode(session?.score)); const tabs=el('div','tab-strip'); ['Diagnosis','Evidence','Metrics','Timeline'].forEach((name,index)=>{const tab=uiButton(name,'tab-button'); if(index===0) tab.classList.add('is-active'); tabs.append(tab);}); panel.append(tabs); const observed=(session?.rules||[]).filter((r)=>r?.evidence?.status==='observed'); const unknown=(session?.rules||[]).filter((r)=>r?.evidence?.status==='unknown'); panel.append(el('h3','', 'Findings')); observed.forEach((rule)=>{const row=el('div','fix-row'); row.append(el('span','rank','!'),el('span','fix-title',ruleLabel(rule)),el('span','severity',rule?.severity==='error'?'High':'Medium')); panel.append(row);}); if (unknown.length) panel.append(el('p','not-measured',`${unknown.length} checks could not be measured. They are not passes.`)); const suggested=observed.filter((r)=>r.fix); if(suggested.length){panel.append(el('h3','', 'Suggested fixes')); suggested.forEach((rule)=>{const apply=uiButton('Review'); apply.addEventListener('click',()=>openFixModal({fixId:rule.fix,rule,session,api})); const row=el('div','fix-row'); row.append(el('span','fix-title',ruleLabel(rule)),apply); panel.append(row);});} return panel;
+  const panel = el('aside','rx-card detail-panel'); const close=uiButton('Close','button button-quiet'); close.addEventListener('click',()=>{state.selected=null; redraw();}); const head=el('div','rx-card-head'); const title=el('div','rx-section-title tone-accent'); title.append(iconBadge('sessions'),el('h2','', 'Session details')); head.append(title,close); panel.append(head); const identity=el('div'); identity.append(cliIcon(session?.cliName || session?.cli),el('strong','',` ${session?.cliName || session?.cli || 'Unknown CLI'}`)); panel.append(identity,el('p','rx-label',dateText(session?.startedAt)),el('p','rx-label',`${duration(session?.startedAt,session?.endedAt)} · ${Number.isFinite(session?.turnCount) ? session.turnCount : 'not measured'} turns`),healthNode(session?.score)); const tabs=el('div','tab-strip'); ['Diagnosis','Evidence','Metrics','Timeline'].forEach((name,index)=>{const tab=uiButton(name,'tab-button'); if(index===0) tab.classList.add('is-active'); tabs.append(tab);}); panel.append(tabs); const observed=(session?.rules||[]).filter((r)=>r?.evidence?.status==='observed'); const unknown=(session?.rules||[]).filter((r)=>r?.evidence?.status==='unknown'); panel.append(el('h3','', 'Findings')); observed.forEach((rule)=>{const row=el('div','fix-row'); row.append(el('span','rank','!'),el('span','fix-title',ruleLabel(rule)),el('span','severity',rule?.severity==='error'?'High':'Medium')); panel.append(row);}); if (unknown.length) panel.append(el('p','not-measured',`${unknown.length} checks could not be measured. They are not passes.`)); const suggested=observed.filter((r)=>r.fix); if(suggested.length){panel.append(el('h3','', 'Suggested fixes')); suggested.forEach((rule)=>{const apply=uiButton('Review'); apply.addEventListener('click',()=>openFixModal({fixId:rule.fix,rule,session,api})); const row=el('div','fix-row'); row.append(el('span','fix-title',ruleLabel(rule)),apply); panel.append(row);});} return panel;
 }
 
 /**

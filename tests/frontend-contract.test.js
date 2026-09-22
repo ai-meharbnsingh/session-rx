@@ -315,7 +315,152 @@ test("overview trend cards print the published reason when unavailable", () => {
     spend: { available: false, to: null, reason },
   }, { spend: [] }, "total", "Total tokens per day", "accent");
   assert.match(card.textContent, new RegExp(reason));
+  assert.match(card.textContent, /Not enough measured days in this window to compare\./);
   assert.doesNotMatch(card.textContent, /not comparable|—|\b0\b/);
+});
+
+const overviewApi = {
+  async get(url) {
+    if (url.startsWith("/api/trends")) return { trend: {}, trendDeltas: {}, charts: {} };
+    if (url.startsWith("/api/sessions")) return { sessions: [] };
+    if (url === "/api/fixes") return { fixes: [] };
+    throw new Error(`unexpected Overview request: ${url}`);
+  },
+};
+
+const overviewHealth = (over = {}) => ({
+  sessionsTotal: 0,
+  windowTotals: { sessions: 0 },
+  windowSeries: {},
+  comparison: {},
+  collectors: [],
+  topFixes: [],
+  ...over,
+});
+
+test("Overview replaces summary cards and Health/Trends with the first-run panel", async () => {
+  const mount = new ShimElement("main");
+  const note = "no installation was detected, so no file was read. The session count is not recorded rather than zero.";
+  await overviewPage.default(mount, overviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported", installed: false, note },
+    { cli: "Codex", support: "detection-only", note: "detected, but its session records are not readable here" },
+  ] }), { api: overviewApi });
+  assert.match(mount.textContent, /SessionRx found no AI CLI sessions on this machine/);
+  assert.match(mount.textContent, /Claude Code/);
+  assert.match(mount.textContent, /not found/);
+  assert.match(mount.textContent, new RegExp(note));
+  assert.equal(withClass(mount, "summary-card").length, 0);
+  assert.equal(withClass(mount, "overview-health-row").length, 0);
+});
+
+test("Overview counts only installed CLIs and renders no absent chips", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, overviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported", installed: false },
+    { cli: "Codex", support: "supported", installed: false },
+  ] }), { api: overviewApi });
+  assert.match(mount.textContent, /0 CLIs detected/);
+  assert.equal(withClass(mount, "rx-chip").length, 0);
+});
+
+test("Overview counts installed supported and detection-only CLIs, ignoring absent ones", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, overviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported", installed: true },
+    { cli: "Copilot", support: "detection-only", installed: true },
+    { cli: "Gemini", support: "supported", installed: false },
+  ] }), { api: overviewApi });
+  assert.match(mount.textContent, /2 CLIs detected/);
+  assert.match(mount.textContent, /Claude Code/);
+  assert.match(mount.textContent, /Copilot/);
+  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Gemini/);
+  assert.equal(withClass(mount, "rx-chip").length, 2);
+});
+
+test("Overview falls back to support when installed data is absent", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, overviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported" },
+    { cli: "Codex", support: "supported" },
+    { cli: "Copilot", support: "detection-only" },
+  ] }), { api: overviewApi });
+  assert.match(mount.textContent, /2 CLIs detected/);
+  assert.equal(withClass(mount, "rx-chip").length, 2);
+});
+
+test("Overview empty panel states the heading exactly once", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, overviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported", installed: false },
+  ] }), { api: overviewApi });
+  const heading = "SessionRx found no AI CLI sessions on this machine";
+  assert.equal(mount.textContent.split(heading).length - 1, 1);
+  assert.match(mount.textContent, /checked each CLI below and reports whether it was found on this machine/);
+});
+
+test("Overview uses a distinct range panel when sessions exist outside the window", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, overviewHealth({ sessionsTotal: 7, windowTotals: { sessions: 0 } }), { api: overviewApi });
+  assert.match(mount.textContent, /The scan found 7 sessions, but none fall inside this date range/);
+  assert.match(mount.textContent, /Widen the range/);
+  assert.doesNotMatch(mount.textContent, /no AI CLI sessions on this machine/);
+  assert.doesNotMatch(mount.textContent, /supported CLIs/);
+});
+
+test("Overview never turns either empty state into an all-clear", async () => {
+  for (const health of [overviewHealth(), overviewHealth({ sessionsTotal: 2, windowTotals: { sessions: 0 } })]) {
+    const mount = new ShimElement("main");
+    await overviewPage.default(mount, health, { api: overviewApi });
+    assert.doesNotMatch(mount.textContent, /no problems|all clear|healthy|looks good/i);
+  }
+});
+
+test("Overview keeps populated summary cards and unavailable trend evidence", async () => {
+  const mount = new ShimElement("main");
+  const reason = "the middle day was dropped; one half has no measured days with data, so no percentage is published";
+  const health = overviewHealth({
+    sessionsTotal: 1,
+    windowTotals: { sessions: 1, observedFindings: 2, fixableFindings: 1, unknownChecks: 3 },
+  });
+  const api = { ...overviewApi, async get(url) {
+    if (url.startsWith("/api/trends")) return { trend: {}, trendDeltas: { context: { available: false, reason } }, charts: {} };
+    return overviewApi.get(url);
+  }};
+  await overviewPage.default(mount, health, { api });
+  assert.equal(withClass(mount, "summary-card").length, 4);
+  assert.equal(withClass(mount, "overview-health-row").length, 1);
+  assert.match(mount.textContent, /Not enough measured days in this window to compare\./);
+  assert.match(mount.textContent, new RegExp(reason));
+});
+
+test("the five secondary pages use the Overview icon-badge language", () => {
+  const pages = ["health.js", "trends.js", "sessions.js", "fixes.js", "report.js"];
+  for (const name of pages) {
+    const src = read(path.join(PUBLIC, "js", "pages", name));
+    assert.match(src, /icon\(/, `${name} must use the shared icon helper`);
+    assert.match(src, /rx-icon/, `${name} must render an Overview-style icon badge`);
+  }
+  const css = read(path.join(PUBLIC, "css", "style.css"));
+  assert.match(css, /\.rx-icon\s*\{/, "the shared badge style must remain available");
+});
+
+test("sessions keep IDs selectable while constraining display and dates to one line", () => {
+  const sessions = read(path.join(PUBLIC, "js", "pages", "sessions.js"));
+  const css = read(path.join(PUBLIC, "css", "style.css"));
+  assert.match(sessions, /el\('span', 'session-id'/);
+  assert.match(sessions, /value\.title = session\.sessionId/);
+  assert.match(css, /\.session-id, \.session-date[^}]*white-space:\s*nowrap/);
+  assert.match(css, /\.session-id\s*\{[^}]*font-family:\s*var\(--mono\)[^}]*user-select:\s*text/);
+  assert.match(css, /text-overflow:\s*ellipsis/);
+});
+
+test("fixes columns start-align and recommendations use an even wrapping grid", () => {
+  const fixes = read(path.join(PUBLIC, "js", "pages", "fixes.js"));
+  const css = read(path.join(PUBLIC, "css", "style.css"));
+  assert.match(fixes, /rx-grid-even/);
+  assert.match(css, /\.fix-layout[^}]*align-items:\s*start/);
+  assert.match(css, /\.fix-layout > main[^}]*height:\s*fit-content/);
+  assert.match(css, /\.rx-grid-even[^}]*repeat\(auto-fit,\s*minmax\(/);
 });
 
 test("the comment stripper keeps code and strings, and drops only comments", () => {

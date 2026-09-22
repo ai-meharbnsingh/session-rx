@@ -57,11 +57,18 @@ function trendChange(metric, key) {
   return el('span', `trend-change ${change > 0 ? 'is-up' : change < 0 ? 'is-down' : 'is-flat'}`, `${arrow} ${change > 0 ? '+' : ''}${Math.abs(change)}%${relative ? ' relative change' : ''}`);
 }
 
+function unavailableTrend(metric) {
+  const reason = typeof metric?.reason === 'string' && metric.reason ? metric.reason : 'The published comparison reason was not provided.';
+  const details = el('details', 'trend-reason');
+  details.append(el('summary', '', 'Why this cannot be compared'), el('p', '', reason));
+  return [el('span', 'trend-empty', 'Not enough measured days in this window to compare.'), details];
+}
+
 export function trendCard(title, key, deltas, charts, valueKey, caption, tone) {
   const metric = deltas?.[key];
   const level = trendLevel(metric, key);
   const box = el('article', `trend-card tone-${tone}`);
-  if (level === null) box.append(el('h3', '', title), el('span', 'trend-empty', metric?.reason || 'This trend could not be measured.'));
+  if (level === null) box.append(el('h3', '', title), ...unavailableTrend(metric));
   else {
     const levelNode = el('strong', 'trend-level', level);
     levelNode.title = `Mean over ${metric.secondHalfDays} measured days in the newer half.`;
@@ -80,6 +87,39 @@ function topFixes(health, api, fixesPayload) { const section = el('section', 'rx
 function recentSessions(payload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Recent sessions', 'sessions')); const link = el('a', '', 'View all sessions →'); link.href = '#/sessions'; head.append(link); section.append(head); const sessions = Array.isArray(payload?.sessions) ? payload.sessions : []; if (!sessions.length) { section.append(el('p', 'not-measured', 'Recent sessions could not be measured.')); return section; } const table = el('div', 'rx-table-wrap'); const t = el('table', 'rx-table'); const hr = el('tr'); ['CLI', 'Started', 'Duration', 'Turns', 'Health', 'Key issue', 'Action'].forEach((label) => hr.append(el('th', '', label))); const thead = el('thead'); thead.append(hr); t.append(thead); const body = el('tbody');
   sessions.slice(0, 8).forEach((session) => { const row = el('tr'); row.addEventListener('click', () => { location.hash = `#/sessions/${encodeURIComponent(session.sessionId || '')}`; }); const finding = (session.rules || []).find((rule) => rule?.evidence?.status === 'observed'); const issue = el('span', 'session-issue'); if (finding) issue.append(el('span', `distribution-dot issue-${finding.id || ''}`), el('span', '', ruleLabel(finding))); else issue.append(el('span', 'not-measured', 'no observed issue')); const cli = el('td'); cli.append(cliIcon(session.cliName || session.cli), document.createTextNode(` ${session.cliName || session.cli || 'Unknown CLI'}`)); const healthCell = el('td'); healthCell.append(healthNode(session.score, true)); const issueCell = el('td'); issueCell.append(issue); const action = button('View →', 'button button-sm'); action.addEventListener('click', (event) => { event.stopPropagation(); row.click(); }); const actionCell = el('td'); actionCell.append(action); row.append(cli, el('td', '', dateText(session.startedAt)), el('td', '', duration(session.startedAt, session.endedAt)), el('td', '', number(session.turnCount)), healthCell, issueCell, actionCell); body.append(row); }); t.append(body); table.append(t); section.append(table); return section; }
 
+function collectorStatus(collector) {
+  if (Object.prototype.hasOwnProperty.call(collector || {}, 'installed')) {
+    if (collector.installed === true) return 'found';
+    if (collector.installed === false) return 'not found';
+    return 'not reported';
+  }
+  if (collector?.support === 'supported') return 'found';
+  if (collector?.support === 'detection-only') return 'found';
+  if (collector?.support === 'unsupported') return 'not found';
+  return 'not reported';
+}
+
+function emptyOverviewPanel(health, rangeEmpty) {
+  const panel = el('section', 'rx-card overview-empty-panel');
+  const heading = rangeEmpty ? 'No sessions in this date range' : 'SessionRx found no AI CLI sessions on this machine';
+  const intro = rangeEmpty
+    ? `The scan found ${health.sessionsTotal} sessions, but none fall inside this date range. Widen the range to look at those sessions.`
+    : 'SessionRx checked each CLI below and reports whether it was found on this machine.';
+  panel.append(el('h2', '', heading), el('p', 'overview-empty-intro', intro));
+  if (!rangeEmpty) {
+    const collectors = el('div', 'overview-collectors');
+    (Array.isArray(health?.collectors) ? health.collectors : []).forEach((collector) => {
+      const item = el('article', 'overview-collector');
+      const name = collector?.cli || collector?.id || 'Unknown CLI';
+      item.append(el('h3', '', name), el('span', 'overview-collector-status', collectorStatus(collector)));
+      if (typeof collector?.note === 'string' && collector.note) item.append(el('p', 'overview-collector-note', collector.note));
+      collectors.append(item);
+    });
+    panel.append(collectors, el('p', 'overview-empty-next', 'Use one of the supported CLIs and come back, or widen the scan if sessions are older than the current range.'));
+  }
+  return panel;
+}
+
 async function renderOverview(mount, data, ctx = {}) {
   if (!mount) return;
   const api = ctx.api;
@@ -93,21 +133,28 @@ async function renderOverview(mount, data, ctx = {}) {
   const days = health?.comparison?.windowDays;
   const dayText = finite(days) ? `${Math.round(days)} days` : 'the selected window';
   const series = health?.windowSeries || {};
+  const noSessionsFound = health?.sessionsTotal === 0;
+  const rangeHasNoSessions = Number.isFinite(health?.sessionsTotal) && health.sessionsTotal > 0 && totals.sessions === 0;
   const root = el('div', 'rx-page');
   const hero = el('header', 'rx-hero');
   const intro = el('div');
   intro.append(el('h1', '', 'Make your AI sessions more effective.'), el('p', '', 'SessionRx reads local session evidence, finds what is getting in the way, and helps you fix it.'));
-  const supported = (Array.isArray(health?.collectors) ? health.collectors : []).filter((collector) => collector?.support === 'supported');
+  const collectors = Array.isArray(health?.collectors) ? health.collectors : [];
+  const hasInstalledData = collectors.length > 0 && collectors.every((collector) => Object.prototype.hasOwnProperty.call(collector || {}, 'installed'));
+  const detected = collectors.filter((collector) => hasInstalledData ? collector?.installed === true : collector?.support === 'supported');
   const cliList = el('div', 'rx-cli-list');
   const cliSummary = el('span', 'rx-cli-summary');
-  cliSummary.append(el('span', 'rx-cli-mark', 'ϟ'), el('strong', '', `${supported.length} CLIs detected`));
+  cliSummary.append(el('span', 'rx-cli-mark', 'ϟ'), el('strong', '', `${detected.length} CLIs detected`));
   cliList.append(cliSummary);
-  supported.forEach((collector) => cliList.append(el('span', 'rx-chip', collector.cli || collector.id || 'Unknown CLI')));
+  detected.forEach((collector) => cliList.append(el('span', 'rx-chip', collector.cli || collector.id || 'Unknown CLI')));
   hero.append(intro, cliList);
   root.append(hero);
-  const cards = el('div', 'rx-grid rx-grid-four');
-  cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), `in the last ${dayText}`, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', number(totals.fixableFindings), 'actionable improvements', series.fixableFindings, health.comparison, 'fixableFindings', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), 'could not be analyzed', series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
-  root.append(cards);
+  if (noSessionsFound || rangeHasNoSessions) root.append(emptyOverviewPanel(health, rangeHasNoSessions));
+  else {
+    const cards = el('div', 'rx-grid rx-grid-four');
+    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), `in the last ${dayText}`, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', number(totals.fixableFindings), 'actionable improvements', series.fixableFindings, health.comparison, 'fixableFindings', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), 'could not be analyzed', series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
+    root.append(cards);
+  }
   const trend = trends?.trend;
   const callout = el('aside', 'trend-callout');
   callout.append(el('h3', '', trend?.direction === 'unknown' ? 'Trend could not be determined' : 'Trend'), el('p', 'trend-summary', trend?.direction === 'unknown' ? (trend.reason || 'The trend could not be determined for this window.') : (trend.summary || 'The trend summary was not published.')));
@@ -117,9 +164,11 @@ async function renderOverview(mount, data, ctx = {}) {
   healthCard.append(healthHead, donut({ ...totals, ruleTotals: health?.ruleTotals }, health?.comparison));
   healthCard.querySelector?.('.health-grid')?.append(callout);
   if (!healthCard.querySelector) healthCard.append(callout);
-  const mid = el('div', 'rx-grid rx-grid-two overview-health-row');
-  mid.append(healthCard, trendsPreview(trends));
-  root.append(mid);
+  if (!noSessionsFound && !rangeHasNoSessions) {
+    const mid = el('div', 'rx-grid rx-grid-two overview-health-row');
+    mid.append(healthCard, trendsPreview(trends));
+    root.append(mid);
+  }
   const lower = el('div', 'rx-grid rx-grid-two overview-lower');
   lower.append(topFixes(health, api, fixesPayload), recentSessions(sessionsPayload));
   root.append(lower);
