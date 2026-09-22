@@ -49,9 +49,23 @@ export function healthNode(score, compact = false) {
   const { passed, unknown, measured } = scoreParts(score);
   const kind = measured === 0 ? 'unknown' : unknown > 0 || score?.observed === 1 ? 'warn' : score?.observed >= 2 ? 'critical' : 'ok';
   const box = el('span', `health-pill health-${kind}`);
-  box.append(el('strong', '', passed === null || measured === null ? 'not measured' : `${passed}/${measured}`));
-  if (!compact) box.append(el('span', 'health-detail', measured === 0 ? ' no checks measured' : ` measured${unknown ? ` · ${unknown} could not be measured` : ''}`));
-  box.title = measured === 0 ? 'No checks could be measured.' : `${passed} passed out of ${measured} measured checks. ${unknown} could not be measured.`;
+  const total = Number.isFinite(score?.total) ? score.total : null;
+  const observed = Number.isFinite(score?.observed) ? score.observed : 0;
+  const label = typeof score?.label === 'string' && score.label.length
+    ? score.label
+    : total === null || passed === null
+      ? 'checks could not be measured'
+      : `${passed} of ${total} checks passed, ${observed} problem${observed === 1 ? '' : 's'} observed, ${unknown} could not be measured`;
+  const verdict = total === null || passed === null
+    ? label
+    : `${passed}/${total} checks passed · ${observed} problem${observed === 1 ? '' : 's'} observed · ${unknown} could not be measured`;
+  if (measured === 0) box.append(el('strong', '', 'not measured'), el('span', 'health-detail', ` · ${verdict}`));
+  else {
+    // Keep the unknown count in compact mode. The API label remains the
+    // tooltip's authoritative wording; this compact form cannot hide coverage.
+    box.append(el('strong', '', verdict));
+  }
+  box.title = label;
   return box;
 }
 

@@ -41,7 +41,7 @@
 
 import { rangeQuery, registerPage, api as appApi } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
-import { dateText, duration, el as uiEl, healthNode, cliIcon, icon, ruleLabel, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
+import { dateText, duration, el as uiEl, healthNode, cliIcon, icon, ruleLabel, scoreParts, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
 import {
   callout,
   durationText,
@@ -158,7 +158,19 @@ const COLUMNS = [
     label: 'Key findings',
     type: 'text',
     value: (session) => (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed').length,
-    cell: (session) => { const td = el('td'); const findings = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed'); if (!findings.length) td.append(el('span', 'finding-pill finding-clear', 'No problems')); else findings.slice(0, 3).forEach((rule) => td.append(el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, ruleLabel(rule)))); return td; },
+    cell: (session) => {
+      const td = el('td');
+      const findings = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed');
+      const { total, unknown } = scoreParts(session?.score);
+      if (findings.length) findings.slice(0, 3).forEach((rule) => td.append(el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, ruleLabel(rule))));
+      else if (unknown > 0) {
+        const denominator = Number.isFinite(total) ? total : unknown;
+        td.append(el('span', 'finding-pill finding-unknown', `${unknown} of ${denominator} checks could not be measured`));
+      } else {
+        td.append(el('span', 'finding-pill finding-clear', 'Checks ran; no problems observed'));
+      }
+      return td;
+    },
   },
   {
     key: 'trend',

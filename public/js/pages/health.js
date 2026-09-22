@@ -82,7 +82,7 @@
 
 import { registerPage, api as appApi } from '../app.js';
 import { openFixModal } from '../components/fix-modal.js';
-import { icon } from '../components/ui.js';
+import { healthNode, icon } from '../components/ui.js';
 
 /** BP-001.24: the ten latest sessions across every detected CLI. */
 const SESSION_LIMIT = 10;
@@ -843,11 +843,10 @@ export function scoreNode(score, rules = []) {
   segment(unknown, 'unknown', `${unknown} could not be measured — neither passed nor failed`);
   wrap.append(bar);
 
-  // "N/6 checks passed" NEVER appears without the unknown count beside it.
+  // The badge is shared with Sessions so denominator, wording and colour
+  // cannot drift between the two views.
   const headline = el('div', 'score-headline');
-  headline.append(el('strong', null, `${passed}/${total} checks passed`));
-  headline.append(text(` · ${observed} problem${observed === 1 ? '' : 's'} observed`));
-  headline.append(text(` · ${unknown} could not be measured`));
+  headline.append(healthNode(score, false));
   wrap.append(headline);
 
   const legend = el('div', 'score-legend');

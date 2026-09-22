@@ -827,6 +827,38 @@ test("the score line always states the unknown count, even when it is 0", () => 
   assert.match(bar.getAttribute("aria-label") ?? "", /could not be measured/);
 });
 
+test("shared health verdict never turns unknown checks into a pass", () => {
+  const unknown = ui.healthNode({ total: 6, passed: 0, observed: 0, unknown: 6, label: "0 of 6 checks passed, 0 problems observed, 6 could not be measured" });
+  assert.ok(withClass(unknown, "health-unknown").length);
+  assert.doesNotMatch(unknown.textContent, /No problems/i);
+  assert.match(unknown.textContent, /6 could not be measured/);
+  assert.doesNotMatch(unknown.textContent, /6\/6/);
+
+  const clean = ui.healthNode({ total: 6, passed: 6, observed: 0, unknown: 0, label: "6 of 6 checks passed, 0 problems observed, 0 could not be measured" });
+  assert.ok(withClass(clean, "health-ok").length);
+  assert.match(clean.textContent, /6\/6 checks passed/);
+});
+
+test("shared health verdict keeps the total denominator and unknown signal in compact mode", () => {
+  const score = { total: 6, passed: 4, observed: 1, unknown: 1, label: "4 of 6 checks passed, 1 problem observed, 1 could not be measured" };
+  const full = ui.healthNode(score, false);
+  const compact = ui.healthNode(score, true);
+  assert.equal(full.textContent, compact.textContent);
+  assert.match(full.textContent, /4\/6 checks passed/);
+  assert.doesNotMatch(full.textContent, /4\/5/);
+  assert.match(compact.textContent, /1 could not be measured/);
+  assert.match(compact.className, /health-warn/);
+});
+
+test("Sessions and Health use the same shared verdict component", () => {
+  const sessions = read(path.join(PUBLIC, "js", "pages", "sessions.js"));
+  const health = read(path.join(PUBLIC, "js", "pages", "health.js"));
+  assert.match(sessions, /healthNode\(session\?\.score, true\)/);
+  assert.match(health, /healthNode\(score, false\)/);
+  const score = { total: 6, passed: 4, observed: 1, unknown: 1, label: "4 of 6 checks passed, 1 problem observed, 1 could not be measured" };
+  assert.equal(ui.healthNode(score, true).textContent, ui.healthNode(score, false).textContent);
+});
+
 test("the passed segment is passed/total and never passed+unknown", () => {
   // The guard that matters most: an unmeasurable check must not widen the green
   // bar. 4 passed of 6 is 66.66%, not the 100% that 4 passed + 2 unknown would
