@@ -918,6 +918,41 @@ describe("/api/health window-wide totals and comparison", () => {
     assert.equal(res.json.windowTotals.fixableFindings, 1);
   });
 
+  it("publishes distinctFixes as unique, non-null, catalogue-bounded fix ids", async () => {
+    const duplicateRules = [
+      syntheticRule("duplicate-a", { status: "observed", fix: FIX_CATALOG[0].id }),
+      syntheticRule("duplicate-b", { status: "observed", fix: FIX_CATALOG[0].id }),
+    ];
+    const duplicate = await fixture([
+      testSession({ sessionId: "duplicate-fixes" }),
+    ], { "duplicate-fixes": duplicateRules });
+    const duplicateHealth = (await duplicate.get("/api/health")).json;
+    assert.equal(duplicateHealth.distinctFixes.count, 1, "two findings sharing one fixId count as one distinct fix");
+    assert.ok(
+      duplicateHealth.distinctFixes.count < duplicateHealth.windowTotals.fixableFindings,
+      "distinctFixes must be strictly less than fixableFindings for duplicate fix ids",
+    );
+
+    const empty = await fixture([testSession({ sessionId: "no-fixes" })], {
+      "no-fixes": [syntheticRule("not-fixable", { status: "observed" })],
+    });
+    const emptyHealth = (await empty.get("/api/health")).json;
+    assert.equal(emptyHealth.distinctFixes.count, 0, "no fixable findings publish zero distinct fixes");
+    assert.notEqual(emptyHealth.distinctFixes.count, null);
+
+    const bounded = await fixture([testSession({ sessionId: "too-many-fixes" })], {
+      "too-many-fixes": FIX_CATALOG.map((fix, index) => syntheticRule(`catalog-${index}`, {
+        status: "observed",
+        fix: fix.id,
+      })).concat(syntheticRule("outside-catalog", { status: "observed", fix: "not-in-catalogue" })),
+    }, { fixCatalog: FIX_CATALOG.slice(0, 2) });
+    const boundedHealth = (await bounded.get("/api/health")).json;
+    assert.ok(
+      boundedHealth.distinctFixes.count <= 2,
+      "distinctFixes must never exceed the size of the published fix catalogue",
+    );
+  });
+
   it("publishes inclusive per-day window series, including an empty measured day", async () => {
     const sessions = [1, 3].map((day) => testSession({ sessionId: `series-${day}`, startedAt: ISO(day, day === 3 ? 0 : 9), endedAt: ISO(day, day === 3 ? 1 : 10) }));
     const ruleSets = {

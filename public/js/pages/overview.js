@@ -22,6 +22,17 @@ function summaryCard(title, iconName, value, subtitle, series, comparison, key, 
   if (Array.isArray(series)) box.append(sparkline(series, `tone-${tone}`, { bars: true })); return box;
 }
 
+function comparisonNote(health) {
+  if (health?.comparison?.available === true) return null;
+  const reason = typeof health?.comparison?.reason === 'string' && health.comparison.reason
+    ? health.comparison.reason
+    : 'the previous window was not comparable';
+  const completeFrom = typeof health?.coverage?.completeFrom === 'string' && health.coverage.completeFrom
+    ? ` Coverage is complete from ${health.coverage.completeFrom}.`
+    : '';
+  return `Comparison unavailable: ${reason}.${completeFrom}`;
+}
+
 function donut(totals, comparison) {
   const passed = totals?.notObservedChecks; const measured = totals?.measuredChecks; const unknown = totals?.unknownChecks; const ratio = finite(passed) && finite(measured) && measured > 0 ? passed / measured : null;
   const wrap = el('div', 'health-grid'); const column = el('div', 'donut-column'); const svg = document.createElementNS(svgNs, 'svg'); svg.setAttribute('viewBox', '0 0 150 150'); svg.setAttribute('class', 'donut'); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', ratio === null ? 'Measured check pass rate not measured' : `${Math.round(ratio * 100)} percent of measured checks passed`);
@@ -74,7 +85,18 @@ export function trendCard(title, key, deltas, charts, valueKey, caption, tone) {
     levelNode.title = `Published value: ${metric.to}. Mean over ${metric.secondHalfDays} measured days in the newer half.`;
     box.append(el('h3', '', title), levelNode, trendChange(metric, key));
   }
-  box.append(lineChart(charts?.[key], valueKey, tone), el('p', 'trend-note', caption));
+  let note = caption;
+  if (key === 'spend' && metric?.available === true && finite(metric.secondHalfDays)) {
+    const rows = Array.isArray(charts?.spend) ? charts.spend : [];
+    const half = Math.floor(rows.length / 2);
+    const newer = rows.slice(rows.length - half).filter((row) => row?.hasData === true);
+    const mean = (field) => {
+      const values = newer.map((row) => row?.[field]).filter(finite);
+      return values.length ? number(Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)) : 'not measured';
+    };
+    note = `Per-day mean over ${Math.round(metric.secondHalfDays)} measured days; mostly cache reads, not fresh input (${mean('cacheRead')} cache-read vs ${mean('cacheCreation')} cache-creation tokens).`;
+  }
+  box.append(lineChart(charts?.[key], valueKey, tone), el('p', 'trend-note', note));
   return box;
 }
 
@@ -82,7 +104,7 @@ function sectionTitle(title, iconName, tone = 'accent') { const node = el('div',
 function trendsPreview(payload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Trends', 'trends')); const link = el('a', '', 'View all →'); link.href = '#/trends'; head.append(link); section.append(head); const grid = el('div', 'trend-grid'); grid.append(trendCard('Context efficiency', 'context', payload?.trendDeltas, payload?.charts, 'turnsAboveThreshold', 'Turns above 70% of window', 'pass'), trendCard('Token spend', 'spend', payload?.trendDeltas, payload?.charts, 'total', 'Total tokens per day', 'accent'), trendCard('Cache hit rate', 'cache', payload?.trendDeltas, payload?.charts, 'hitRate', 'Cache hits (%)', 'pass')); section.append(grid); return section; }
 
 function topFixes(health, api, fixesPayload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Top fixes', 'fixes')); const link = el('a', '', 'View all fixes →'); link.href = '#/fixes'; head.append(link); section.append(head); const items = Array.isArray(health?.topFixes) ? health.topFixes.slice(0, 5) : []; if (!items.length) { section.append(el('p', 'not-measured', 'No ranked fixable findings were measured in this window.')); return section; }
-  items.forEach((item, index) => { const rule = { id: item.id, name: item.name, fix: item.fixId }; const row = el('div', 'fix-row'); row.append(el('span', 'rank', index + 1)); const copy = el('div'); copy.append(el('span', 'fix-title', item.name || item.id || 'Session check'), el('span', 'fix-sub', `${fmt(item.sessions)} sessions`)); row.append(copy); const rank = index < 2 ? 'High' : index < 4 ? 'Medium' : 'Low'; row.append(el('span', `impact-rank impact-${rank.toLowerCase()}`, `${rank} rank`)); const actions = el('div', 'fix-actions'); const preview = button('Preview', 'button button-sm'); const apply = button('Apply', 'button button-primary button-sm'); const skip = button('Skip', 'button button-sm'); const open = () => openFixModal({ fixId: item.fixId, rule, session: null, api, catalog: fixesPayload?.fixes }); preview.addEventListener('click', open); apply.addEventListener('click', open); skip.addEventListener('click', () => row.classList.add('is-skipped')); actions.append(preview, apply, skip); row.append(actions); section.append(row); }); return section; }
+  items.forEach((item, index) => { const rule = { id: item.id, name: item.name, fix: item.fixId }; const row = el('div', 'fix-row'); row.append(el('span', 'rank', index + 1)); const copy = el('div'); copy.append(el('span', 'fix-title', item.name || item.id || 'Session check'), el('span', 'fix-sub', `${fmt(item.sessions)} sessions`)); row.append(copy); const actions = el('div', 'fix-actions'); const preview = button('Preview', 'button button-sm'); const apply = button('Apply', 'button button-primary button-sm'); const skip = button('Skip', 'button button-sm'); const open = () => openFixModal({ fixId: item.fixId, rule, session: null, api, catalog: fixesPayload?.fixes }); preview.addEventListener('click', open); apply.addEventListener('click', open); skip.addEventListener('click', () => row.classList.add('is-skipped')); actions.append(preview, apply, skip); row.append(actions); section.append(row); }); return section; }
 
 function recentSessions(payload) { const section = el('section', 'rx-card'); const head = el('div', 'rx-card-head'); head.append(sectionTitle('Recent sessions', 'sessions')); const link = el('a', '', 'View all sessions →'); link.href = '#/sessions'; head.append(link); section.append(head); const sessions = Array.isArray(payload?.sessions) ? payload.sessions : []; if (!sessions.length) { section.append(el('p', 'not-measured', 'Recent sessions could not be measured.')); return section; } const table = el('div', 'rx-table-wrap'); const t = el('table', 'rx-table'); const hr = el('tr'); ['CLI', 'Started', 'Duration', 'Turns', 'Health', 'Key issue', 'Action'].forEach((label) => hr.append(el('th', '', label))); const thead = el('thead'); thead.append(hr); t.append(thead); const body = el('tbody');
   sessions.slice(0, 8).forEach((session) => { const row = el('tr'); row.addEventListener('click', () => { location.hash = `#/sessions/${encodeURIComponent(session.sessionId || '')}`; }); const finding = (session.rules || []).find((rule) => rule?.evidence?.status === 'observed'); const issue = el('span', 'session-issue'); if (finding) issue.append(el('span', `distribution-dot issue-${finding.id || ''}`), el('span', '', ruleLabel(finding))); else issue.append(el('span', 'not-measured', 'no observed issue')); const cli = el('td'); cli.append(cliIcon(session.cliName || session.cli), document.createTextNode(` ${session.cliName || session.cli || 'Unknown CLI'}`)); const healthCell = el('td'); healthCell.append(healthNode(session.score, true)); const issueCell = el('td'); issueCell.append(issue); const action = button('View →', 'button button-sm'); action.addEventListener('click', (event) => { event.stopPropagation(); row.click(); }); const actionCell = el('td'); actionCell.append(action); row.append(cli, el('td', '', dateText(session.startedAt)), el('td', '', duration(session.startedAt, session.endedAt)), el('td', '', number(session.turnCount)), healthCell, issueCell, actionCell); body.append(row); }); t.append(body); table.append(t); section.append(table); return section; }
@@ -152,7 +174,15 @@ async function renderOverview(mount, data, ctx = {}) {
   if (noSessionsFound || rangeHasNoSessions) root.append(emptyOverviewPanel(health, rangeHasNoSessions));
   else {
     const cards = el('div', 'rx-grid rx-grid-four');
-    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), `in the last ${dayText}`, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', number(totals.fixableFindings), 'actionable improvements', series.fixableFindings, health.comparison, 'fixableFindings', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), 'could not be analyzed', series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
+    const fixes = health?.distinctFixes;
+    const fixValue = finite(fixes?.count) ? number(fixes.count) : 'not measured';
+    const fixSubtitle = finite(fixes?.findings)
+      ? `${number(fixes.findings)} findings addressed · Claude Code only`
+      : 'distinct fixes offered · Claude Code only';
+    const sessionSubtitle = `sessions in the last ${dayText}${health?.coverage?.atLimit === true ? ' · floor (scan at limit)' : ''}`;
+    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), sessionSubtitle, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `findings vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', fixValue, fixSubtitle, series.fixableFindings, health.comparison, 'fixableFindings', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), `checks could not be analyzed`, series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
+    const note = comparisonNote(health);
+    if (note) cards.append(el('p', 'comparison-note', note));
     root.append(cards);
   }
   const trend = trends?.trend;

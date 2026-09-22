@@ -492,6 +492,63 @@ function calculateTopFixes(sessions) {
   );
 }
 
+/**
+ * "Fixes available" is a promise the product has to be able to keep, so it is
+ * counted against the fix catalogue this build actually carries — the same
+ * `state.fixCatalog` every other route resolves its fix facts from, never a
+ * second list of ids kept here. A rule is free to name any id; an id with no
+ * descriptor behind it has no `preview()`/`apply()`, so offering it would send
+ * the user to a remedy that does not exist.
+ *
+ * A finding whose fix id is unknown does NOT disappear: it stays an observed
+ * finding in `windowTotals.observedFindings`, and is published here as
+ * `unknownFixFindings` / `unknownFixIds` so the gap between "a problem was
+ * found" and "a fix exists for it" is visible instead of silent. Only the
+ * availability claim is withdrawn.
+ *
+ * `windowTotals.fixableFindings` is a different measurement on purpose — it
+ * counts findings that NAME a fix, catalogue or not — and is left alone.
+ */
+export function calculateDistinctFixes(sessions, fixCatalog = FIX_CATALOG) {
+  const catalogIds = new Set(
+    (Array.isArray(fixCatalog) ? fixCatalog : [])
+      .map((descriptor) => descriptor?.id)
+      .filter((id) => typeof id === "string" && id),
+  );
+  const fixIds = new Set();
+  const clis = new Set();
+  const unknownFixIds = new Set();
+  let findings = 0;
+  let unknownFixFindings = 0;
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      if (rule?.evidence?.status !== "observed" || typeof rule?.fix !== "string" || !rule.fix) continue;
+      if (!catalogIds.has(rule.fix)) {
+        unknownFixIds.add(rule.fix);
+        unknownFixFindings += 1;
+        continue;
+      }
+      fixIds.add(rule.fix);
+      findings += 1;
+      if (typeof session?.cli === "string" && session.cli) clis.add(session.cli);
+    }
+  }
+  const fixClis = new Set(
+    (Array.isArray(fixCatalog) ? fixCatalog : [])
+      .filter((descriptor) => fixIds.has(descriptor?.id))
+      .map((descriptor) => descriptor?.cli)
+      .filter((cli) => typeof cli === "string" && cli),
+  );
+  return {
+    count: fixIds.size,
+    findings,
+    clis: [...clis].sort(),
+    fixClis: [...fixClis].sort(),
+    unknownFixFindings,
+    unknownFixIds: [...unknownFixIds].sort(),
+  };
+}
+
 function localCalendarDayCount(from, to) {
   const start = new Date(from.getFullYear(), from.getMonth(), from.getDate());
   const end = new Date(to.getFullYear(), to.getMonth(), to.getDate());
@@ -1454,6 +1511,7 @@ export function createApp(options = {}) {
       windowTotals,
       windowSeries,
       topFixes: calculateTopFixes(windowedSessions),
+      distinctFixes: calculateDistinctFixes(windowedSessions, state.fixCatalog),
       coverage,
       comparison,
       collectors: result.analysis.collectors,

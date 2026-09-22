@@ -247,14 +247,23 @@ globalThis.document = documentShim;
 if (typeof globalThis.addEventListener !== "function") globalThis.addEventListener = () => {};
 if (!globalThis.location) globalThis.location = { hash: "#/health" };
 
-/** Depth-first walk of a shim tree. */
+/**
+ * Depth-first walk of a shim tree, in DOCUMENT ORDER.
+ *
+ * The children are pushed in reverse so `pop()` hands them back left-to-right.
+ * Pushing them forwards reverses every sibling list, which makes
+ * `withClass(root, name)[0]` the LAST match instead of the first — so a test
+ * asking for "the Sessions-analyzed card" silently got the "Not measured" one
+ * and asserted against the wrong node. Counts hid it; only `[0]` sees it.
+ */
 function nodes(root) {
   const out = [];
   const stack = [root];
   while (stack.length) {
     const node = stack.pop();
     out.push(node);
-    (node.childNodes ?? []).forEach((child) => stack.push(child));
+    const children = node.childNodes ?? [];
+    for (let i = children.length - 1; i >= 0; i -= 1) stack.push(children[i]);
   }
   return out;
 }
@@ -350,6 +359,94 @@ const overviewHealth = (over = {}) => ({
   collectors: [],
   topFixes: [],
   ...over,
+});
+
+const populatedOverviewHealth = (over = {}) => overviewHealth({
+  sessionsTotal: 1,
+  windowTotals: { sessions: 1, observedFindings: 2, fixableFindings: 2, unknownChecks: 3 },
+  windowSeries: { sessions: [1], observedFindings: [2], fixableFindings: [2], unknownChecks: [3] },
+  comparison: { available: true, windowDays: 4 },
+  distinctFixes: { count: 2, findings: 2 },
+  ...over,
+});
+
+const populatedOverviewApi = {
+  async get(url) {
+    if (url.startsWith("/api/trends")) return { trend: {}, trendDeltas: {}, charts: {} };
+    if (url.startsWith("/api/sessions")) return { sessions: [] };
+    if (url === "/api/fixes") return { fixes: [] };
+    throw new Error(`unexpected Overview request: ${url}`);
+  },
+};
+
+test("Overview hero cards render their metric units in each card", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, populatedOverviewHealth(), { api: populatedOverviewApi });
+  const cards = withClass(mount, "summary-card");
+  assert.equal(cards.length, 4);
+  // The unit is asserted on the card's own subtitle line (`.rx-label`), not on
+  // the whole card: `textContent` joins sibling nodes with no separator, so a
+  // card-wide match reads across element boundaries ("...not comparablesessions
+  // in the last 4 days") and then succeeds or fails for reasons that have
+  // nothing to do with the unit word. The subtitle is where the unit belongs.
+  for (const [card, unit] of cards.map((card, index) => [card, ["sessions", "findings", "findings", "checks"][index]])) {
+    const label = withClass(card, "rx-label")[0];
+    assert.ok(label, `card must carry a subtitle line to publish its ${unit} unit on`);
+    assert.match(label.textContent, new RegExp(`\\b${unit}\\b`), `card must publish its ${unit} unit`);
+  }
+});
+
+test("Overview spend trend states its per-day mean, measured days, and cache versus fresh input", () => {
+  const card = overviewPage.trendCard("Token spend", "spend", {
+    spend: { available: true, to: 200, changePercent: 5, firstHalfDays: 3, secondHalfDays: 5 },
+  }, {
+    spend: [
+      { hasData: true, cacheRead: 100, cacheCreation: 10, total: 110 },
+      { hasData: true, cacheRead: 200, cacheCreation: 20, total: 220 },
+    ],
+  }, "total", "Total tokens per day", "accent");
+  assert.match(card.textContent, /Per-day mean/);
+  assert.match(card.textContent, /5 measured days/);
+  assert.match(card.textContent, /cache reads/);
+  assert.match(card.textContent, /fresh input/);
+  assert.doesNotMatch(card.textContent, /7 measured days/);
+});
+
+test("Overview marks the Sessions-analyzed card incomplete exactly at the scan limit", async () => {
+  for (const atLimit of [true, false]) {
+    const mount = new ShimElement("main");
+    await overviewPage.default(mount, populatedOverviewHealth({ coverage: { atLimit } }), { api: populatedOverviewApi });
+    const sessionsCard = withClass(mount, "summary-card")[0];
+    if (atLimit) assert.match(sessionsCard.textContent, /floor \(scan at limit\)/);
+    else assert.doesNotMatch(sessionsCard.textContent, /floor \(scan at limit\)/);
+  }
+});
+
+test("Overview renders one shared comparison sentence only when comparison is unavailable", async () => {
+  const reason = "the previous window was not read";
+  const unavailableMount = new ShimElement("main");
+  await overviewPage.default(unavailableMount, populatedOverviewHealth({ comparison: { available: false, reason } }), { api: populatedOverviewApi });
+  const notes = withClass(unavailableMount, "comparison-note");
+  assert.equal(notes.length, 1);
+  assert.match(notes[0].textContent, new RegExp(reason));
+
+  const availableMount = new ShimElement("main");
+  await overviewPage.default(availableMount, populatedOverviewHealth({ comparison: { available: true, reason } }), { api: populatedOverviewApi });
+  assert.equal(withClass(availableMount, "comparison-note").length, 0);
+});
+
+test("Overview Top-fixes rows contain no positional impact judgement", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, populatedOverviewHealth({
+    topFixes: [
+      { id: "first", name: "First fix", fixId: "fix-a", sessions: 2, findings: 2 },
+      { id: "second", name: "Second fix", fixId: "fix-b", sessions: 1, findings: 1 },
+      { id: "third", name: "Third fix", fixId: "fix-c", sessions: 1, findings: 1 },
+    ],
+  }), { api: populatedOverviewApi });
+  const rows = withClass(mount, "fix-row");
+  assert.equal(rows.length, 3);
+  for (const row of rows) assert.doesNotMatch(row.textContent, /High rank|Medium rank|Low rank/);
 });
 
 test("Overview replaces summary cards and Health/Trends with the first-run panel", async () => {
