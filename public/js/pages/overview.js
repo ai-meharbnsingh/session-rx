@@ -54,9 +54,32 @@ function lineChart(items, valueKey, tone) {
   values.forEach((value, index) => { if (value === null) return flush(); segment.push(`${12 + index / Math.max(1, values.length - 1) * 256},${baseline - ((value - min) / span) * 92}`); }); flush(); return svg;
 }
 
+/**
+ * Round a headline number to three significant figures, e.g. 333781217 -> "334M".
+ *
+ * WHY: a mean over seven measured days cannot support nine significant
+ * figures. `333,930,495` claims a precision the input does not have. Nothing is
+ * dropped — the whole-token value stays on the card in `.trend-exact` and in
+ * the headline's tooltip — only the false precision goes.
+ */
+function roundedHeadline(value) {
+  const size = Math.abs(value);
+  if (size < 1000) return number(Math.round(value));
+  const [scale, suffix] = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']].find(([step]) => size >= step);
+  const scaled = value / scale;
+  const places = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+  return `${Number(scaled.toFixed(places)).toLocaleString('en-US')}${suffix}`;
+}
+
+/** The published value in full, rounded to whole tokens — never to hundredths
+ *  of a token, which is a unit the collector does not measure. */
+function exactLevel(metric, key) {
+  return key === 'spend' ? `${number(Math.round(metric.to))} tokens per measured day` : `${metric.to}%`;
+}
+
 function trendLevel(metric, key) {
   if (metric?.available !== true || !finite(metric.to)) return null;
-  return key === 'spend' ? number(Math.round(metric.to)) : `${metric.to}%`;
+  return key === 'spend' ? roundedHeadline(metric.to) : `${metric.to}%`;
 }
 
 function trendChange(metric, key) {
@@ -82,8 +105,13 @@ export function trendCard(title, key, deltas, charts, valueKey, caption, tone) {
   if (level === null) box.append(el('h3', '', title), ...unavailableTrend(metric));
   else {
     const levelNode = el('strong', 'trend-level', level);
-    levelNode.title = `Published value: ${metric.to}. Mean over ${metric.secondHalfDays} measured days in the newer half.`;
-    box.append(el('h3', '', title), levelNode, trendChange(metric, key));
+    const exact = exactLevel(metric, key);
+    levelNode.title = `Published value: ${exact}. Mean over ${metric.secondHalfDays} measured days in the newer half.`;
+    box.append(el('h3', '', title), levelNode);
+    // The headline is rounded, so the exact figure stays on the card rather
+    // than only in a tooltip a keyboard user never reaches.
+    if (key === 'spend') box.append(el('span', 'trend-exact', exact));
+    box.append(trendChange(metric, key));
   }
   let note = caption;
   if (key === 'spend' && metric?.available === true && finite(metric.secondHalfDays)) {
@@ -176,11 +204,22 @@ async function renderOverview(mount, data, ctx = {}) {
     const cards = el('div', 'rx-grid rx-grid-four');
     const fixes = health?.distinctFixes;
     const fixValue = finite(fixes?.count) ? number(fixes.count) : 'not measured';
+    // This card's VALUE is distinctFixes.count. The published series and delta
+    // (`fixableFindings`) count FINDINGS, a different quantity: for 2026-09-19
+    // -> 2026-09-22 there were 3 distinct fixes against 4 in the window before,
+    // and the card rendered "3 ↑ 63.8%" — an up-arrow on a number that fell.
+    // The API publishes no previous-window distinct-fix count and no series for
+    // it, so this card carries neither chip nor sparkline rather than one that
+    // describes a different series from its own headline.
+    const fixComparison = {
+      available: false,
+      reason: 'the previous window\'s distinct-fix count is not published, so this number cannot be compared',
+    };
     const fixSubtitle = finite(fixes?.findings)
       ? `${number(fixes.findings)} findings addressed · Claude Code only`
       : 'distinct fixes offered · Claude Code only';
     const sessionSubtitle = `sessions in the last ${dayText}${health?.coverage?.atLimit === true ? ' · floor (scan at limit)' : ''}`;
-    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), sessionSubtitle, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `findings vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', fixValue, fixSubtitle, series.fixableFindings, health.comparison, 'fixableFindings', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), `checks could not be analyzed`, series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
+    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), sessionSubtitle, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `findings vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Fixes available', 'fixes', fixValue, fixSubtitle, null, fixComparison, 'distinctFixes', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), `checks could not be analyzed`, series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
     const note = comparisonNote(health);
     if (note) cards.append(el('p', 'comparison-note', note));
     root.append(cards);

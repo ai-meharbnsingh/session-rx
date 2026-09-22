@@ -947,6 +947,139 @@ test("shared health verdict keeps the total denominator and unknown signal in co
   assert.match(compact.className, /health-warn/);
 });
 
+/**
+ * Every string a viewer can actually read out of a rendered shim tree: the text,
+ * plus the `title` and `aria-label` a browser surfaces on hover or to a screen
+ * reader. A tooltip is rendered output too — the false precision this suite
+ * failed to catch lived in one.
+ */
+function renderedStrings(root) {
+  const out = [];
+  for (const node of nodes(root)) {
+    if (typeof node.textContent === "string") out.push(node.textContent);
+    if (typeof node.title === "string") out.push(node.title);
+    for (const value of node.attributes?.values() ?? []) out.push(String(value));
+  }
+  return out;
+}
+
+test("the Sessions health column is sized for the sentence it renders, and the pill never breaks mid-word", () => {
+  // WHY A CSS TEST: the honest ~60-character verdict shipped into a column
+  // pinned at 78px. Under `table-layout: fixed` that width is absolute, the
+  // unsized expander column took the 372px surplus, and `overflow-wrap:
+  // anywhere` shattered the sentence into a 1-2 character ribbon 357px tall.
+  // Every assertion in this suite was on TEXT, so all of them stayed green.
+  const css = stripCssComments(read(path.join(PUBLIC, "css", "style.css")));
+  const width = (column) => {
+    const rule = css.match(new RegExp(`\\.session-layout > \\.card th:nth-child\\(${column}\\)[^{]*\\{([^}]*)\\}`));
+    assert.ok(rule, `Sessions column ${column} must carry an explicit width under table-layout: fixed`);
+    const px = rule[1].match(/width:\s*(\d+)px/);
+    assert.ok(px, `Sessions column ${column} must state its width in px`);
+    return Number(px[1]);
+  };
+
+  assert.match(css, /\.session-layout > \.card table \{[^}]*table-layout:\s*fixed/, "the widths below only bind under fixed layout");
+  // Column 1 is the EMPTY expander. Left unsized it swallowed the surplus.
+  for (let column = 1; column <= 10; column += 1) assert.ok(width(column) > 0, `column ${column} must be sized`);
+  assert.ok(width(1) <= 60, `the empty expander column is ${width(1)}px — it must not absorb the table's surplus`);
+
+  // Column 10 is Health. 78px left 50px of content for a ~60-character sentence.
+  assert.ok(width(10) >= 200, `Health is ${width(10)}px; a ~60-character verdict needs far more`);
+  assert.ok(width(10) > width(8) && width(10) > width(9), "Health must not be sized like the two-digit number columns beside it");
+
+  const open = css.indexOf(".health-pill {");
+  assert.ok(open !== -1, ".health-pill must be styled");
+  const pill = css.slice(open, css.indexOf("}", open));
+  assert.doesNotMatch(pill, /overflow-wrap:\s*anywhere/, "break-anywhere is what shattered the sentence mid-word");
+  assert.doesNotMatch(pill, /word-break:\s*break-all/, "break-all shatters words the same way");
+  assert.match(pill, /overflow-wrap:\s*break-word/, "only a word that cannot fit on a line of its own may be broken");
+});
+
+test("the Fixes card's chip and sparkline never describe a different series from its own value", () => {
+  // Reproduced live for 2026-09-19 -> 2026-09-22: 3 distinct fixes against 4 in
+  // the window before (down 25%), rendered as "3 ↑ 63.8%" — because the value
+  // was distinctFixes.count while the chip and sparkline were fed
+  // fixableFindings. The old fixture hid it by setting the two equal.
+  const health = populatedOverviewHealth({
+    windowTotals: { sessions: 179, observedFindings: 113, fixableFindings: 113, unknownChecks: 236 },
+    windowSeries: { sessions: [110, 179], observedFindings: [49, 39, 20, 5], fixableFindings: [49, 39, 20, 5], unknownChecks: [236] },
+    distinctFixes: { count: 3, findings: 113 },
+    comparison: {
+      available: true,
+      windowDays: 4,
+      deltas: {
+        sessions: { from: 110, to: 179, changePercent: 62.7 },
+        observedFindings: { from: 69, to: 113, changePercent: 63.8 },
+        fixableFindings: { from: 69, to: 113, changePercent: 63.8 },
+      },
+    },
+  });
+  const mount = new ShimElement("main");
+  return overviewPage.default(mount, health, { api: populatedOverviewApi }).then(() => {
+    const cards = withClass(mount, "summary-card");
+    const fixesCard = cards.find((card) => /Fixes available/.test(card.textContent));
+    assert.ok(fixesCard, "the Fixes card must render");
+    assert.equal(withClass(fixesCard, "rx-number")[0].textContent, "3", "the value is the distinct-fix count");
+
+    const chip = withClass(fixesCard, "rx-delta")[0];
+    assert.ok(chip, "a card without a comparable delta still says so rather than going blank");
+    assert.doesNotMatch(chip.textContent, /63\.8/, "63.8% is the findings change, not the distinct-fix change");
+    assert.doesNotMatch(chip.textContent, /[↑↓]/, "no direction may be drawn from a series this card does not show");
+    assert.match(chip.textContent, /not comparable/);
+    assert.equal(withClass(fixesCard, "sparkline").length, 0, "a sparkline of fixableFindings does not belong under a distinct-fix count");
+
+    // And this is not "every chip was removed": the Sessions card keeps its own.
+    const sessionsCard = cards.find((card) => /Sessions analyzed/.test(card.textContent));
+    assert.match(withClass(sessionsCard, "rx-delta")[0].textContent, /↑ 62\.7%/, "a card whose own series IS published keeps its delta");
+    const problemsCard = cards.find((card) => /Problems found/.test(card.textContent));
+    assert.match(withClass(problemsCard, "rx-delta")[0].textContent, /↑ 63\.8%/, "observedFindings is the Problems card's own series");
+  });
+});
+
+test("a seven-day mean renders a rounded headline, and no rendered string states a fraction of a token", () => {
+  const card = overviewPage.trendCard("Token spend", "spend", {
+    spend: { available: true, to: 333071747.43, changePercent: -61.4, firstHalfDays: 7, secondHalfDays: 7 },
+  }, { spend: [] }, "total", "Total tokens per day", "accent");
+
+  const level = withClass(card, "trend-level")[0];
+  assert.ok(level, "the headline must render");
+  assert.match(level.textContent, /^\d{1,3}(\.\d{1,2})?[KMB]$/, `a 7-day mean cannot support "${level.textContent}"`);
+  assert.equal(level.textContent, "333M");
+
+  // Rounded is not the same as hidden: the whole-token figure stays on the card.
+  assert.match(card.textContent, /333,071,747/, "the exact published value must stay reachable");
+
+  for (const value of renderedStrings(card)) {
+    assert.doesNotMatch(value, /\d{4,}\.\d/, `a fraction of a token is not a measured unit: ${JSON.stringify(value)}`);
+    assert.ok(!value.includes("333071747"), `the published value must be grouped, not raw: ${JSON.stringify(value)}`);
+  }
+
+  // A percentage headline is untouched — this rounding is about token counts.
+  const cache = overviewPage.trendCard("Cache hit rate", "cache", {
+    cache: { available: true, to: 98.12, changePercent: -0.1, secondHalfDays: 7 },
+  }, { cache: [] }, "hitRate", "Cache hits (%)", "pass");
+  assert.match(withClass(cache, "trend-level")[0].textContent, /^98\.12%$/);
+});
+
+test("one rule, one severity: the Sessions page reads the shared helper in both places", () => {
+  // `long-rising-context` is declared `critical`. A second mapping in
+  // sessions.js (`severity === 'error' ? 'High' : 'Medium'`) rendered it High in
+  // Key findings and Medium in the detail panel of the same page.
+  const sessions = stripJsComments(read(path.join(PUBLIC, "js", "pages", "sessions.js")));
+  assert.doesNotMatch(sessions, /severity\s*===\s*['"]error['"]/, "sessions.js must not map severity itself");
+  for (const label of ["'High'", '"High"', "'Medium'", '"Medium"', "'Low'", '"Low"']) {
+    assert.ok(!sessions.includes(label), `the severity label ${label} must live only in components/ui.js`);
+  }
+  assert.match(sessions, /finding-\$\{severity\(rule\)\.toLowerCase\(\)\}/, "Key findings must read the shared helper");
+  assert.match(sessions, /const level = severity\(rule\)/, "the detail panel must read the same shared helper");
+
+  const rule = { id: "long-rising-context", name: "Context keeps rising", severity: "critical" };
+  assert.equal(ui.severity(rule), "High", "a critical rule is High wherever it is rendered");
+  for (const [declared, label] of [["critical", "High"], ["error", "High"], ["warn", "Medium"], ["info", "Low"], [undefined, "Low"]]) {
+    assert.equal(ui.severity({ severity: declared }), label, `severity ${String(declared)} must map to ${label} once`);
+  }
+});
+
 test("Sessions and Health use the same shared verdict component", () => {
   const sessions = read(path.join(PUBLIC, "js", "pages", "sessions.js"));
   const health = read(path.join(PUBLIC, "js", "pages", "health.js"));
