@@ -302,11 +302,25 @@ test("overview issue distribution percentages sum to 100 with largest-remainder 
 });
 
 test("overview trend cards render the current level and its change", () => {
-  const card = overviewPage.trendCard("Cache hit rate", "cache", {
-    cache: { available: true, to: 98.2, changePercent: -0.1, secondHalfDays: 6 },
-  }, { cache: [] }, "hitRate", "Cache hits (%)", "pass");
-  assert.match(card.textContent, /98\.2%/);
-  assert.match(card.textContent, /↓ 0\.1% relative change/);
+  const cards = [
+    overviewPage.trendCard("Context efficiency", "context", {
+      context: { available: true, to: 70.4, changePercent: -50.8, secondHalfDays: 6 },
+    }, { context: [] }, "turnsAboveThreshold", "Turns above 70% of window", "pass"),
+    overviewPage.trendCard("Token spend", "spend", {
+      spend: { available: true, to: 330705511.71, changePercent: 3.06, secondHalfDays: 6 },
+    }, { spend: [] }, "total", "Total tokens per day", "accent"),
+    overviewPage.trendCard("Cache hit rate", "cache", {
+      cache: { available: true, to: 98.3, changePercent: -0.1, secondHalfDays: 6 },
+    }, { cache: [] }, "hitRate", "Cache hits (%)", "pass"),
+  ];
+  assert.match(cards[0].textContent, /70\.4%/);
+  assert.match(cards[1].textContent, /330,705,512/);
+  assert.doesNotMatch(cards[1].textContent, /330,705,512\.\d/);
+  assert.match(cards[1].textContent, /3\.06%/);
+  assert.match(cards[2].textContent, /98\.3%/);
+  assert.match(cards[0].textContent, /↓ 50\.8% relative change/);
+  assert.match(cards[1].textContent, /↑ \+3\.06%/);
+  assert.match(cards[2].textContent, /↓ 0\.1% relative change/);
 });
 
 test("overview trend cards print the published reason when unavailable", () => {

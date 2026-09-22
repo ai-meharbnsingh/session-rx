@@ -45,7 +45,7 @@ function lineChart(items, valueKey, tone) {
 
 function trendLevel(metric, key) {
   if (metric?.available !== true || !finite(metric.to)) return null;
-  return key === 'spend' ? number(metric.to) : `${metric.to}%`;
+  return key === 'spend' ? number(Math.round(metric.to)) : `${metric.to}%`;
 }
 
 function trendChange(metric, key) {
@@ -71,7 +71,7 @@ export function trendCard(title, key, deltas, charts, valueKey, caption, tone) {
   if (level === null) box.append(el('h3', '', title), ...unavailableTrend(metric));
   else {
     const levelNode = el('strong', 'trend-level', level);
-    levelNode.title = `Mean over ${metric.secondHalfDays} measured days in the newer half.`;
+    levelNode.title = `Published value: ${metric.to}. Mean over ${metric.secondHalfDays} measured days in the newer half.`;
     box.append(el('h3', '', title), levelNode, trendChange(metric, key));
   }
   box.append(lineChart(charts?.[key], valueKey, tone), el('p', 'trend-note', caption));

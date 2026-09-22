@@ -28,9 +28,11 @@ your own files are left exactly as they are either way.
 It reads the session logs your AI coding CLIs already write, runs six health
 checks against each recent session, and offers a local fix for the ones that
 fail. The six checks are context pressure, cache hit rate, repeated tool work,
-large tool results, long rising context, and sub-agent concurrency.
+large tool results, long rising context, and sub-agent concurrency. A date-range
+selector in the header lets you filter results by the last 15 days, 30 days, 3
+months, or all time without changing the verdicts.
 
-![Overview showing a Last 15 days range selector, a line stating how many sessions the window holds and that the scan was not complete, summary cards for sessions analyzed, problems found, fixes available and checks that could not be measured, and a Health summary beside Trends — the donut showing passed, problems found and could not be measured, and an issue distribution listing every check with the number of sessions it could not be measured on](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
+![Overview showing a Last 15 days range selector, a line stating the window holds 678 sessions and that the scan was not complete, six detected CLIs, summary cards for sessions analyzed, problems found, fixes available and checks that could not be measured — each delta reading "not comparable" because the scan did not reach back far enough — and a Health summary beside Trends, the donut showing 86% of measured checks passed with 2,152 that could not be measured, and an issue distribution listing every check with the number of sessions it could not be measured on](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
 
 ### Every check returns one of three answers
 
