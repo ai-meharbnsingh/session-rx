@@ -36,7 +36,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { listenOnFreePort, parseArgs } from "../src/cli.js";
+import { listenOnFreePort, parseArgs, shouldSuppressWarning } from "../src/cli.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(HERE, "..");
@@ -107,6 +107,20 @@ after(async () => {
   for (const running of servers) {
     try { await running.close(); } catch { /* already closed */ }
   }
+});
+
+describe("node warning filter", () => {
+  it("suppresses SQLite ExperimentalWarnings", () => {
+    assert.equal(shouldSuppressWarning({ name: "ExperimentalWarning", message: "SQLite is an experimental feature" }), true);
+  });
+
+  it("does not suppress other ExperimentalWarnings", () => {
+    assert.equal(shouldSuppressWarning({ name: "ExperimentalWarning", message: "WebAssembly is experimental" }), false);
+  });
+
+  it("does not suppress DeprecationWarnings", () => {
+    assert.equal(shouldSuppressWarning({ name: "DeprecationWarning", message: "SQLite API is deprecated" }), false);
+  });
 });
 
 // ===========================================================================

@@ -20,6 +20,21 @@ import { realpathSync } from "node:fs";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+/**
+ * Node 22 labels node:sqlite experimental even though SessionRx supports that
+ * runtime. Remove this narrow filter once node:sqlite becomes stable; keeping
+ * the name and SQLite check together prevents other warnings being hidden.
+ */
+export function shouldSuppressWarning(warning) {
+  return warning?.name === "ExperimentalWarning" && /sqlite/i.test(warning?.message ?? "");
+}
+
+process.on("warning", (warning) => {
+  if (shouldSuppressWarning(warning)) return;
+  // Node's default warning handler remains active because this listener does
+  // not replace it; every non-matching warning is therefore still printed.
+});
+
 import { STATE_DIR_NAME } from "./fixes/base.js";
 import { runCleanCommand } from "./fixes/clean.js";
 import { startServer } from "./server.js";
