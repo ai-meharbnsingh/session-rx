@@ -32,7 +32,7 @@ large tool results, long rising context, and sub-agent concurrency. A date-range
 selector in the header lets you filter results by the last 15 days, 30 days, 3
 months, or all time without changing the verdicts.
 
-![Overview showing a Last 15 days range selector, a line stating the window holds 678 sessions and that the scan was not complete, six detected CLIs, summary cards for sessions analyzed, problems found, fixes available and checks that could not be measured — each delta reading "not comparable" because the scan did not reach back far enough — and a Health summary beside Trends, the donut showing 86% of measured checks passed with 2,152 that could not be measured, and an issue distribution listing every check with the number of sessions it could not be measured on](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
+![Overview showing a date-range selector, a line stating how many sessions the window holds and that the scan was not complete, the CLIs detected on this machine, and four summary cards — sessions analyzed marked as a floor because the scan hit its limit, problems found, distinct fixes available noted as Claude Code only, and checks that could not be measured — each with its unit named and its comparison marked not comparable, above a Health summary beside Trends showing the share of measured checks that passed with the unmeasured count kept outside it](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
 
 ### Every check returns one of three answers
 

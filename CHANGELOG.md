@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A green "No problems" pill rendered on sessions where checks could not run.** Over 1,000 real sessions, 587 rows displayed it and 583 of those had at least one unmeasured check; 268 had zero checks pass. The verdict honours the honesty contract (unknown is never a pass), but the table did not. Sessions now show three distinct states: a pass only when no checks are unknown, an observed problem when findings exist, or an unmeasured state when unknown checks exist, with a count of how many of how many could not be measured.
+- **The session health badge computed a wrong denominator and disagreed between pages.** The Sessions table computed `passed/(total - unknown)` and rendered `4/5 measured` while the Health page computed the same session as `4/6`. The badge now uses the API's own `score.label` string, computed once and shared across all components, eliminating the discrepancy.
+- **Four summary cards lacked unit words, causing a count of checks to read as a count of sessions.** Cards now explicitly label their units: "sessions", "findings", "findings", and "checks".
+- **The token-spend card printed a per-day mean to nine significant figures under the caption "Total tokens per day", hiding the fact that ~99% of it was cache re-reads.** The card now states it is a per-day mean over N measured days, separates cache-read tokens from fresh input, and renders both values.
+- **The "Sessions analyzed" card presented a scan-limited floor as fact.** When the scan has reached its per-CLI limit and cannot read further back, the card now discloses this on its own face.
+- **"Fixes available" showed the same count as "Problems found" (both 277) because every rule carries a fix, obscuring which improvements SessionRx can actually offer.** The card now shows the count of distinct fixes (4), notes how many findings they address (277), and states that all fixes write to Claude Code's config, not the other CLI mentioned in a finding.
+- **`distinctFixes` counted fix ids with no implementation behind them.** The count is now bounded by the real fix catalogue; a finding whose fix id is unknown stays an observed finding but no longer claims a remedy exists.
+- **"High rank" / "Medium rank" / "Low rank" severity badges on Top fixes were assigned from list position and displayed as a judgement.** These badges have been removed.
+- **A missing bracket in `tests/frontend-contract.test.js` left the test file unable to parse, silently hiding 64 tests.** The bracket is restored; the test suite now correctly reports all assertions.
+- **On Node 22, the first line printed was Node's own SQLite ExperimentalWarning, making SessionRx appear experimental.** The warning is now suppressed for SQLite only via scoped filtering; all other warnings continue to reach the user.
 - **A chart invented its own data from a loop index.** The Fix page's "Occurrences in recent sessions" chart set bar heights from a for-loop counter — seven bars, fixed heights, unrelated to any measurement. This was the most serious bug in this release on the one tool whose whole claim is that it never shows a figure it cannot justify. The chart now draws real per-day counts from each finding's session start time. Where no session carries a start time it says so instead of drawing anything.
 - An internal rule identifier like `BP-003.04` escaped into user-facing body text. These ids are deliberate in the analyzer as evidence of record and render only inside collapsed evidence sections; they do not appear in prose a reader sees by default.
 - With only two days in range, the occurrence histogram drew two bars each as wide as the card. Bar width is now capped.
@@ -32,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Repository (not shipped in the npm package)
 
 - README screenshots recaptured against the redesigned interface: new Overview page image, and replacement Health page showing one real session carrying all three verdicts at once.
-- Test suite: 828 passing, 0 failing.
+- Test suite verified on Node 22.23.2 and Node 26.7.0: 878 passing, 0 failing.
 
 ## [0.1.1] - 2026-09-21
 
