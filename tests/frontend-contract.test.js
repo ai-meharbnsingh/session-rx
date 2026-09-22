@@ -995,6 +995,49 @@ test("the Sessions health column is sized for the sentence it renders, and the p
   assert.match(pill, /overflow-wrap:\s*break-word/, "only a word that cannot fit on a line of its own may be broken");
 });
 
+test("the date-range select's focus ring is not cancelled by a higher-specificity rule", () => {
+  // WHY A CSS TEST: `.range-picker select { outline: 0 }` is specificity
+  // (0,1,1) and quietly beat the global `:focus-visible { outline: 2px ... }`
+  // at (0,1,0). Verified live under real Tab navigation: the element matched
+  // :focus-visible with a computed outline of `none 0px` and no box-shadow.
+  // It is the one control that changes every number on every page, so a
+  // keyboard user had no way to see where they were. No text assertion in
+  // this suite could see that, because nothing about the markup was wrong.
+  const css = stripCssComments(read(path.join(PUBLIC, "css", "style.css")));
+
+  const globalRing = css.match(/(^|\})\s*:focus-visible\s*\{([^}]*)\}/);
+  assert.ok(globalRing, "the global :focus-visible ring must exist for anything to be cancelled");
+  assert.match(globalRing[2], /outline:\s*2px\s+solid/, "the global ring is what the select must not lose");
+
+  // The resting rule may still clear the browser default, but only if a
+  // focus-visible rule of HIGHER specificity puts an indicator back.
+  const resting = css.match(/\.range-picker select\s*\{([^}]*)\}/);
+  assert.ok(resting, ".range-picker select must still be styled");
+  const clearsOutline = /outline:\s*(0|none)\b/.test(resting[1]);
+
+  const focusRule = css.match(/\.range-picker select:focus-visible\s*\{([^}]*)\}/);
+  assert.ok(
+    focusRule,
+    clearsOutline
+      ? ".range-picker select clears its outline, so .range-picker select:focus-visible must restore one"
+      : ".range-picker select:focus-visible must state the ring explicitly rather than rely on the cascade",
+  );
+  const body = focusRule[1];
+  assert.doesNotMatch(body, /outline:\s*(0|none)\b/, "the focus rule must not itself cancel the ring it exists to restore");
+  assert.ok(
+    /outline:\s*\d+px\s+\w+\s+var\(--[\w-]+\)/.test(body) || /box-shadow:\s*[^;]*var\(--[\w-]+\)/.test(body),
+    `the focus indicator must be visible and use an existing token; got "${body.trim()}"`,
+  );
+
+  // Specificity, stated as the thing that actually decides it: the focus rule
+  // carries every selector part of the resting rule plus the pseudo-class, so
+  // it wins whatever order the two appear in.
+  const restingAt = css.indexOf(".range-picker select {");
+  const focusAt = css.indexOf(".range-picker select:focus-visible");
+  assert.ok(restingAt !== -1 && focusAt !== -1);
+  assert.ok(focusAt > restingAt, "a same-or-higher-specificity focus rule must not be overridden by a later resting rule");
+});
+
 test("the Fixes card's chip and sparkline never describe a different series from its own value", () => {
   // Reproduced live for 2026-09-19 -> 2026-09-22: 3 distinct fixes against 4 in
   // the window before (down 25%), rendered as "3 ↑ 63.8%" — because the value

@@ -24,6 +24,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ==========================================================================
 // A minimal DOM, sufficient for public/js/pages/health.js and nothing more.
@@ -296,13 +299,63 @@ test("the health page renders a summary region, before any card, with all four r
   assert.equal(stats.get("Sessions analyzed").textContent.trim(), "2");
   // Two OBSERVED rules total (one per session), one of which carries a fix.
   assert.equal(stats.get("Problems found").textContent.trim(), "2");
-  assert.equal(stats.get("Fixes available").textContent.trim(), "1");
+  // Renamed from "Fixes available": the Overview card of that name counts
+  // DISTINCT fixes, this one counts fixable FINDINGS. Same count, honest label.
+  assert.equal(stats.get("Fixable findings").textContent.trim(), "1");
   assert.equal(stats.get("Checks not measured").textContent.trim(), "1");
 
   const action = withClass(mount, "summary-action")[0];
   assert.ok(action, "a 'Review fixes' action must render");
   assert.equal(action.textContent.trim(), "Review fixes");
   assert.equal(action.tagName, "BUTTON");
+});
+
+test("the Health summary and the Overview cards never share a label for two different quantities", () => {
+  // WHY: both surfaces rendered a figure called "Fixes available". The Health
+  // one counted fixable FINDINGS (9 live), the Overview one counted DISTINCT
+  // fixes (4 live). Each page stated its own scope a line below, so neither
+  // number was false — but under one identical label the wider scan showing
+  // the smaller figure reads as a contradiction. The label now names the
+  // quantity. What is counted did not change.
+  const observedWithFix = RULE({
+    id: "repeat-tool", name: "Repeated tool work", fix: "claude-batch-commands",
+    evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
+  });
+  const secondObservedSameFix = RULE({
+    id: "large-tool-result", name: "Large tool results", fix: "claude-batch-commands",
+    evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
+  });
+  const data = PAYLOAD({
+    sessions: [SESSION({ sessionId: "sess-1", rules: [observedWithFix, secondObservedSameFix] })],
+    sessionsTotal: 1,
+  });
+  const stats = summaryMap(render(data));
+  const healthLabels = [...stats.keys()];
+
+  // The Health stat names findings, and still counts findings: TWO observed
+  // findings carrying a fix, even though they name ONE distinct fix between
+  // them — which is exactly the divergence the shared label hid.
+  assert.ok(stats.has("Fixable findings"), `the Health fixable stat must be labelled "Fixable findings"; got ${JSON.stringify(healthLabels)}`);
+  assert.equal(stats.get("Fixable findings").textContent.trim(), "2", "the label changed, the counted quantity did not");
+  assert.ok(!stats.has("Fixes available"), '"Fixes available" is the Overview card\'s name for the distinct-fix count, and must not also name this one');
+
+  // The other half of the contract: the Overview card is still called
+  // "Fixes available" over `distinctFixes`. If it is ever renamed to match
+  // the Health stat, the collision is back and this test must fail.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const overviewSrc = readFileSync(path.join(here, "..", "public", "js", "pages", "overview.js"), "utf8");
+  assert.match(overviewSrc, /summaryCard\('Fixes available',\s*'fixes'/, "the Overview card must keep its own distinct-fix label");
+  assert.ok(!overviewSrc.includes("'Fixable findings'"), "the findings label belongs to the Health summary alone");
+
+  // No Health summary label may collide with an Overview card label unless the
+  // two genuinely count the same thing.
+  const overviewLabels = [...overviewSrc.matchAll(/summaryCard\('([^']+)'/g)].map((m) => m[1]);
+  assert.ok(overviewLabels.length >= 4, `expected the Overview cards to be readable from source; got ${JSON.stringify(overviewLabels)}`);
+  const sameQuantity = new Set(["Sessions analyzed", "Problems found"]);
+  for (const label of healthLabels) {
+    if (!overviewLabels.includes(label)) continue;
+    assert.ok(sameQuantity.has(label), `"${label}" names one quantity on Health and another on Overview`);
+  }
 });
 
 test("a genuinely unavailable count renders an em dash, never 0 — and a real zero still renders as 0", () => {
@@ -319,7 +372,7 @@ test("a genuinely unavailable count renders an em dash, never 0 — and a real z
   // shown, so it renders the number, not a dash.
   assert.equal(stats.get("Sessions analyzed").textContent.trim(), "2");
 
-  for (const label of ["Problems found", "Fixes available", "Checks not measured"]) {
+  for (const label of ["Problems found", "Fixable findings", "Checks not measured"]) {
     const node = stats.get(label);
     assert.ok(node, `${label} must render`);
     assert.match(node.textContent, /—/, `${label} must render an em dash when nothing was evaluated`);

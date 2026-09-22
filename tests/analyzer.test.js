@@ -782,6 +782,55 @@ test("long-rising-context: three readings at three DIFFERENT times still produce
   assert.ok(valueOf(result, "context trend") > 0, "a real slope over three distinct times");
 });
 
+test("long-rising-context: the published rate is whole tokens per hour, and an uncomputable one is still null", () => {
+  // WHY: the trend row shipped `round(perHour, 1)` and rendered live as
+  // "975,275.1 tokens per hour". A rate worked out from a token count and an
+  // elapsed duration has no tenth-of-a-token to give; that digit was noise
+  // wearing the clothes of a measurement. The contract is now whole tokens.
+  //
+  // These three readings are chosen so the RAW Theil-Sen median is genuinely
+  // fractional — 20,001 / 25,001.5 / 30,002 tokens per hour, median 25,001.5 —
+  // so a test that passed only because the arithmetic happened to land whole
+  // would not pass here.
+  const session = makeSession({
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T09:00:00Z",
+    turns: [
+      { ts: "2026-01-01T01:00:00Z", inputTokens: 40000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 60001 },
+      { ts: "2026-01-01T03:00:00Z", inputTokens: 90003 },
+    ],
+  });
+  const result = verdict("long-rising-context", session);
+  assert.equal(result.evidence.status, "observed");
+
+  const trend = valueOf(result, "context trend");
+  assert.equal(typeof trend, "number");
+  assert.ok(Number.isInteger(trend), `context trend published ${trend} — a rate of tokens per hour carries no fractional part`);
+  assert.equal(trend, 25002, "the whole-token rate is the raw 25,001.5 rounded, not truncated and not re-scaled");
+
+  // The rendered form is what the reader sees, and it is where the stray
+  // ".1" was visible. Guard it with the comma-aware pattern the earlier
+  // sweep's `\d{4,}\.\d` could not match, because commas break the digit run.
+  const rendered = trend.toLocaleString("en-US");
+  assert.doesNotMatch(rendered, /(\d{1,3}(,\d{3})+|\d{4,})\.\d/, `"${rendered}" still renders a fractional token`);
+
+  // Neighbouring behaviour this must not have swallowed: a rate that could
+  // NOT be computed stays null. Rounding never turns an absence into a 0.
+  const unmeasurable = verdict("long-rising-context", makeSession({
+    startedAt: "2026-01-01T00:00:00Z",
+    endedAt: "2026-01-01T05:00:00Z",
+    turns: [
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+      { ts: "2026-01-01T02:00:00Z", inputTokens: 50000 },
+    ],
+  }));
+  assert.equal(unmeasurable.evidence.status, "unknown");
+  assert.equal(valueOf(unmeasurable, "context trend"), null, "an unmeasurable rate is null, never 0");
+  assert.notEqual(valueOf(unmeasurable, "context trend"), 0);
+});
+
 // ===========================================================================
 // BP-003.06 subagent-concurrency
 // ===========================================================================

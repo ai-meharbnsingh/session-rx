@@ -107,6 +107,24 @@ function round(value, places = 4) {
 }
 
 /**
+ * A rate published in whole units.
+ *
+ * A rate worked out from a token count and an elapsed duration carries no
+ * sub-token precision — "975,275.1 tokens per hour" states a tenth of a token
+ * that nothing measured, and the reader has no way to know the digit is noise.
+ * The published figure is therefore whole tokens per hour.
+ *
+ * `null` stays `null`: a rate that could not be computed is not a rate of 0.
+ */
+function wholeRate(value) {
+  if (value === null) return null;
+  const whole = Math.round(value);
+  // -0 === 0 is true, so a rate that rounds down from a hair below zero is
+  // published as 0 rather than as the "-0" that would otherwise render.
+  return whole === 0 ? 0 : whole;
+}
+
+/**
  * Stable JSON with sorted object keys, so two structurally equal tool inputs
  * hash alike whatever order the parser produced their keys in.
  */
@@ -817,7 +835,7 @@ const longRisingContext = {
     const perHour = slope === null ? null : slope * HOUR_MS;
     const values = [
       { label: "session elapsed", value: round(elapsedHours, 2), unit: "hours", sessionId },
-      { label: "context trend", value: perHour === null ? null : round(perHour, 1), unit: "tokens per hour", sessionId },
+      { label: "context trend", value: wholeRate(perHour), unit: "tokens per hour", sessionId },
       countValue("context observations used for the slope", used),
       { label: "context at the first observation", value: points[0].y, unit: "tokens", sessionId },
       { label: "context at the last observation", value: points[points.length - 1].y, unit: "tokens", sessionId },

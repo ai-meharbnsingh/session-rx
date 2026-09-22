@@ -1119,7 +1119,12 @@ export function healthSummaryNode(shown, actionableIndex) {
   };
   stats.append(stat('Sessions analyzed', sessions.length, 'no session fell inside this scan'));
   stats.append(stat('Problems found', sawRules ? problems : null, noEvidence));
-  stats.append(stat('Fixes available', sawRules ? fixable : null, noEvidence));
+  // "Fixable findings", not "Fixes available": this counts FINDINGS that carry
+  // a fix, while the Overview card called "Fixes available" counts DISTINCT
+  // fixes. Both are true; sharing one label made the smaller Overview number
+  // look like a contradiction of the larger one here. The label names the
+  // quantity; the count itself is unchanged.
+  stats.append(stat('Fixable findings', sawRules ? fixable : null, noEvidence));
   stats.append(stat('Checks not measured', sawRules ? unmeasured : null, noEvidence));
   wrap.append(stats);
 
