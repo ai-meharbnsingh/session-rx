@@ -24,9 +24,8 @@
  *    at a time and this page fetches the next twenty when the reader reaches
  *    the bottom.  Everything the toolbar and the header sentence count is
  *    therefore a count of what has been LOADED, never of what exists, and both
- *    numbers are printed side by side.  The CLI filter and the column sort run
- *    over the loaded rows only; saying "12 of 1,236" when 40 rows are in hand
- *    would be exactly the overstatement this product exists not to make.
+ *    numbers are printed side by side.  CLI options come from the server's
+ *    scan facet, while health and issue filters still run over loaded rows.
  *
  * The verdict rendering — including the whole `unknown` treatment — is imported
  * from the health page rather than re-implemented, so the two pages cannot
@@ -94,6 +93,7 @@ const state = {
   sessions: [],
   seen: new Set(),
   total: null,
+  cliCounts: null,
   nextOffset: null,
   hasMore: false,
   requested: new Set(),
@@ -125,7 +125,6 @@ function observedLabels(session) {
 /** Apply the CLI, Health status and Issue type filters to the loaded rows. */
 function filterRows(sessions) {
   return sessions.filter((session) => {
-    if (state.cli !== 'all' && session?.cli !== state.cli) return false;
     if (state.health.size && !HEALTH_CHOICES.some((choice) => state.health.has(choice.key) && choice.test(session))) return false;
     if (state.issues.size && !observedLabels(session).some((label) => state.issues.has(label))) return false;
     return true;
@@ -460,13 +459,11 @@ function sessionRows(session, api, redraw) {
 /**
  * CLI filter and the sort reset, plus the honest row count.
  *
- * Every number here counts LOADED rows.  While more pages remain, each one says
- * so in the caption — `claude (18 loaded)`, not `claude (18)` — because the
- * filter cannot see a session this page has not fetched, and a bare count reads
- * as a corpus total.  Once the last page is in, the qualifier drops, since the
- * count is then the whole match.
+ * CLI facet counts are counts of sessions matching in the bounded scan, not
+ * counts of rows currently loaded. Health and issue counts remain loaded-row
+ * counts because those filters are still client-side.
  */
-function toolbar(loaded, shown, total, redraw) {
+function toolbar(loaded, shown, total, api, redraw) {
   const bar = el('div', 'toolbar');
   const partial = state.hasMore;
 
@@ -479,23 +476,32 @@ function toolbar(loaded, shown, total, redraw) {
       ? 'Filter the sessions loaded so far by CLI. Sessions not yet loaded are not counted.'
       : 'Filter sessions by CLI',
   );
-  const clis = [...new Set(loaded.map((session) => session?.cli).filter((cli) => typeof cli === 'string' && cli))].sort();
+  const cliCounts = Array.isArray(state.cliCounts)
+    ? state.cliCounts
+    : [...new Set(loaded.map((session) => session?.cli).filter((cli) => typeof cli === 'string' && cli))]
+      .sort()
+      .map((cli) => ({ cli, count: loaded.filter((session) => session?.cli === cli).length }));
   const option = (value, caption) => {
     const node = el('option', null, caption);
     node.value = value;
     if (state.cli === value) node.selected = true;
     return node;
   };
-  select.append(option('all', partial
-    ? `All CLIs (${groupInt(loaded.length) ?? '0'} of ${groupInt(total) ?? '0'} loaded)`
-    : `All CLIs (${groupInt(loaded.length) ?? '0'})`));
-  for (const cli of clis) {
-    const count = loaded.filter((session) => session?.cli === cli).length;
-    select.append(option(cli, partial ? `${cli} (${groupInt(count) ?? '0'} loaded)` : `${cli} (${groupInt(count) ?? '0'})`));
+  select.append(option('all', Array.isArray(state.cliCounts)
+    ? `All CLIs (${groupInt(total) ?? '0'})`
+    : partial
+      ? `All CLIs (${groupInt(loaded.length) ?? '0'} of ${groupInt(total) ?? '0'} loaded)`
+      : `All CLIs (${groupInt(loaded.length) ?? '0'})`));
+  for (const entry of cliCounts) {
+    if (typeof entry?.cli !== 'string' || !entry.cli) continue;
+    select.append(option(entry.cli, Array.isArray(state.cliCounts)
+      ? `${entry.cli} (${groupInt(entry.count) ?? '0'})`
+      : partial
+        ? `${entry.cli} (${groupInt(entry.count) ?? '0'} loaded)`
+        : `${entry.cli} (${groupInt(entry.count) ?? '0'})`));
   }
   select.addEventListener('change', () => {
-    state.cli = select.value;
-    redraw();
+    changeCli(select.value, api, redraw);
   });
   label.append(select);
   bar.append(label);
@@ -538,6 +544,7 @@ function absorb(payload, reset) {
     state.sessions = [];
     state.seen = new Set();
     state.requested = new Set([0]);
+    state.cliCounts = Array.isArray(payload?.cliCounts) ? payload.cliCounts : null;
   }
   for (const session of rows) {
     const id = String(session?.sessionId ?? '');
@@ -551,6 +558,47 @@ function absorb(payload, reset) {
   state.hasMore = payload?.hasMore === true;
   state.nextOffset = Number.isFinite(payload?.nextOffset) ? payload.nextOffset : null;
   if (!state.hasMore) state.nextOffset = null;
+}
+
+function sessionsUrl(offset) {
+  const cli = state.cli !== 'all' ? `&cli=${encodeURIComponent(state.cli)}` : '';
+  return `/api/sessions?limit=${PAGE_SIZE}&offset=${offset}${cli}${rangeQuery('/api/sessions').replace(/^\?/, '&')}`;
+}
+
+/** Start a new server-side CLI list at page one, preserving the paging guards. */
+async function loadFirstPage(api, redraw) {
+  if (state.loading) return;
+  const requestId = (state.requestId ?? 0) + 1;
+  state.requestId = requestId;
+  state.sessions = [];
+  state.seen = new Set();
+  state.requested = new Set([0]);
+  state.total = null;
+  state.nextOffset = null;
+  state.hasMore = false;
+  state.error = null;
+  state.loading = true;
+  redraw();
+  try {
+    const payload = await api.get(sessionsUrl(0));
+    if (requestId !== state.requestId) return;
+    absorb(payload, true);
+  } catch (error) {
+    if (requestId !== state.requestId) return;
+    state.error = error?.message || 'The sessions could not be loaded.';
+    state.requested.delete(0);
+  } finally {
+    if (requestId === state.requestId) {
+      state.loading = false;
+      redraw();
+    }
+  }
+}
+
+function changeCli(cli, api, redraw) {
+  if (state.loading || state.cli === cli) return;
+  state.cli = cli;
+  loadFirstPage(api, redraw);
 }
 
 /**
@@ -576,7 +624,9 @@ async function loadNextPage(api, redraw) {
   state.loading = true;
   redraw();
   try {
-    const payload = await api.get(`/api/sessions?limit=${PAGE_SIZE}&offset=${offset}${rangeQuery('/api/sessions').replace(/^\?/, '&')}`);
+    const requestId = state.requestId ?? 0;
+    const payload = await api.get(sessionsUrl(offset));
+    if (requestId !== (state.requestId ?? 0)) return;
     absorb(payload, false);
     state.error = null;
   } catch (error) {
@@ -776,11 +826,11 @@ function draw() {
 
   const card = el('section', 'card');
   const head = el('div', 'card-head legacy-toolbar');
-  head.append(toolbar(all, sorted, total, draw));
+  head.append(toolbar(all, sorted, total, api, draw));
   card.append(head);
   card.append(drawTable(sorted, api, draw));
   const layout = el('div', 'session-layout');
-  layout.append(filterPanel(all, draw));
+  layout.append(filterPanel(all, api, draw));
   layout.append(card);
   if (state.selected) layout.append(detailPanel(state.selected, api, draw));
   stack.append(layout);
@@ -801,21 +851,27 @@ function draw() {
  * choice are counts of LOADED rows carrying that property, so they describe
  * what ticking the box would match among the rows in hand.
  */
-function filterPanel(all, redraw) {
+function filterPanel(all, api, redraw) {
   const filters = el('aside', 'rx-card filter-panel');
   const filterTitle = el('div', 'rx-section-title tone-accent');
   filterTitle.append(iconBadge('sessions'), el('h2', '', 'Filters'));
   filters.append(filterTitle);
-  filters.append(el('p', 'filter-note', 'Counts describe loaded rows only.'));
+  filters.append(el('p', 'filter-note', 'CLI counts describe the sessions matching in this scan.'));
 
   const cliGroup = el('div', 'filter-group');
   cliGroup.dataset.filter = 'cli';
   cliGroup.append(el('h3', '', 'CLI'));
-  const cliCounts = new Map();
-  all.forEach((session) => cliCounts.set(session?.cli, (cliCounts.get(session?.cli) || 0) + 1));
-  cliGroup.append(filterChoice('All sessions', all.length, state.cli === 'all', () => { state.cli = 'all'; redraw(); }));
-  [...cliCounts.entries()].filter(([cli]) => cli).forEach(([cli, count]) => cliGroup.append(
-    filterChoice(cli, count, state.cli === cli, () => { state.cli = state.cli === cli ? 'all' : cli; redraw(); }),
+  const facetCounts = Array.isArray(state.cliCounts)
+    ? state.cliCounts
+    : [...new Set(all.map((session) => session?.cli).filter((cli) => typeof cli === 'string' && cli))]
+      .sort()
+      .map((cli) => ({ cli, count: all.filter((session) => session?.cli === cli).length }));
+  cliGroup.append(filterChoice('All sessions', Array.isArray(state.cliCounts) ? state.total ?? all.length : all.length, state.cli === 'all', () => {
+    if (state.cli === 'all') redraw();
+    else changeCli('all', api, redraw);
+  }));
+  facetCounts.filter((entry) => typeof entry?.cli === 'string' && entry.cli).forEach(({ cli, count }) => cliGroup.append(
+    filterChoice(cli, count, state.cli === cli, () => changeCli(state.cli === cli ? 'all' : cli, api, redraw)),
   ));
   filters.append(cliGroup);
 
@@ -850,10 +906,10 @@ function filterPanel(all, redraw) {
     const clear = uiButton('Clear filters', 'button button-sm');
     clear.dataset.action = 'clear-filters';
     clear.addEventListener('click', () => {
-      state.cli = 'all';
       state.health.clear();
       state.issues.clear();
-      redraw();
+      if (state.cli === 'all') redraw();
+      else changeCli('all', api, redraw);
     });
     filters.append(clear);
   }
@@ -1059,6 +1115,9 @@ export function renderSessions(mount, data, ctx = {}) {
   // page, the same body is the same first page.
   if (state.data !== state.seeded) {
     state.seeded = state.data;
+    state.cli = 'all';
+    state.health.clear();
+    state.issues.clear();
     state.error = null;
     absorb(data ?? {}, true);
   }

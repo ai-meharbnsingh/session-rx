@@ -182,7 +182,8 @@ const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((
 
 globalThis.location = { hash: "#/fixes" };
 
-// `fixCli` is what the server stamps on each rule; the /api/fixes catalogue carries no CLI.
+// `fixCli` is what the server stamps on each rule; the catalogue also carries
+// the target CLI for recommendations without an observed finding.
 const observed = (id, name, fix) => ({ id, name, severity: "warn", fix, fixCli: "claude", fixCliName: "Claude Code", evidence: { status: "observed", values: [] } });
 
 const HEALTH = {
@@ -198,9 +199,9 @@ const HEALTH = {
 
 const FIXES = {
   fixes: [
-    { id: "claude-auto-compact", title: "Compact earlier" },
-    { id: "claude-tool-guidance", title: "Batch tool calls" },
-    { id: "claude-worker-cap", title: "Cap workers" },
+    { id: "claude-auto-compact", title: "Compact earlier", cli: "claude" },
+    { id: "claude-tool-guidance", title: "Batch tool calls", cli: "claude" },
+    { id: "claude-worker-cap", title: "Cap workers", cli: "claude" },
   ],
 };
 
@@ -223,10 +224,10 @@ function makeApi() {
 
 const fixesPage = await import("../public/js/pages/fixes.js");
 
-async function paint(hash, api = makeApi()) {
+async function paint(hash, api = makeApi(), payload = { health: HEALTH, fixes: FIXES }) {
   globalThis.location.hash = hash;
   const mount = new ShimElement("section");
-  await fixesPage.default(mount, { health: HEALTH, fixes: FIXES }, { api });
+  await fixesPage.default(mount, payload, { api });
   return { mount, api };
 }
 
@@ -288,6 +289,53 @@ test("the fix is labelled by whether it changes the finding's own CLI", async ()
   assert.match(other.mount.textContent, /Recommendation only/);
   assert.match(other.mount.textContent, /came from Codex; no automated fix exists for it/);
   assert.doesNotMatch(other.mount.textContent, /Fix available for your CLI/);
+});
+
+test("a Cursor-only unknown scan proposes no fix and no Claude recommendation", async () => {
+  const cursorHealth = {
+    clis: [{ cli: "cursor", installed: true, support: "supported", sessions: null }],
+    sessions: [{ cli: "cursor", rules: [
+      { id: "context-pressure", name: "Context pressure", fix: "claude-auto-compact", evidence: { status: "unknown" } },
+    ] }],
+  };
+  const cursorFixes = { fixes: [{ id: "claude-auto-compact", title: "Compact earlier", cli: "claude" }] };
+  const api = makeApi();
+  const { mount, api: usedApi } = await paint("#/fixes", api, { health: cursorHealth, fixes: cursorFixes });
+  assert.match(mount.textContent, /No observed fixable issue/);
+  const recommendations = withClass(mount, "rx-grid").at(-1);
+  assert.doesNotMatch(recommendations.textContent, /Compact earlier/);
+  assert.equal(usedApi.posts.some((path) => path.endsWith("/preview")), false, "no preview is posted without an observed finding");
+});
+
+test("the real collectors inventory prevents Claude fixes from being recommended for Cursor-only health", async () => {
+  const cursorHealth = {
+    collectors: [
+      { cli: "cursor", installed: true, support: "supported" },
+      { cli: "claude", installed: false, support: "supported" },
+    ],
+    sessions: [{ cli: "cursor", rules: [
+      { id: "context-pressure", name: "Context pressure", fix: "claude-auto-compact", evidence: { status: "observed" } },
+    ] }],
+  };
+  const cursorFixes = { fixes: [
+    { id: "claude-auto-compact", title: "Compact earlier", cli: "claude" },
+    { id: "claude-worker-cap", title: "Cap workers", cli: "claude" },
+  ] };
+  const { mount } = await paint("#/fixes", makeApi(), { health: cursorHealth, fixes: cursorFixes });
+  const recommendations = withClass(mount, "rx-grid").at(-1);
+  assert.doesNotMatch(recommendations.textContent, /Compact earlier|Cap workers/);
+});
+
+test("missing CLI inventory fails closed and explains that recommendations were not measured", async () => {
+  const healthWithoutInventory = {
+    sessions: [{ cli: "cursor", rules: [
+      { id: "context-pressure", name: "Context pressure", fix: "claude-auto-compact", evidence: { status: "observed" } },
+    ] }],
+  };
+  const { mount } = await paint("#/fixes", makeApi(), { health: healthWithoutInventory, fixes: FIXES });
+  assert.match(mount.textContent, /Installed CLI inventory was not measured/);
+  const recommendations = withClass(mount, "rx-grid").at(-1);
+  assert.equal(recommendations.textContent, "");
 });
 
 test("an address with a query still opens the Fixes page, not Health", async () => {

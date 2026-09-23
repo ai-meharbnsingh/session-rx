@@ -433,6 +433,56 @@ test("the count text is true at every stage, and never claims the corpus", async
   assert.match(withClass(mount, "chart-sub")[0].textContent, /45 of 45 shown/);
 });
 
+test("CLI facet options include CLIs absent from the first page, and selecting one refetches page one", async () => {
+  const codex = corpusOf(20, { cli: "codex" });
+  const claude = corpusOf(3, { cli: "claude" });
+  const all = [...codex, ...claude];
+  const calls = [];
+  const api = {
+    async get(path) {
+      calls.push(path);
+      const url = new URL(path, "http://127.0.0.1");
+      const selected = url.searchParams.get("cli");
+      const filtered = selected ? all.filter((session) => session.cli === selected) : all;
+      return {
+        ...page(filtered, Number(url.searchParams.get("offset") ?? 0), Number(url.searchParams.get("limit") ?? 20)),
+        cliCounts: [
+          { cli: "claude", count: 3 },
+          { cli: "codex", count: 20 },
+          { cli: "gemini", count: 4 },
+          { cli: "kimi", count: 2 },
+          { cli: "opencode", count: 1 },
+        ],
+      };
+    },
+  };
+  const mount = mountNode();
+  sessionsPage.renderSessions(mount, {
+    ...page(codex, 0, 20),
+    cliCounts: [
+      { cli: "claude", count: 3 },
+      { cli: "codex", count: 20 },
+      { cli: "gemini", count: 4 },
+      { cli: "kimi", count: 2 },
+      { cli: "opencode", count: 1 },
+    ],
+  }, { api });
+
+  const select = withTag(mount, "SELECT")[0];
+  assert.match(select.textContent, /claude \(3\)/);
+  assert.match(select.textContent, /gemini \(4\)/);
+  assert.match(select.textContent, /kimi \(2\)/);
+  assert.match(select.textContent, /opencode \(1\)/);
+  select.value = "claude";
+  fire(select, "change");
+  await settle();
+
+  const request = new URL(calls.at(-1), "http://127.0.0.1");
+  assert.equal(request.searchParams.get("cli"), "claude");
+  assert.equal(request.searchParams.get("offset"), "0");
+  assert.equal(dataRows(mount).length, 3);
+});
+
 test("the end of the list stops cleanly: no sentinel, no observer, no further request", async () => {
   const corpus = corpusOf(45);
   const api = makeApi(corpus);

@@ -715,8 +715,9 @@ export function analyzeAll(collected = {}, options = {}) {
       support: "detection-only",
       installed: true,
       note:
-        "detected on this machine, but it exposes no session transcript to read, so nothing about its usage is measured here. " +
-        "No sessions were read, which is not the same as no usage.",
+        str(entry?.reason) ||
+        ("detected on this machine, but it exposes no session transcript to read, so nothing about its usage is measured here. " +
+        "No sessions were read, which is not the same as no usage."),
     });
   }
 

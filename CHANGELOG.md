@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-09-23
+
+### Fixed
+
+- **Cursor sessions were picked in directory order before the 200-session cap.** An arbitrary 200 were kept rather than the 200 newest. They are now sorted by mtime descending, ties by path. Scan-coverage reporting is unchanged.
+- **The Sessions tab built its CLI filter from the sessions already loaded.** On a machine whose newest sessions were all one CLI, only that CLI was offered, and the others were unreachable — reaching them required filtering to them. `/api/sessions` now returns a scan-wide `cliCounts` facet, and selecting a CLI refetches server-side from offset 0. On a real 1,236-session corpus the filter offered 1 CLI before and 5 after.
+- **With no Claude Code installed, the Fixes page proposed a Claude Code config change as the fix for a Cursor session.** With a live preview and five more behind it, fixes are now recommended only for a CLI detected on the machine. Fixes already applied stay listed and undoable whatever is installed.
+- **The detection-only note claimed Cursor "exposes no session transcript to read" — false.** SessionRx reads the Cursor CLI. A collector can now supply its own reason, and Cursor's separates the Cursor CLI from the Cursor desktop editor, whose own stored conversations are not read.
+- **A Cursor store that could not be stat'd was dropped silently.** It is now kept and still scanned.
+- **The vendored Chart.js failed its own integrity check on Windows because git converted the bundle's line endings on checkout.** A root `.gitattributes` now protects the vendored assets. The expected hash was NOT changed.
+- **The suite now runs on Windows.** Path expectations hardcoding POSIX separators, and an npm call assuming `npm` not `npm.cmd`, were failing the suite on Windows for reasons unrelated to the product.
+
+### Added
+
+- **`--limit <n>` and `SESSION_RX_LIMIT` set sessions read per CLI.** Default stays 250, which is deliberate and measured. Until now the scan note told the user to pass a larger limit while no way to pass one existed. On a 12,115-session machine, `--limit 3000` moves the scan from 1,236 to 7,820 sessions.
+
 ## [0.2.1] - 2026-09-23
 
 ### Fixed

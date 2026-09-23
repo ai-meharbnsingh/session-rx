@@ -396,6 +396,26 @@ test("the health page lists a fix applied there, even though its rule now passes
   assert.equal(undo.textContent, "Undo");
 });
 
+// ============================================================================
+// 6. applied-state discovery is independent of recommendation inventory
+// ============================================================================
+
+test("an applied fix is still rendered with Undo when CLI inventory is absent, without recommendation duplication", async () => {
+  const health = healthWith();
+  delete health.collectors;
+  const { mount } = await paintFixes({
+    health,
+    catalog: [catalogRow("claude-auto-compact", "Compact earlier")],
+    checks: { "claude-auto-compact": APPLIED },
+  });
+
+  const group = appliedGroup(mount);
+  assert.ok(group, "applied-state discovery must use the full catalog when inventory is absent");
+  assert.ok(buttonsIn(group).some((node) => node.textContent === "Undo" && node.dataset.fixId === "claude-auto-compact"));
+  const recommendations = withClass(mount, "rx-grid").at(-1);
+  assert.equal(recommendations.textContent, "", "fail-closed recommendations must stay empty without CLI inventory");
+});
+
 test("the health page shows an unknown applied-state with its reason, and never as applied", async () => {
   const { mount } = await paintHealth({
     catalog: [catalogRow("claude-auto-compact", "Compact earlier")],

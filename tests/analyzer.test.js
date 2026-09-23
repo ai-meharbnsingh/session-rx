@@ -1154,6 +1154,12 @@ test("analyzeAll analyzes every supported session and reports every collector", 
   assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").installed, false);
 });
 
+test("a detection-only collector reason reaches the health note unchanged", () => {
+  const reason = "Cursor's configuration directory is here, but no Cursor CLI chat store was found under it. SessionRx reads the Cursor CLI (cursor-agent); the Cursor desktop editor keeps its chat history separately and is not read here. No sessions were read, which is not the same as no usage.";
+  const out = analyzeAll({ detectionOnly: [{ id: "cursor", reason }] });
+  assert.equal(out.collectors.find((entry) => entry.cli === "cursor").note, reason);
+});
+
 test("collector support is identical whether the CLI is installed or absent", () => {
   const cliSet = ["claude", "codex", "copilot", "gemini", "grok-amp"];
   const installed = analyzeAll({

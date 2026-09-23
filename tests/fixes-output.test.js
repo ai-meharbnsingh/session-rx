@@ -365,13 +365,18 @@ test("an absent ~/.claude directory is refused, and the error names the director
   assert.equal(await stateDirExists(home), false);
 });
 
-test("a symlinked CLAUDE.md is refused, the link survives, nothing is written", async () => {
+test("a symlinked CLAUDE.md is refused, the link survives, nothing is written", async (t) => {
   const { env, home, claudeDir } = await scaffoldEmpty("symlink");
   const real = path.join(home, "dotfiles", "CLAUDE.md");
   await mkdir(path.dirname(real), { recursive: true });
   await writeFile(real, "# dotfiles-managed\n");
   const link = path.join(claudeDir, "CLAUDE.md");
-  await symlink(real, link);
+  try {
+    await symlink(real, link);
+  } catch (error) {
+    t.skip(`unknown — symlink creation is unavailable on this runner (${error.code ?? error.message})`);
+    return;
+  }
   const before = await readFile(real);
 
   const fix = createOutputHygieneFix({ env });
@@ -381,7 +386,8 @@ test("a symlinked CLAUDE.md is refused, the link survives, nothing is written", 
 
   const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_IS_SYMLINK);
   assert.match(error.message, /atomic rename would replace the link/);
-  assert.ok(error.message.includes(real), "the diagnostic does not name the real file");
+  const realPattern = real.split(path.sep).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\\\/]");
+  assert.match(error.message, new RegExp(realPattern), "the diagnostic does not name the real file");
 
   assert.ok((await readFile(real)).equals(before), "the symlink target was modified");
   const { lstat } = await import("node:fs/promises");

@@ -54,8 +54,8 @@ test("CODEX_HOME relocates the scan, while explicit home wins and blanks are uns
 
   const explicit = new CodexCollector({ home: HOME, env: { CODEX_HOME: relocated } });
   assert.equal(explicit.home, HOME);
-  assert.equal(new CodexCollector({ env: { CODEX_HOME: "" } }).home, os.homedir() + "/.codex");
-  assert.equal(new CodexCollector({ env: {} }).home, os.homedir() + "/.codex");
+  assert.equal(new CodexCollector({ env: { CODEX_HOME: "" } }).home, path.join(os.homedir(), ".codex"));
+  assert.equal(new CodexCollector({ env: {} }).home, path.join(os.homedir(), ".codex"));
 });
 
 test("the context window is native: read from model_context_window, no model table", async () => {

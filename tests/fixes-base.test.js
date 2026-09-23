@@ -867,7 +867,7 @@ test("a target that escapes the configured home is rejected at construction", as
   assert.equal(inside.target, path.join(home, ".claude", "CLAUDE.md"));
   const absolute = mdFix(env, { target: path.join(home, ".claude", "CLAUDE.md") });
   assert.equal(absolute.target, inside.target);
-  assert.equal(absolute.display, "~/.claude/CLAUDE.md");
+  assert.equal(absolute.display, path.join("~", ".claude", "CLAUDE.md"));
 });
 
 test("spec validation rejects a fix that could not work", async () => {
@@ -932,7 +932,7 @@ test("a fix catalogue entry can be rendered without reading any file", () => {
     id: "claude-output-hygiene",
     kind: "append-section",
     title: "Bound tool output",
-    description: 'Append the delimited "SessionRx: output hygiene" section to ~/.claude/CLAUDE.md. '
+    description: `Append the delimited "SessionRx: output hygiene" section to ${path.join("~", ".claude", "CLAUDE.md")}. `
       + "Existing content is not modified, reordered or reformatted.",
     rationale: "Unbounded tool output is the single largest avoidable context cost.",
     ruleId: "BP-003.05",

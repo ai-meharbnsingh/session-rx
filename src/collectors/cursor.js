@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -234,7 +234,7 @@ async function transcriptToolCalls(dataDir, cwd, agentId, diagnostic) {
   return readTranscript(filePath, diagnostic);
 }
 
-function storePaths(configDir) {
+export function storePaths(configDir) {
   const found = [];
   const chats = path.join(configDir, "chats");
   for (const cwdEntry of safeEntries(chats)) {
@@ -252,7 +252,16 @@ function storePaths(configDir) {
     const candidate = path.join(acp, idEntry.name, "store.db");
     if (existsSync(candidate)) found.push(candidate);
   }
-  return found;
+  return found
+    .map((filePath) => {
+      try {
+        return { filePath, mtimeMs: statSync(filePath).mtimeMs };
+      } catch {
+        return { filePath, mtimeMs: 0 };
+      }
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || left.filePath.localeCompare(right.filePath))
+    .map(({ filePath }) => filePath);
 }
 
 export class CursorCollector extends Collector {
@@ -279,6 +288,9 @@ export class CursorCollector extends Collector {
       installed,
       paths,
       status: paths.length > 0 ? "supported" : installed ? "detection-only" : "absent",
+      ...(installed && paths.length === 0 ? {
+        reason: "Cursor's configuration directory is here, but no Cursor CLI chat store was found under it. SessionRx reads the Cursor CLI (cursor-agent); the Cursor desktop editor keeps its chat history separately and is not read here. No sessions were read, which is not the same as no usage.",
+      } : {}),
     };
   }
 

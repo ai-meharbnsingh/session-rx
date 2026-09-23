@@ -202,6 +202,7 @@ class ExplodingCollector extends Collector {
  */
 function stubRegistry(collectors) {
   return {
+    COLLECTOR_SPECS: [["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor CLI"]],
     async detectAll() { return detectMany(collectors); },
     async collectAll(options) { return collectMany(collectors, options); },
   };
@@ -705,7 +706,10 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.equal(existsSync(path.join(running.home, ".session-rx", "journal.jsonl")), false,
       "precondition: this home has no journal yet");
     const md = (await running.get("/api/report")).json.markdown;
-    assert.match(md, /Applied-fix history: unknown — ~\/\.session-rx\/journal\.jsonl does not exist/);
+    assert.ok(
+      md.includes(`Applied-fix history: unknown — ${path.join("~", ".session-rx", "journal.jsonl")} does not exist`),
+      "the unknown journal reason must name the platform-native user-facing path",
+    );
     assert.equal(md.includes("No fix was applied in this period"), false,
       "an unread record is unknown, not an empty history");
   });
@@ -769,6 +773,15 @@ describe("GET routes return 200 with the BP-005 shape", () => {
       "claude-worker-cap",
     ]);
     assert.ok(res.json.fixes.every((fix) => fix.available === true), "every BP-004 fix module resolves");
+    assert.ok(res.json.fixes.every((fix) => fix.cli === "claude" && fix.cliName === "Claude Code"), "every available fix publishes its target CLI and display name");
+  });
+
+  it("lists fixes with null CLI names when the registry cannot be loaded", async () => {
+    const running = await server({ modules: { registry: "./__missing_registry__.js" } });
+    const res = await running.get("/api/fixes");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.fixes.length, 5);
+    assert.ok(res.json.fixes.every((fix) => fix.cli === "claude" && fix.cliName === null));
   });
 
   it("rejects a malformed query parameter with a 400, not a 500", async () => {
@@ -1220,6 +1233,13 @@ describe("BP-005.02 — /api/sessions is paginated", () => {
     const running = await server({ collectors: collectors() });
     const res = await running.get("/api/sessions");
     assert.equal(res.json.total, TOTAL, "total counts every session matching the filter within the scan");
+    assert.deepEqual(res.json.cliCounts, [
+      { cli: "claude", count: CLAUDE_SESSIONS },
+      { cli: "codex", count: CODEX_SESSIONS },
+    ], "cliCounts covers the whole filtered scan, not only page one");
+    assert.equal(res.json.cliCounts.reduce((sum, entry) => sum + entry.count, 0), res.json.total);
+    const laterPage = await running.get("/api/sessions?limit=1&offset=1");
+    assert.deepEqual(laterPage.json.cliCounts, res.json.cliCounts, "pagination does not change the facet");
     assert.ok(res.json.total > res.json.sessions.length, "the true total must exceed one page once the corpus exceeds it");
     assert.equal(res.json.hasMore, true);
     assert.equal(res.json.nextOffset, SESSIONS_PAGE_LIMIT);
@@ -1260,6 +1280,8 @@ describe("BP-005.02 — /api/sessions is paginated", () => {
     const first = await running.get("/api/sessions?cli=claude");
     assert.equal(first.status, 200);
     assert.equal(first.json.total, CLAUDE_SESSIONS, "total counts the filtered match, not the corpus");
+    assert.deepEqual(first.json.cliCounts, [{ cli: "claude", count: CLAUDE_SESSIONS }]);
+    assert.equal(first.json.cliCounts.reduce((sum, entry) => sum + entry.count, 0), first.json.total);
     assert.equal(first.json.sessions.length, SESSIONS_PAGE_LIMIT, "a full page of claude rows, none spent on codex");
     for (const session of first.json.sessions) assert.equal(session.cli, "claude");
     const firstExpected = Array.from({ length: SESSIONS_PAGE_LIMIT }, (_, index) => CLAUDE_SESSIONS - index);

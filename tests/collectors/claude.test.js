@@ -61,8 +61,8 @@ test("CLAUDE_CONFIG_DIR relocates the scan, while explicit home wins and blanks 
 
   const explicit = new ClaudeCollector({ home: HOME, env: { CLAUDE_CONFIG_DIR: relocated } });
   assert.equal(explicit.home, HOME);
-  assert.equal(new ClaudeCollector({ env: { CLAUDE_CONFIG_DIR: "   " } }).home, os.homedir() + "/.claude");
-  assert.equal(new ClaudeCollector({ env: {} }).home, os.homedir() + "/.claude");
+  assert.equal(new ClaudeCollector({ env: { CLAUDE_CONFIG_DIR: "   " } }).home, path.join(os.homedir(), ".claude"));
+  assert.equal(new ClaudeCollector({ env: {} }).home, path.join(os.homedir(), ".claude"));
 });
 
 test("THE DEDUPE RULE: cumulative usage is the last line, tool calls are the union", async () => {

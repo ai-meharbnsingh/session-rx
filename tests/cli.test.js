@@ -129,6 +129,7 @@ describe("parseArgs — defaults and flags", () => {
   it("defaults: no port pinned (the candidate list decides), browser opens, no flags set", () => {
     const options = parseArgs([], {});
     assert.equal(options.port, null, "no --port/SESSION_RX_PORT means the CLI's own candidate list picks the port");
+    assert.equal(options.scanLimit, null, "no --limit/SESSION_RX_LIMIT means the server default applies");
     assert.equal(options.open, true);
     assert.equal(options.help, false);
     assert.equal(options.version, false);
@@ -143,6 +144,16 @@ describe("parseArgs — defaults and flags", () => {
   it("SESSION_RX_PORT env is honoured, and an explicit --port overrides it", () => {
     assert.equal(parseArgs([], { SESSION_RX_PORT: "7420" }).port, 7420);
     assert.equal(parseArgs(["--port", "7425"], { SESSION_RX_PORT: "7420" }).port, 7425);
+  });
+
+  it("--limit N is honoured, as --limit N and as --limit=N", () => {
+    assert.equal(parseArgs(["--limit", "1000"]).scanLimit, 1000);
+    assert.equal(parseArgs(["--limit=1000"]).scanLimit, 1000);
+  });
+
+  it("SESSION_RX_LIMIT env is honoured, and an explicit --limit overrides it", () => {
+    assert.equal(parseArgs([], { SESSION_RX_LIMIT: "1200" }).scanLimit, 1200);
+    assert.equal(parseArgs(["--limit", "1000"], { SESSION_RX_LIMIT: "1200" }).scanLimit, 1000);
   });
 
   it("--no-open suppresses opening a browser — the real flag name, read from src/cli.js", () => {
@@ -197,6 +208,20 @@ describe("parseArgs — invalid ports are rejected, not silently coerced", () =>
   it("the same validation applies via SESSION_RX_PORT, not only --port", () => {
     assert.throws(() => parseArgs([], { SESSION_RX_PORT: "0" }), /between 1 and 65535/);
     assert.throws(() => parseArgs([], { SESSION_RX_PORT: "abc" }), /needs a port number/);
+  });
+});
+
+describe("parseArgs — invalid scan limits are rejected, not silently defaulted", () => {
+  it("rejects zero, negatives, non-numeric, and empty values", () => {
+    for (const value of ["0", "-5", "abc", ""]) {
+      assert.throws(() => parseArgs(["--limit", value]), /--limit .*positive integer/);
+    }
+  });
+
+  it("rejects the same invalid values from SESSION_RX_LIMIT", () => {
+    for (const value of ["0", "-5", "abc", ""]) {
+      assert.throws(() => parseArgs([], { SESSION_RX_LIMIT: value }), /SESSION_RX_LIMIT .*positive integer/);
+    }
   });
 });
 

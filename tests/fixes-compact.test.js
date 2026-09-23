@@ -521,19 +521,25 @@ test("an absent ~/.claude directory is refused, and the error names the director
   assert.equal(await stateDirExists(home), false);
 });
 
-test("a symlinked settings.json is refused, the link survives, nothing is written", async () => {
+test("a symlinked settings.json is refused, the link survives, nothing is written", async (t) => {
   const { env, home, claudeDir } = await scaffoldEmpty("symlink");
   const real = path.join(home, "dotfiles", "settings.json");
   await mkdir(path.dirname(real), { recursive: true });
   await writeFile(real, "{\n  \"theme\": \"dark\"\n}\n");
   const link = path.join(claudeDir, "settings.json");
-  await symlink(real, link);
+  try {
+    await symlink(real, link);
+  } catch (error) {
+    t.skip(`unknown — symlink creation is unavailable on this runner (${error.code ?? error.message})`);
+    return;
+  }
   const before = await readFile(real);
 
   const fix = createAutoCompactFix({ env });
   assert.equal((await fix.check()).reason, FIX_ERROR_CODES.TARGET_IS_SYMLINK);
   const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_IS_SYMLINK);
-  assert.ok(error.message.includes(real));
+  const realPattern = real.split(path.sep).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\\\/]");
+  assert.match(error.message, new RegExp(realPattern));
 
   assert.ok((await readFile(real)).equals(before), "the symlink target was modified");
   assert.equal((await lstat(link)).isSymbolicLink(), true, "the symlink was replaced");

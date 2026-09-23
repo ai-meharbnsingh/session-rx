@@ -1,0 +1,3 @@
+* text=auto
+public/vendor/** -text
+*.min.js -text

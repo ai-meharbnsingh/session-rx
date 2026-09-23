@@ -11,8 +11,9 @@ npx session-rx
 Requires Node.js 22.13 or newer — SessionRx reads OpenCode's database with the
 SQLite support built into Node, which earlier versions do not have. The command
 picks a free loopback port, starts a local server, and opens your browser.
-`--port <n>` binds an exact port, `--no-open` just prints the URL, and `--help`
-lists the rest.
+`--port <n>` binds an exact port, `--limit <n>` and `SESSION_RX_LIMIT` set how
+many sessions are read per CLI, and `--no-open` just prints the URL. A larger
+limit reads further back and takes longer. `--help` lists the rest.
 
 ```
 npx session-rx clean

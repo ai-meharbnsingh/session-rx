@@ -154,12 +154,13 @@ function fixesHash(category, issue) {
 
 /**
  * Whether the fix changes the settings of the CLI the finding came from.
- * `rule.fixCli` is stamped by the server (annotateFixTitles); the /api/fixes
- * catalogue carries no CLI, so it cannot answer this.
+ * `rule.fixCli` is stamped by the server (annotateFixTitles); the catalogue
+ * supplies the same target when the finding has no session attached.
  */
-function fixScopeChip(session, rule) {
-  if (!session || !rule?.fixCli) return el('span', 'rx-chip rx-chip-muted', 'Fix target not measured');
-  if (session.cli === rule.fixCli) return el('span', 'rx-chip', 'Fix available for your CLI');
+function fixScopeChip(session, rule, descriptor) {
+  const fixCli = rule?.fixCli || descriptor?.cli;
+  if (!fixCli) return el('span', 'rx-chip rx-chip-muted', 'Fix target not measured');
+  if (session && session.cli === fixCli) return el('span', 'rx-chip', 'Fix available for your CLI');
   return el('span', 'rx-chip rx-chip-muted', 'Recommendation only');
 }
 
@@ -186,8 +187,11 @@ async function renderFixes(mount, data, ctx = {}) {
   const requestedIndex = Number(query.get('issue') || 0);
   const selectedIndex = Math.min(Number.isFinite(requestedIndex) ? Math.max(0, requestedIndex) : 0, Math.max(0, items.length - 1));
   const selected = items[selectedIndex] || null;
-  const fixId = selected?.rule?.fix || catalog[0]?.id;
-  const descriptor = catalog.find((fix) => fix.id === fixId) || catalog[0];
+  const fixId = selected?.rule?.fix || null;
+  const descriptor = fixId ? catalog.find((fix) => fix.id === fixId) || null : null;
+  const hasCliInventory = Array.isArray(health?.collectors);
+  const installedClis = new Set((hasCliInventory ? health.collectors : []).filter((entry) => entry?.installed === true).map((entry) => entry.cli));
+  const installedCatalog = hasCliInventory ? catalog.filter((fix) => installedClis.has(fix?.cli)) : [];
   let preview = null;
   if (fixId) { try { preview = await api.post(`/api/fixes/${encodeURIComponent(fixId)}/preview`, {}); } catch (error) { preview = { error: error?.message || 'Preview unavailable' }; } }
   // Which fixes are already in place. Asked of the server, because the health
@@ -248,7 +252,7 @@ async function renderFixes(mount, data, ctx = {}) {
   }
   layout.append(detail);
 
-  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(sectionTitle('Proposed fix', 'fixes'), fixScopeChip(selected?.session, selected?.rule), el('p', '', descriptor?.title || 'The selected fix'));
+  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(sectionTitle('Proposed fix', 'fixes'), fixScopeChip(selected?.session, selected?.rule, descriptor), el('p', '', descriptor?.title || 'No fix proposed without an observed finding'));
   proposed.append(el('p', 'rx-label', preview?.targets?.[0]?.display || preview?.files_affected?.[0] || 'Target file not measured'));
   if (selected?.session && selected.rule?.fixCli && selected.session.cli !== selected.rule.fixCli) proposed.append(el('p', 'local-note', `This finding came from ${selected.session.cliName || selected.session.cli || 'one CLI'}; no automated fix exists for it. The proposed fix changes ${selected.rule.fixCliName || selected.rule.fixCli}'s settings instead.`));
   proposed.append(preview?.error ? el('p', 'not-measured', preview.error) : diffView(preview?.diff));
@@ -272,10 +276,12 @@ async function renderFixes(mount, data, ctx = {}) {
   const unchecked = uncheckedFixesSection(states, api);
   if (unchecked) root.append(unchecked);
 
-  const other = el('section', 'rx-card'); other.append(sectionTitle('Other recommended fixes', 'fixes')); const strip = el('div', 'rx-grid rx-grid-even');
+  const other = el('section', 'rx-card'); other.append(sectionTitle('Other recommended fixes', 'fixes'));
+  if (!hasCliInventory) other.append(el('p', 'not-measured', 'Installed CLI inventory was not measured, so no fixes can be recommended.'));
+  const strip = el('div', 'rx-grid rx-grid-even');
   // A fix already in place, or one whose state could not be read, is shown in
   // its own group above; recommending it here as well would say two things.
-  catalog.filter((fix) => fix.id !== fixId && stateById.get(fix.id) !== 'applied' && stateById.get(fix.id) !== 'unknown').slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); const found = allItems.findIndex((candidate) => candidate.rule?.fix === fix.id);
+  installedCatalog.filter((fix) => fix.id !== fixId && stateById.get(fix.id) !== 'applied' && stateById.get(fix.id) !== 'unknown').slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); const found = allItems.findIndex((candidate) => candidate.rule?.fix === fix.id);
     // A fix no session triggered has no issue page to jump to; open the fix itself rather than landing on an unrelated issue.
     review.addEventListener('click', () => { if (found >= 0) location.hash = fixesHash('All issues', found); else openFixModal({ fixId: fix.id, api }); }); item.append(review); strip.append(item); });
   other.append(strip); root.append(other); mount.replaceChildren(root);

@@ -1347,7 +1347,8 @@ export function createApp(options = {}) {
    * are untouched by whether this request read the disk or not.
    */
   async function collectFor(res, query) {
-    const registry = await require$(res, "registry", "the collector registry");
+    const loadedRegistry = await load("registry");
+    const registry = loadedRegistry.ok ? loadedRegistry.module : null;
     if (!registry) return null;
     const requested = query.limit ?? null;
     const limit = requested ?? state.scanLimit;
@@ -1400,7 +1401,7 @@ export function createApp(options = {}) {
     const registry = await require$(res, "registry", "the collector registry");
     if (!registry) return null;
     const displayNames = new Map(
-      (Array.isArray(registry.COLLECTOR_SPECS) ? registry.COLLECTOR_SPECS : [])
+      (Array.isArray(registry?.COLLECTOR_SPECS) ? registry.COLLECTOR_SPECS : [])
         .filter((spec) => Array.isArray(spec) && typeof spec[0] === "string" && typeof spec[1] === "string")
         .map(([id, displayName]) => [id, displayName]),
     );
@@ -1565,6 +1566,13 @@ export function createApp(options = {}) {
       from,
       to,
     });
+    const cliCounts = [...matched.reduce((counts, session) => {
+      const cli = typeof session?.cli === "string" && session.cli ? session.cli : "unknown";
+      counts.set(cli, (counts.get(cli) ?? 0) + 1);
+      return counts;
+    }, new Map())]
+      .map(([cli, count]) => ({ cli, count }))
+      .sort((left, right) => left.cli.localeCompare(right.cli));
     const sessionWindowValue = sessionWindow(result.analysis.sessions, {
       cli: parseCsvList(singleValue(req.query.cli, "cli")),
       project: singleValue(req.query.project, "project"),
@@ -1625,6 +1633,7 @@ export function createApp(options = {}) {
       // `total` is the whole filtered match, not the page — it is what the UI
       // says it is not showing, so it may never shrink to the page size.
       total: matched.length,
+      cliCounts,
       returned: page.length,
       // Echoed so a client can tell a short page (end of list) from a page it
       // asked to be short, without re-deriving either from its own request.
@@ -1926,13 +1935,24 @@ export function createApp(options = {}) {
   app.get("/api/fixes", route(async (req, res) => {
     const loadedEnv = await fixEnv(res);
     if (!loadedEnv) return;
+    const loadedRegistry = await load("registry");
+    const registry = loadedRegistry.ok ? loadedRegistry.module : null;
+    const displayNames = new Map(
+      (Array.isArray(registry?.COLLECTOR_SPECS) ? registry.COLLECTOR_SPECS : [])
+        .filter((spec) => Array.isArray(spec) && typeof spec[0] === "string" && typeof spec[1] === "string")
+        .map(([id, displayName]) => [id, displayName]),
+    );
     const fixes = [];
     for (const descriptor of state.fixCatalog) {
       const fix = await instantiateFix(descriptor, loadedEnv.env, load);
+      const cli = typeof descriptor?.cli === "string" ? descriptor.cli : null;
+      const cliName = cli ? displayNames.get(cli) ?? null : null;
       if (fix.unavailable) {
         fixes.push({
           id: descriptor.id,
           title: descriptor.title ?? descriptor.id,
+          cli,
+          cliName,
           kind: descriptor.kind ?? null,
           blueprint: descriptor.blueprint ?? null,
           available: false,
@@ -1943,6 +1963,8 @@ export function createApp(options = {}) {
       fixes.push({
         id: fix.id ?? descriptor.id,
         title: fix.title ?? descriptor.title ?? descriptor.id,
+        cli,
+        cliName,
         kind: fix.kind ?? descriptor.kind ?? null,
         blueprint: descriptor.blueprint ?? null,
         available: true,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { createDiagnostic } from "../../src/collectors/base.js";
 import {
   assertAllowedSql,
   CursorCollector,
+  storePaths,
   transcriptPaths,
 } from "../../src/collectors/cursor.js";
 
@@ -201,6 +202,32 @@ test("detect distinguishes supported, detection-only, and absent", () => {
   assert.equal(detection.installed, false);
 });
 
+test("detection-only Cursor explains the CLI and desktop boundary", () => {
+  const home = scratch();
+  mkdirSync(path.join(home, ".cursor"), { recursive: true });
+  const detection = collector(home).detect();
+  assert.equal(detection.status, "detection-only");
+  assert.match(detection.reason, /Cursor CLI \(cursor-agent\)/);
+  assert.match(detection.reason, /desktop editor keeps its chat history separately/);
+  assert.doesNotMatch(detection.reason, /desktop.*\.cursor|\.cursor.*desktop/);
+  assert.match(detection.reason, /not the same as no usage/);
+});
+
+test("a store whose mtime cannot be read remains a scan candidate", () => {
+  const home = scratch();
+  const dbPath = store(home, { id: "unstatable" });
+  const original = fs.statSync;
+  fs.statSync = (target) => {
+    if (target === dbPath) throw new Error("stat blocked");
+    return original(target);
+  };
+  try {
+    assert.deepEqual(storePaths(path.join(home, ".cursor")), [dbPath]);
+  } finally {
+    fs.statSync = original;
+  }
+});
+
 test("CURSOR_CONFIG_DIR and XDG_CONFIG_HOME redirect the scan", async () => {
   const home = scratch();
   const config = path.join(home, "explicit-config");
@@ -229,7 +256,7 @@ test("allowlist rejects wildcard, chaining, off-list tables, and missing LIMIT",
 
 test("bounded transcript form populates tool calls in turn order", async () => {
   const home = scratch();
-  const cwd = "/private/tmp/claude-501/Users/meharban/Projects/Autonmous-Factory/very-long-project-name-that-forces-the-bounded-cursor-path";
+  const cwd = "/private/var/folders/T/session-rx-fixture/Users/demo/Projects/very-long-workspace-name-forcing-the-bounded-cursor-path";
   const id = "bounded-session";
   store(home, { id, sidecar: { cwd }, blob: rootBlob({ timestamps: [1700000000001, 1700000000002] }) });
   writeTranscript(transcriptPath(home, cwd, id, "bounded"), [
@@ -242,11 +269,42 @@ test("bounded transcript form populates tool calls in turn order", async () => {
   assert.deepEqual(session.turns.map((turn) => turn.toolCalls.map((call) => call.name)), [["read_file"], ["shell"]]);
 });
 
-test("short Cursor data root keeps the verified bounded project name", () => {
-  const dataDir = "/Users/meharban/.cursor";
-  const cwd = "/private/tmp/claude-501/-Users-meharban-Projects-Autonmous-Factory-multi-llm-orchestrator-case-studies-project-60-session-rx/a7e24a8a-0995-4c2c-8ed6-1f7487eddab7/scratchpad/cursor_probe";
+test("bounded Cursor paths use the exact clamped project name", () => {
+  const dataDir = "/Users/demo/.cursor";
+  const cwd = "/private/var/folders/T/session-rx-fixture/Users/demo/Projects/very-long-workspace-name-forcing-the-bounded-cursor-path";
   const [candidate] = transcriptPaths(dataDir, cwd, "regression");
-  assert.match(candidate, /private-tmp-claude-501-Users-meharban-Projects-Auto-9d5638a/);
+  assert.equal(candidate.split(`${path.sep}agent-transcripts`)[0].split(`${path.sep}projects${path.sep}`)[1], "private-var-folders-T-session-rx-fixture-Users-demo-Pro-aba1a6d");
+});
+
+test("another bounded Cursor path keeps its exact clamped project name", () => {
+  const dataDir = "/home/demo/.cursor";
+  const cwd = "/home/demo/workspaces/an-extremely-long-monorepo-package-directory-name-that-exceeds-the-cap";
+  const [candidate] = transcriptPaths(dataDir, cwd, "regression");
+  assert.equal(candidate.split(`${path.sep}agent-transcripts`)[0].split(`${path.sep}projects${path.sep}`)[1], "home-demo-workspaces-an-extremely-long-monorepo-package--c7d4772");
+});
+
+test("short Cursor paths remain unbounded", () => {
+  const dataDir = "/Users/demo/.cursor";
+  const cwd = "/Users/demo/project";
+  const [candidate] = transcriptPaths(dataDir, cwd, "regression");
+  assert.equal(candidate.split(`${path.sep}agent-transcripts`)[0].split(`${path.sep}projects${path.sep}`)[1], "Users-demo-project");
+});
+
+test("session cap keeps newest stores and reports the truncated scan", async () => {
+  const home = scratch();
+  const now = Date.now();
+  for (let index = 0; index < 201; index += 1) {
+    const id = `session-${String(index).padStart(3, "0")}`;
+    const dbPath = store(home, { id });
+    const timestamp = new Date(now - (200 - index) * 1000);
+    utimesSync(dbPath, timestamp, timestamp);
+  }
+  const diagnostic = createDiagnostic("cursor");
+  const sessions = await collector(home).collect({ diagnostic });
+  assert.equal(sessions.length, 200);
+  assert.equal(sessions.some(({ sessionId }) => sessionId === "session-000"), false);
+  assert.equal(sessions[0].sessionId, "session-200");
+  assert.deepEqual(diagnostic.truncated, [`${path.join(home, ".cursor")}#sessions>200`]);
 });
 
 test("every transcript candidate stays below the data directory projects root", () => {

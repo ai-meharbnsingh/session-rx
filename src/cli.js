@@ -70,6 +70,7 @@ Commands:
 
 Options:
   --port <n>     bind this exact port (fails if it is taken)
+  --limit <n>    read up to n sessions per CLI; larger values read further back but take longer
   --no-open      do not launch a browser; just print the URL and serve
   --host-info    print the resolved bind address and exit
   -h, --help     show this message
@@ -77,6 +78,7 @@ Options:
 
 Environment:
   SESSION_RX_PORT     same as --port
+  SESSION_RX_LIMIT    same as --limit
   SESSION_RX_NO_OPEN  set to 1 to imply --no-open
   SESSION_RX_HOME     resolve fix targets under this home instead of $HOME
 
@@ -87,6 +89,7 @@ export function parseArgs(argv, env = {}) {
   const options = {
     command: "serve",
     port: null,
+    scanLimit: null,
     open: env.SESSION_RX_NO_OPEN !== "1" && env.SESSION_RX_NO_OPEN !== "true",
     help: false,
     version: false,
@@ -102,6 +105,9 @@ export function parseArgs(argv, env = {}) {
 
   if (options.command === "serve" && typeof env.SESSION_RX_PORT === "string" && env.SESSION_RX_PORT !== "") {
     options.port = readPort(env.SESSION_RX_PORT, "SESSION_RX_PORT");
+  }
+  if (options.command === "serve" && typeof env.SESSION_RX_LIMIT === "string") {
+    options.scanLimit = readScanLimit(env.SESSION_RX_LIMIT, "SESSION_RX_LIMIT");
   }
   for (let i = 0; i < flags.length; i += 1) {
     const arg = flags[i];
@@ -121,6 +127,11 @@ export function parseArgs(argv, env = {}) {
       i += 1;
     } else if (arg.startsWith("--port=")) {
       options.port = readPort(arg.slice("--port=".length), "--port");
+    } else if (arg === "--limit") {
+      options.scanLimit = readScanLimit(flags[i + 1], "--limit");
+      i += 1;
+    } else if (arg.startsWith("--limit=")) {
+      options.scanLimit = readScanLimit(arg.slice("--limit=".length), "--limit");
     } else {
       throw new Error(`unknown option: ${arg}\n\n${USAGE}`);
     }
@@ -135,6 +146,17 @@ function readPort(raw, label) {
   const port = Number(raw);
   if (port < 1 || port > 65535) throw new Error(`${label} must be between 1 and 65535, got ${port}`);
   return port;
+}
+
+function readScanLimit(raw, label) {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    throw new Error(`${label} needs a positive integer, got: ${raw ?? "(nothing)"}`);
+  }
+  const limit = Number(raw);
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error(`${label} must be a positive integer, got ${raw}`);
+  }
+  return limit;
 }
 
 /**
@@ -204,9 +226,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   }
 
   const candidates = options.port === null ? PORT_CANDIDATES : [options.port];
+  const serverOptions = options.scanLimit === null ? {} : { scanLimit: options.scanLimit };
   let running;
   try {
-    running = await listenOnFreePort(candidates);
+    running = await listenOnFreePort(candidates, serverOptions);
   } catch (error) {
     const code = error?.code ?? "";
     const hint = code === "EADDRINUSE" && options.port !== null

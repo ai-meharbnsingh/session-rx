@@ -35,6 +35,7 @@ const PACKAGE_JSON = JSON.parse(
   await fs.readFile(path.join(PROJECT_ROOT, "package.json"), "utf8"),
 );
 const PACKAGE_NAME = PACKAGE_JSON.name;
+const NPM_BIN = process.platform === "win32" ? "npm.cmd" : "npm";
 
 // npm pack is slow (seconds, not milliseconds) compared to the rest of the
 // suite; give it real headroom rather than tuning a flaky-under-load number.
@@ -205,11 +206,11 @@ describe("packaged npm artifact (BP-007 / GATE-FACTORY)", { timeout: PACK_TIMEOU
 
   before(() => {
     const raw = execFileSync(
-      "npm",
+      NPM_BIN,
       ["pack", "--dry-run", "--json"],
       { cwd: PROJECT_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
     );
-    const npmVersion = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim()
+    const npmVersion = execFileSync(NPM_BIN, ["--version"], { encoding: "utf8" }).trim()
       || process.env.npm_config_user_agent
       || "unknown";
     const report = normalizePackReport(JSON.parse(raw), npmVersion);

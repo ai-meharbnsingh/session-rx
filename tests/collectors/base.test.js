@@ -42,7 +42,9 @@ const MISSING = path.join(ROBUST, "does-not-exist.jsonl");
 const LINE_SEPARATOR = path.join(ROBUST, "line-separator.jsonl");
 
 test("readOnlyFileUri uses the SQLite three-slash POSIX form", () => {
-  assert.equal(readOnlyFileUri("/abs/path"), "file:///abs/path?mode=ro");
+  const uri = readOnlyFileUri(path.join(path.parse(process.cwd()).root, "abs", "path"));
+  assert.match(uri, /^file:\/\/\/.*\?mode=ro$/);
+  assert.doesNotMatch(uri, /\\/);
 });
 
 test("readOnlyFileUri normalizes a Windows-shaped path deterministically", () => {
@@ -53,13 +55,14 @@ test("readOnlyFileUri normalizes a Windows-shaped path deterministically", () =>
 });
 
 test("readOnlyFileUri escapes percent, question-mark, and hash once", () => {
-  const uri = readOnlyFileUri("/tmp/100%/store?part#1.db");
-  assert.equal(uri, "file:///tmp/100%25/store%3fpart%231.db?mode=ro");
+  const input = path.join(path.parse(process.cwd()).root, "tmp", "100%", "store?part#1.db");
+  const uri = readOnlyFileUri(input);
+  assert.match(uri, /100%25[\\/]store%3fpart%231\.db\?mode=ro$/);
   assert.match(uri, /%25/);
   assert.doesNotMatch(uri, /%2525/);
 });
 
-test("openReadOnlySqlite opens a real temporary database and reports URI support", () => {
+test("openReadOnlySqlite opens a real temporary database with the read-only contract", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "session-rx-uri-"));
   const file = path.join(dir, "store.db");
   const writable = new DatabaseSync(file);
@@ -67,8 +70,12 @@ test("openReadOnlySqlite opens a real temporary database and reports URI support
   writable.close();
 
   const { db: readOnly, uriSupported } = openReadOnlySqlite(DatabaseSync, file);
-  assert.equal(uriSupported, true);
-  assert.equal(readOnly.prepare("SELECT COUNT(*) AS count FROM probe").get().count, 0);
+  // Node 22 rejects file: URIs while Node 26 accepts them; both are supported behavior.
+  assert.equal(typeof uriSupported, "boolean");
+  const rows = readOnly.prepare("SELECT COUNT(*) AS count FROM probe").all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].count, 0);
+  assert.throws(() => readOnly.exec("CREATE TABLE blocked (value TEXT)"));
   readOnly.close();
 });
 
