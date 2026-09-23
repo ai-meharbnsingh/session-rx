@@ -37,7 +37,7 @@ const PACKAGE_JSON = JSON.parse(
 
 // npm pack is slow (seconds, not milliseconds) compared to the rest of the
 // suite; give it real headroom rather than tuning a flaky-under-load number.
-const PACK_TIMEOUT_MS = 60_000;
+const PACK_TIMEOUT_MS = 180_000;
 
 /**
  * Credential-shaped probes, one per vendor family the brief calls out.
@@ -107,7 +107,7 @@ function isLoopback(url) {
   return LOOPBACK_HOSTS.has(host);
 }
 
-describe("packaged npm artifact (BP-007 / GATE-FACTORY)", () => {
+describe("packaged npm artifact (BP-007 / GATE-FACTORY)", { timeout: PACK_TIMEOUT_MS }, () => {
   /** @type {{path: string, size: number, mode: number}[]} */
   let packedEntries;
   /** @type {Set<string>} */

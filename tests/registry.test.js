@@ -550,14 +550,18 @@ test("one reader failing to load suppresses neither the readers that work nor th
   assert.deepEqual(seen.map((entry) => entry.id).sort(), ["claude", "codex", "kimi", "opencode"]);
   assert.equal(new Set(seen.map((entry) => entry.id)).size, 4);
   assert.deepEqual(result.unreadable.map((entry) => entry.id), ["opencode"]);
-  assert.deepEqual(result.absent.map((entry) => entry.id), ["kimi"]);
+  // Claude and Codex are real host probes, so their absent status depends on
+  // which AI CLIs happen to be installed; Kimi is always absent because its reader is missing.
+  assert.ok(result.absent.some((entry) => entry.id === "kimi"));
 
   // The real readers loaded: neither is a bare fallback slot, whatever this
   // machine has installed.
   for (const id of ["claude", "codex"]) {
     const entry = seen.find((candidate) => candidate.id === id);
+    assert.equal(seen.filter((candidate) => candidate.id === id).length, 1);
     assert.ok(STATUSES.has(entry.status));
     assert.equal(typeof entry.installed, "boolean");
+    assert.notEqual(entry.status, COULD_NOT_READ);
   }
 
   // Exactly one failure is reported, and it names the reader that failed.
