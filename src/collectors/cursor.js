@@ -9,6 +9,7 @@ import {
   lookupWindow,
   normalizeSession,
   normalizeTurn,
+  openReadOnlySqlite,
   readOnlyFileUri,
   safeReadJsonl,
 } from "./base.js";
@@ -263,6 +264,7 @@ export class CursorCollector extends Collector {
     const xdgRoot = env.XDG_CONFIG_HOME?.trim();
     this.configDir = configRoot || (xdgRoot ? path.join(xdgRoot, "cursor") : path.join(home, ".cursor"));
     this.dataDir = env.CURSOR_DATA_DIR?.trim() || path.join(home, ".cursor");
+    this.DatabaseSync = DatabaseSync;
     this.sqlLog = [];
   }
 
@@ -306,7 +308,11 @@ export class CursorCollector extends Collector {
     for (const dbPath of paths) {
       let db;
       try {
-        db = new DatabaseSync(this.readOnlyUri(dbPath), { readOnly: true });
+        const opened = openReadOnlySqlite(this.DatabaseSync, dbPath);
+        db = opened.db;
+        if (!opened.uriSupported) {
+          report.notes.push("Runtime did not accept a URI filename; used the plain path with the read-only flag.");
+        }
         report.filesScanned += 1;
         const metaRows = this.run(db, QUERIES.meta);
         const metadata = decodeMeta(metaRows[0]?.value);

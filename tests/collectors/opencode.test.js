@@ -93,6 +93,26 @@ test("collect returns sessions newest first", async () => {
   }
 });
 
+test("URI fallback returns the same sessions and records an informational note", async () => {
+  const instance = collector();
+  const realDatabaseSync = DatabaseSync;
+  instance.DatabaseSync = class UriRejectingDatabaseSync {
+    constructor(filename, options) {
+      if (filename.includes("file:")) throw new Error("URI unsupported");
+      return new realDatabaseSync(filename, options);
+    }
+  };
+  const diagnostic = createDiagnostic("opencode");
+  const sessions = await instance.collect({ diagnostic });
+  assert.deepEqual(sessions.map((session) => session.sessionId), [
+    "ses_child", "ses_mapped", "ses_unmapped", "ses_nulls", "ses_nomsg",
+  ]);
+  assert.deepEqual(diagnostic.notes, [
+    "Runtime did not accept a URI filename; used the plain path with the read-only flag.",
+  ]);
+  assert.deepEqual(diagnostic.errors, []);
+});
+
 test("session row fields become project, cwd, model, window and ISO timestamps", async () => {
   const session = (await sessionsById()).get("ses_mapped");
   assert.equal(session.project, "alpha-app");

@@ -14,6 +14,19 @@ export function readOnlyFileUri(filePath) {
   return `file://${p}?mode=ro`;
 }
 
+/**
+ * Open SQLite read-only even on runtimes that reject a URI filename.
+ * `{ readOnly: true }` is the real SQLITE_OPEN_READONLY flag on both attempts;
+ * the URI's `mode=ro` applies the same guarantee through another route.
+ */
+export function openReadOnlySqlite(DatabaseSync, filePath) {
+  try {
+    return { db: new DatabaseSync(readOnlyFileUri(filePath), { readOnly: true }), uriSupported: true };
+  } catch {
+    return { db: new DatabaseSync(path.resolve(filePath), { readOnly: true }), uriSupported: false };
+  }
+}
+
 // Bumped on every change to MODEL_WINDOW_ENTRIES *or* to how they are
 // resolved.  `.3` demotes the table from authority to PRIOR: `resolveWindow`
 // lets a session's own observed peak context override it (F-008).
@@ -426,7 +439,7 @@ export function normalizeSession(fields = {}) {
 }
 
 export function createDiagnostic(cli = "unknown") {
-  return { cli, filesScanned: 0, filesSkipped: 0, linesSkipped: 0, truncated: [], errors: [] };
+  return { cli, filesScanned: 0, filesSkipped: 0, linesSkipped: 0, truncated: [], errors: [], notes: [] };
 }
 
 function recordError(diagnostic, error) {

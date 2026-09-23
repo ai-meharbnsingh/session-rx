@@ -107,6 +107,26 @@ test("hex metadata decodes session identity, model, and start time", async () =>
   assert.equal(session.startedAt, new Date(1700000000000).toISOString());
 });
 
+test("URI fallback returns the same session and records an informational note", async () => {
+  const home = scratch();
+  store(home, { id: "fallback-uri" });
+  const instance = collector(home);
+  const realDatabaseSync = DatabaseSync;
+  instance.DatabaseSync = class UriRejectingDatabaseSync {
+    constructor(filename, options) {
+      if (filename.includes("file:")) throw new Error("URI unsupported");
+      return new realDatabaseSync(filename, options);
+    }
+  };
+  const diagnostic = createDiagnostic("cursor");
+  const sessions = await instance.collect({ diagnostic });
+  assert.deepEqual(sessions.map((session) => session.sessionId), ["fallback-uri"]);
+  assert.deepEqual(diagnostic.notes, [
+    "Runtime did not accept a URI filename; used the plain path with the read-only flag.",
+  ]);
+  assert.deepEqual(diagnostic.errors, []);
+});
+
 test("raw JSON metadata is skipped with a diagnostic", async () => {
   const home = scratch();
   const dbPath = store(home);

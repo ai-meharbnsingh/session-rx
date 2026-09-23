@@ -10,6 +10,7 @@ import {
   resolveWindow,
   normalizeSession,
   normalizeTurn,
+  openReadOnlySqlite,
   readOnlyFileUri,
 } from "./base.js";
 
@@ -280,6 +281,7 @@ export class OpenCodeCollector extends Collector {
       } catch { /* absent data directory remains absent */ }
     }
     this.sessionLimit = sessionLimit;
+    this.DatabaseSync = DatabaseSync;
     this.diagnostic = createDiagnostic("opencode");
     /** Every distinct SQL string issued, for the security assertion in tests. */
     this.sqlLog = [];
@@ -331,7 +333,11 @@ export class OpenCodeCollector extends Collector {
 
     let db;
     try {
-      db = new DatabaseSync(this.readOnlyUri(), { readOnly: true });
+      const opened = openReadOnlySqlite(this.DatabaseSync, this.dbPath);
+      db = opened.db;
+      if (!opened.uriSupported) {
+        report.notes.push("Runtime did not accept a URI filename; used the plain path with the read-only flag.");
+      }
     } catch (error) {
       // Missing file, unreadable file, or a stale WAL that read-only recovery
       // cannot open.  Never fatal: the server keeps its other collectors.

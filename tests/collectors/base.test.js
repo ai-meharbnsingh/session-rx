@@ -21,6 +21,7 @@ import Collector, {
   matchWindowEntry,
   normalizeSession,
   normalizeTurn,
+  openReadOnlySqlite,
   peakContextTokens,
   readOnlyFileUri,
   resolveWindow,
@@ -58,16 +59,57 @@ test("readOnlyFileUri escapes percent, question-mark, and hash once", () => {
   assert.doesNotMatch(uri, /%2525/);
 });
 
-test("readOnlyFileUri opens a real temporary database read-only", () => {
+test("openReadOnlySqlite opens a real temporary database and reports URI support", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "session-rx-uri-"));
   const file = path.join(dir, "store.db");
   const writable = new DatabaseSync(file);
   writable.exec("CREATE TABLE probe (value TEXT)");
   writable.close();
 
-  const readOnly = new DatabaseSync(readOnlyFileUri(file), { readOnly: true });
+  const { db: readOnly, uriSupported } = openReadOnlySqlite(DatabaseSync, file);
+  assert.equal(uriSupported, true);
   assert.equal(readOnly.prepare("SELECT COUNT(*) AS count FROM probe").get().count, 0);
   readOnly.close();
+});
+
+test("openReadOnlySqlite falls back to a plain path when URI filenames are rejected", () => {
+  const calls = [];
+  const expected = { marker: true };
+  class UriRejectingDatabaseSync {
+    constructor(filename, options) {
+      calls.push({ filename, options });
+      if (filename.includes("file:")) throw new Error("URI unsupported");
+      return expected;
+    }
+  }
+  const result = openReadOnlySqlite(UriRejectingDatabaseSync, "/tmp/session-rx-fallback.db");
+  assert.equal(result.db, expected);
+  assert.equal(result.uriSupported, false);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].filename.startsWith("file:"));
+  assert.equal(calls[1].filename, path.resolve("/tmp/session-rx-fallback.db"));
+  assert.deepEqual(calls.map(({ options }) => options), [{ readOnly: true }, { readOnly: true }]);
+});
+
+test("openReadOnlySqlite propagates the second failure", () => {
+  const error = new Error("missing database");
+  class AlwaysFailingDatabaseSync {
+    constructor() { throw error; }
+  }
+  assert.throws(() => openReadOnlySqlite(AlwaysFailingDatabaseSync, "/tmp/missing.db"), error);
+});
+
+test("openReadOnlySqlite sends the read-only option on both attempts", () => {
+  const options = [];
+  class OptionsProbeDatabaseSync {
+    constructor(filename, received) {
+      options.push(received);
+      if (filename.includes("file:")) throw new Error("URI unsupported");
+      return { close() {} };
+    }
+  }
+  openReadOnlySqlite(OptionsProbeDatabaseSync, "/tmp/session-rx-options.db");
+  assert.deepEqual(options, [{ readOnly: true }, { readOnly: true }]);
 });
 
 /** The entry `lookupWindow` must pick, computed from the exported table order. */
@@ -638,6 +680,7 @@ test("createDiagnostic starts empty and carries the cli", () => {
     linesSkipped: 0,
     truncated: [],
     errors: [],
+    notes: [],
   });
   assert.equal(createDiagnostic().cli, "unknown");
 });
