@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Cursor CLI sessions are now read.** Built against Cursor's own shipped source (the CLI installs as readable JavaScript bundles), not against a guessed format. Reads `~/.cursor/chats/<md5-of-cwd>/<chat-id>/store.db` and `~/.cursor/acp-sessions/<id>/store.db`, both SQLite opened read-only through a `file:…?mode=ro` URI, with a two-table allowlist (`meta`, `blobs`), explicit column names, and a LIMIT on every statement. The chat metadata is ONE row, keyed `"0"`, whose value is hex-encoded UTF-8 JSON — not JSON, which is the trap a naive parser falls into. The conversation root is a protobuf blob; a small hand-written reader decodes exactly three fields — turn list, per-turn timings, and token details — with no new dependency and no protobuf runtime vendored in. Tool call names come from Cursor's transcript at `~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl`. What a Cursor session shows: project, model last used, turn count, per-turn timestamps (so duration is real), tool names, and Cursor's OWN reported context window rather than one inferred from a model-id table. What it cannot show, and why: Cursor does not persist per-turn token counts anywhere on disk — they exist only in memory while it runs — so all six health checks report `unknown`, with a specific machine-readable reason each. Zero is never shown in place of a number Cursor did not record. It also discards tool results from its transcript, so result size cannot be measured. Security: the same metadata row holds a blob encryption key. It is deleted before anything else reads the row, and a test asserts it appears nowhere in collector output. A machine with no Cursor reports `absent`; Cursor present but with no readable chat store reports `detection-only`; neither is ever reported as a pass.
+
+### Fixed
+
+- **Sessions: the Key findings pill painted over the Trend column.** The unknown and clear pills were appended straight to the table cell while only the observed pills were wrapped in the container that clips them, and a later `white-space: nowrap` rule had silently disabled the earlier wrapping rule. Measured at 1440px: the pill ran to 862px against a cell ending at 811px — 51px over, drawn on top of the Trend text. All three pill paths now share the same container; a single over-long pill ellipses on one line and carries its full text on hover. Rows stay 77px.
+- **Sessions: the CLI chip overflowed its column by 5 pixels.** The column was 62px and the chip needs 68px with its uppercase letter-spacing, padding and border. Column 2 is now 68px and the Health column gives back the same 6px, so the ten widths still sum to 1120px and the table still fits with no horizontal overflow.
+
 ## [0.1.3] - 2026-09-23
 
 ### Fixed

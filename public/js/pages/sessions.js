@@ -306,7 +306,12 @@ export function findingCell(session) {
   if (findings.length) {
     const list = el('span', 'finding-list');
     const visible = findings.slice(0, 1);
-    visible.forEach((rule) => list.append(el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, ruleLabel(rule))));
+    visible.forEach((rule) => {
+      const label = ruleLabel(rule);
+      const pill = el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, label);
+      pill.setAttribute('title', label);
+      list.append(pill);
+    });
     const hidden = findings.slice(visible.length);
     if (hidden.length) {
       const counter = el('span', 'finding-counter', `+${hidden.length} more`);
@@ -316,9 +321,19 @@ export function findingCell(session) {
     td.append(list);
   } else if (unknown > 0) {
     const denominator = Number.isFinite(total) ? total : unknown;
-    td.append(el('span', 'finding-pill finding-unknown', `${unknown} of ${denominator} checks could not be measured`));
+    const list = el('span', 'finding-list');
+    const label = `${unknown} of ${denominator} checks could not be measured`;
+    const pill = el('span', 'finding-pill finding-unknown', label);
+    pill.setAttribute('title', label);
+    list.append(pill);
+    td.append(list);
   } else {
-    td.append(el('span', 'finding-pill finding-clear', 'Checks ran; no problems observed'));
+    const list = el('span', 'finding-list');
+    const label = 'Checks ran; no problems observed';
+    const pill = el('span', 'finding-pill finding-clear', label);
+    pill.setAttribute('title', label);
+    list.append(pill);
+    td.append(list);
   }
   return td;
 }

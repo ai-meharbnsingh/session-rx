@@ -38,6 +38,7 @@ const definitions = [
   ["gemini", "Gemini CLI", "./gemini.js", "GeminiCollector"],
   ["kimi", "Kimi", "./kimi.js", "KimiCollector"],
   ["opencode", "OpenCode", "./opencode.js", "OpenCodeCollector"],
+  ["cursor", "Cursor CLI", "./cursor.js", "CursorCollector"],
   ["copilot", "GitHub Copilot CLI", "./copilot.js", "CopilotCollector"],
 ];
 
