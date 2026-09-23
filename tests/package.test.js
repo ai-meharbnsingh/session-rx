@@ -107,6 +107,52 @@ function isLoopback(url) {
   return LOOPBACK_HOSTS.has(host);
 }
 
+function packResultShape(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return value.length === 0 ? "empty array" : "array";
+  if (typeof value === "object") {
+    return Array.isArray(value.files) ? "object with files array" : "object without files array";
+  }
+  return typeof value;
+}
+
+function normalizePackReport(value, npmVersion = "unknown") {
+  const report = Array.isArray(value) ? value[0] : value;
+  if (
+    (Array.isArray(value) && value.length === 0) ||
+    report === null ||
+    typeof report !== "object" ||
+    !Array.isArray(report.files)
+  ) {
+    throw new Error(
+      `Unsupported npm pack --json result from npm ${npmVersion}: ` +
+      `expected a non-empty array or an object with a files array; got shape=${packResultShape(value)}`,
+    );
+  }
+  return report;
+}
+
+describe("npm pack report normalization", () => {
+  it("normalizes an npm 11-style array to its inner report", () => {
+    const report = { files: [{ path: "package.json" }] };
+    assert.strictEqual(normalizePackReport([report], "11.19.1"), report);
+  });
+
+  it("accepts an npm 12-style object report", () => {
+    const report = { files: [{ path: "package.json" }] };
+    assert.strictEqual(normalizePackReport(report, "12.1.0"), report);
+  });
+
+  it("throws with the received shape for invalid pack results", () => {
+    for (const value of [[], {}, null, "string"]) {
+      assert.throws(
+        () => normalizePackReport(value, "12.1.0"),
+        (error) => /shape=/.test(error.message) && /npm 12\.1\.0/.test(error.message),
+      );
+    }
+  });
+});
+
 describe("packaged npm artifact (BP-007 / GATE-FACTORY)", { timeout: PACK_TIMEOUT_MS }, () => {
   /** @type {{path: string, size: number, mode: number}[]} */
   let packedEntries;
@@ -119,7 +165,10 @@ describe("packaged npm artifact (BP-007 / GATE-FACTORY)", { timeout: PACK_TIMEOU
       ["pack", "--dry-run", "--json"],
       { cwd: PROJECT_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
     );
-    const [report] = JSON.parse(raw);
+    const npmVersion = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim()
+      || process.env.npm_config_user_agent
+      || "unknown";
+    const report = normalizePackReport(JSON.parse(raw), npmVersion);
     packedEntries = report.files;
     packedPaths = new Set(packedEntries.map((f) => f.path));
   }, { timeout: PACK_TIMEOUT_MS });
