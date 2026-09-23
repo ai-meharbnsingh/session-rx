@@ -46,15 +46,26 @@ import {
 } from "./fixtures/fixes/4b/harness.mjs";
 
 function assertSymlinkTargetMentioned(message, link, real) {
+  const resolveRealpath = (value) => {
+    try {
+      return realpathSync.native(value);
+    } catch {
+      try {
+        return realpathSync(value);
+      } catch {
+        return value;
+      }
+    }
+  };
   const canon = (value) => {
     const normalized = value.replaceAll("\\", "/");
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
 
-  const resolvedLink = canon(realpathSync(link));
+  const resolvedLink = canon(resolveRealpath(link));
   const canonicalMessage = canon(message);
   const canonicalReal = canon(real);
-  const canonicalResolvedReal = canon(realpathSync(real));
+  const canonicalResolvedReal = canon(resolveRealpath(real));
   const expectedTarget = canonicalResolvedReal;
 
   assert.equal(resolvedLink, expectedTarget);
