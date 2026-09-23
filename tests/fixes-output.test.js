@@ -12,6 +12,7 @@
  */
 
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,18 @@ import {
   scaffoldEmpty,
   stateDirExists,
 } from "./fixtures/fixes/4b/harness.mjs";
+
+function assertSymlinkTargetMentioned(message, link, real) {
+  const resolvedLink = realpathSync(link);
+  const resolvedReal = realpathSync(real);
+  const normalize = (value) => {
+    const normalized = value.replaceAll("\\", "/");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  assert.equal(normalize(resolvedLink), normalize(resolvedReal));
+  assert.ok(normalize(message).includes(normalize(resolvedReal)),
+    `the diagnostic did not name the resolved symlink target: ${message}`);
+}
 
 /**
  * THE WORDING LOCK. This is the text a developer's CLAUDE.md receives, written
@@ -374,8 +387,11 @@ test("a symlinked CLAUDE.md is refused, the link survives, nothing is written", 
   try {
     await symlink(real, link);
   } catch (error) {
-    t.skip(`unknown — symlink creation is unavailable on this runner (${error.code ?? error.message})`);
-    return;
+    if (["EACCES", "EPERM"].includes(error.code)) {
+      t.skip(`symlink creation requires privilege on this runner (${error.code})`);
+      return;
+    }
+    throw error;
   }
   const before = await readFile(real);
 
@@ -386,8 +402,7 @@ test("a symlinked CLAUDE.md is refused, the link survives, nothing is written", 
 
   const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_IS_SYMLINK);
   assert.match(error.message, /atomic rename would replace the link/);
-  const realPattern = real.split(path.sep).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\\\/]");
-  assert.match(error.message, new RegExp(realPattern), "the diagnostic does not name the real file");
+  assertSymlinkTargetMentioned(error.message, link, real);
 
   assert.ok((await readFile(real)).equals(before), "the symlink target was modified");
   const { lstat } = await import("node:fs/promises");

@@ -12,6 +12,7 @@
  */
 
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -43,6 +44,18 @@ import {
   scaffoldEmpty,
   stateDirExists,
 } from "./fixtures/fixes/4b/harness.mjs";
+
+function assertSymlinkTargetMentioned(message, link, real) {
+  const resolvedLink = realpathSync(link);
+  const resolvedReal = realpathSync(real);
+  const normalize = (value) => {
+    const normalized = value.replaceAll("\\", "/");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  assert.equal(normalize(resolvedLink), normalize(resolvedReal));
+  assert.ok(normalize(message).includes(normalize(resolvedReal)),
+    `the diagnostic did not name the resolved symlink target: ${message}`);
+}
 
 /** THE MERGED FRAGMENT under review, written out as a literal (BP-004.01). */
 const EXPECTED_FRAGMENT = "\"autoCompact\": true";
@@ -530,16 +543,18 @@ test("a symlinked settings.json is refused, the link survives, nothing is writte
   try {
     await symlink(real, link);
   } catch (error) {
-    t.skip(`unknown — symlink creation is unavailable on this runner (${error.code ?? error.message})`);
-    return;
+    if (["EACCES", "EPERM"].includes(error.code)) {
+      t.skip(`symlink creation requires privilege on this runner (${error.code})`);
+      return;
+    }
+    throw error;
   }
   const before = await readFile(real);
 
   const fix = createAutoCompactFix({ env });
   assert.equal((await fix.check()).reason, FIX_ERROR_CODES.TARGET_IS_SYMLINK);
   const error = await expectFixError(fix.apply(), FIX_ERROR_CODES.TARGET_IS_SYMLINK);
-  const realPattern = real.split(path.sep).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\\\/]");
-  assert.match(error.message, new RegExp(realPattern));
+  assertSymlinkTargetMentioned(error.message, link, real);
 
   assert.ok((await readFile(real)).equals(before), "the symlink target was modified");
   assert.equal((await lstat(link)).isSymbolicLink(), true, "the symlink was replaced");

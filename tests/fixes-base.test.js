@@ -221,9 +221,11 @@ test("CLAUDE.md append: preview, apply, check and undo round-trip", async () => 
   assert.equal(preview.applyable, true);
   assert.deepEqual(preview.files_affected, [target]);
   assert.equal(preview.targets.length, 1);
-  assert.equal(preview.targets[0].display, "~/.claude/CLAUDE.md");
+  const display = path.join("~", ".claude", "CLAUDE.md");
+  assert.equal(preview.targets[0].display, display);
   assert.equal(preview.targets[0].beforeHash, `sha256:${hash(before)}`);
-  assert.match(preview.diff, /^--- ~\/\.claude\/CLAUDE\.md\n/);
+  const escapedDisplay = display.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(preview.diff, new RegExp(`^--- ${escapedDisplay}\\n`));
   assert.match(preview.diff, /^\+<!-- session-rx:output-hygiene:v1 -->$/m);
   assert.equal(preview.check.applied, false);
   assert.equal(preview.sensitive, true, "a CLAUDE.md diff shows the user's own lines as context");

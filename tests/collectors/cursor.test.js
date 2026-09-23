@@ -269,18 +269,53 @@ test("bounded transcript form populates tool calls in turn order", async () => {
   assert.deepEqual(session.turns.map((turn) => turn.toolCalls.map((call) => call.name)), [["read_file"], ["shell"]]);
 });
 
+function assertBoundedProjectName(dataDir, cwd, expected, slugPrefix, alternateCwd) {
+  const projectName = (candidate) => candidate
+    .split(`${path.sep}agent-transcripts`)[0]
+    .split(`${path.sep}projects${path.sep}`)[1];
+  const [candidate] = transcriptPaths(dataDir, cwd, "regression");
+  const bounded = projectName(candidate);
+
+  if (path.sep === "/") {
+    assert.equal(bounded, expected);
+  } else {
+    assert.ok(bounded.startsWith(slugPrefix));
+    assert.match(bounded, /-[a-f0-9]{7}$/);
+    assert.ok(
+      candidate.split(`${path.sep}agent-transcripts`)[0].length <= 92,
+      "the bounded project path exceeds its length limit",
+    );
+    assert.equal(projectName(transcriptPaths(dataDir, cwd, "regression")[0]), bounded);
+    assert.notEqual(
+      projectName(transcriptPaths(dataDir, alternateCwd, "regression")[0]),
+      bounded,
+      "different long project paths must not share the same bounded name",
+    );
+  }
+}
+
 test("bounded Cursor paths use the exact clamped project name", () => {
   const dataDir = "/Users/demo/.cursor";
   const cwd = "/private/var/folders/T/session-rx-fixture/Users/demo/Projects/very-long-workspace-name-forcing-the-bounded-cursor-path";
-  const [candidate] = transcriptPaths(dataDir, cwd, "regression");
-  assert.equal(candidate.split(`${path.sep}agent-transcripts`)[0].split(`${path.sep}projects${path.sep}`)[1], "private-var-folders-T-session-rx-fixture-Users-demo-Pro-aba1a6d");
+  assertBoundedProjectName(
+    dataDir,
+    cwd,
+    "private-var-folders-T-session-rx-fixture-Users-demo-Pro-aba1a6d",
+    "private-var-folders-T-session-rx-fixture-Users-demo-Pro",
+    `${cwd}-different`,
+  );
 });
 
 test("another bounded Cursor path keeps its exact clamped project name", () => {
   const dataDir = "/home/demo/.cursor";
   const cwd = "/home/demo/workspaces/an-extremely-long-monorepo-package-directory-name-that-exceeds-the-cap";
-  const [candidate] = transcriptPaths(dataDir, cwd, "regression");
-  assert.equal(candidate.split(`${path.sep}agent-transcripts`)[0].split(`${path.sep}projects${path.sep}`)[1], "home-demo-workspaces-an-extremely-long-monorepo-package--c7d4772");
+  assertBoundedProjectName(
+    dataDir,
+    cwd,
+    "home-demo-workspaces-an-extremely-long-monorepo-package--c7d4772",
+    "home-demo-workspaces-an-extremely-long-monorepo-package-",
+    `${cwd}-different`,
+  );
 });
 
 test("short Cursor paths remain unbounded", () => {

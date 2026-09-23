@@ -208,9 +208,17 @@ describe("packaged npm artifact (BP-007 / GATE-FACTORY)", { timeout: PACK_TIMEOU
     const raw = execFileSync(
       NPM_BIN,
       ["pack", "--dry-run", "--json"],
-      { cwd: PROJECT_ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+      {
+        cwd: PROJECT_ROOT,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+        shell: process.platform === "win32",
+      },
     );
-    const npmVersion = execFileSync(NPM_BIN, ["--version"], { encoding: "utf8" }).trim()
+    const npmVersion = execFileSync(NPM_BIN, ["--version"], {
+      encoding: "utf8",
+      shell: process.platform === "win32",
+    }).trim()
       || process.env.npm_config_user_agent
       || "unknown";
     const report = normalizePackReport(JSON.parse(raw), npmVersion);
