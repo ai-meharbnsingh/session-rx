@@ -101,7 +101,41 @@ const state = {
   error: null,
   observer: null,
   selected: null,
+  health: new Set(),
+  issues: new Set(),
+  detailTab: 'diagnosis',
 };
+
+/**
+ * The sidebar's Health status choices.  Within one group a session matches if
+ * ANY ticked choice matches; across groups (CLI, health, issue) it must match
+ * ALL of them.  "Could not be measured" is its own choice, never folded into
+ * "no problems", because an unmeasured check is not a pass.
+ */
+const HEALTH_CHOICES = [
+  { key: 'observed', label: 'Problems found', test: (session) => (session?.score?.observed || 0) > 0 },
+  { key: 'unknown', label: 'Could not be measured', test: (session) => (session?.score?.unknown || 0) > 0 },
+];
+
+/** Labels of the rules this session was OBSERVED to break. */
+function observedLabels(session) {
+  return (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed').map((rule) => ruleLabel(rule));
+}
+
+/** Apply the CLI, Health status and Issue type filters to the loaded rows. */
+function filterRows(sessions) {
+  return sessions.filter((session) => {
+    if (state.cli !== 'all' && session?.cli !== state.cli) return false;
+    if (state.health.size && !HEALTH_CHOICES.some((choice) => state.health.has(choice.key) && choice.test(session))) return false;
+    if (state.issues.size && !observedLabels(session).some((label) => state.issues.has(label))) return false;
+    return true;
+  });
+}
+
+/** True when any filter narrows the list, so the page can offer "Clear filters". */
+function filtering() {
+  return state.cli !== 'all' || state.health.size > 0 || state.issues.size > 0;
+}
 
 /**
  * Column definitions.  `value` returns a sortable scalar or `null`; `cell`
@@ -652,7 +686,7 @@ function draw() {
   const api = state.ctx?.api ?? appApi;
   const data = state.data ?? {};
   const all = state.sessions;
-  const filtered = state.cli === 'all' ? all : all.filter((session) => session?.cli === state.cli);
+  const filtered = filterRows(all);
   const sorted = sortRows(filtered);
 
   mount.replaceChildren();
@@ -672,7 +706,7 @@ function draw() {
       'note',
       (state.hasMore
         ? `Showing ${groupInt(all.length) ?? '0'} of ${groupInt(total) ?? '0'} session${total === 1 ? '' : 's'} matched in this scan — more load as you scroll. `
-          + 'The CLI filter and the column sort below apply to the rows loaded so far, not to the whole scan. '
+          + 'The filters and the column sort below apply to the rows loaded so far, not to the whole scan. '
         : `${groupInt(all.length) ?? '0'} session${all.length === 1 ? '' : 's'} matched in this scan, all loaded. `)
         + 'A dash in any column means the value was not recorded — it is not a zero. '
         + 'Sorting always places those rows last, in both directions, because "not measured" is neither the best nor the worst value.',
@@ -699,24 +733,13 @@ function draw() {
   card.append(head);
   card.append(drawTable(sorted, api, draw));
   const layout = el('div', 'session-layout');
-  const filters = el('aside', 'rx-card filter-panel');
-  const filterTitle = el('div', 'rx-section-title tone-accent');
-  filterTitle.append(iconBadge('sessions'), el('h2', '', 'Filters'));
-  filters.append(filterTitle);
-  filters.append(el('p', 'filter-note', 'Counts describe loaded rows only.'));
-  const cliGroup = el('div', 'filter-group'); cliGroup.append(el('h3', '', 'CLI'));
-  const cliCounts = new Map(); all.forEach((session) => cliCounts.set(session?.cli, (cliCounts.get(session?.cli) || 0) + 1));
-  cliGroup.append(filterChoice('All sessions', all.length, state.cli === 'all', () => { state.cli = 'all'; draw(); }));
-  [...cliCounts.entries()].filter(([cli]) => cli).forEach(([cli,count]) => cliGroup.append(filterChoice(cli, count, state.cli === cli, () => { state.cli = cli; draw(); })));
-  filters.append(cliGroup);
-  const healthGroup = el('div','filter-group'); healthGroup.append(el('h3','','Health status')); healthGroup.append(filterChoice('Problems found', all.filter((s)=>(s?.score?.observed||0)>0).length, false, null), filterChoice('Could not be measured', all.filter((s)=>(s?.score?.unknown||0)>0).length, false, null)); filters.append(healthGroup);
-  const issueGroup = el('div','filter-group'); issueGroup.append(el('h3','','Issue type')); const issueNames = new Map(); all.forEach((s)=>(s.rules||[]).filter((r)=>r?.evidence?.status==='observed').forEach((r)=>issueNames.set(ruleLabel(r),(issueNames.get(ruleLabel(r))||0)+1))); [...issueNames.entries()].slice(0,5).forEach(([name,count])=>issueGroup.append(filterChoice(name,count,false,null))); filters.append(issueGroup); layout.append(filters);
+  layout.append(filterPanel(all, draw));
   layout.append(card);
   if (state.selected) layout.append(detailPanel(state.selected, api, draw));
   stack.append(layout);
 
   if (!sorted.length) {
-    stack.append(el('p', 'empty-state', `No session loaded so far came from ${state.cli}.`));
+    stack.append(el('p', 'empty-state', 'No session loaded so far matches the filters you picked.'));
   }
 
   const strip = pager(api, draw);
@@ -725,12 +748,249 @@ function draw() {
   observe(strip, api, draw);
 }
 
+/**
+ * The Filters sidebar.  Every checkbox here changes the table; a control that
+ * looks clickable and does nothing is a broken promise.  Counts next to each
+ * choice are counts of LOADED rows carrying that property, so they describe
+ * what ticking the box would match among the rows in hand.
+ */
+function filterPanel(all, redraw) {
+  const filters = el('aside', 'rx-card filter-panel');
+  const filterTitle = el('div', 'rx-section-title tone-accent');
+  filterTitle.append(iconBadge('sessions'), el('h2', '', 'Filters'));
+  filters.append(filterTitle);
+  filters.append(el('p', 'filter-note', 'Counts describe loaded rows only.'));
+
+  const cliGroup = el('div', 'filter-group');
+  cliGroup.dataset.filter = 'cli';
+  cliGroup.append(el('h3', '', 'CLI'));
+  const cliCounts = new Map();
+  all.forEach((session) => cliCounts.set(session?.cli, (cliCounts.get(session?.cli) || 0) + 1));
+  cliGroup.append(filterChoice('All sessions', all.length, state.cli === 'all', () => { state.cli = 'all'; redraw(); }));
+  [...cliCounts.entries()].filter(([cli]) => cli).forEach(([cli, count]) => cliGroup.append(
+    filterChoice(cli, count, state.cli === cli, () => { state.cli = state.cli === cli ? 'all' : cli; redraw(); }),
+  ));
+  filters.append(cliGroup);
+
+  const toggle = (set, key) => () => {
+    if (set.has(key)) set.delete(key);
+    else set.add(key);
+    redraw();
+  };
+
+  const healthGroup = el('div', 'filter-group');
+  healthGroup.dataset.filter = 'health';
+  healthGroup.append(el('h3', '', 'Health status'));
+  for (const choice of HEALTH_CHOICES) {
+    healthGroup.append(filterChoice(choice.label, all.filter(choice.test).length, state.health.has(choice.key), toggle(state.health, choice.key)));
+  }
+  filters.append(healthGroup);
+
+  const issueGroup = el('div', 'filter-group');
+  issueGroup.dataset.filter = 'issue';
+  issueGroup.append(el('h3', '', 'Issue type'));
+  const issueCounts = new Map();
+  all.forEach((session) => new Set(observedLabels(session)).forEach((label) => issueCounts.set(label, (issueCounts.get(label) || 0) + 1)));
+  // A ticked issue stays listed even if no loaded row carries it any more, so
+  // it can always be unticked.
+  state.issues.forEach((label) => { if (!issueCounts.has(label)) issueCounts.set(label, 0); });
+  const issues = [...issueCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (!issues.length) issueGroup.append(el('p', 'filter-note', 'No problem was observed in the loaded rows.'));
+  issues.forEach(([label, count]) => issueGroup.append(filterChoice(label, count, state.issues.has(label), toggle(state.issues, label))));
+  filters.append(issueGroup);
+
+  if (filtering()) {
+    const clear = uiButton('Clear filters', 'button button-sm');
+    clear.dataset.action = 'clear-filters';
+    clear.addEventListener('click', () => {
+      state.cli = 'all';
+      state.health.clear();
+      state.issues.clear();
+      redraw();
+    });
+    filters.append(clear);
+  }
+  return filters;
+}
+
 function filterChoice(label, count, checked, onChange) {
-  const row = el('label','filter-option'); const input = el('input'); input.type='checkbox'; input.checked=checked; input.setAttribute('aria-label', label); if (onChange) input.addEventListener('change', onChange); row.append(input, el('span','',label), el('strong','',String(count))); return row;
+  const row = el('label', 'filter-option');
+  const input = el('input');
+  input.type = 'checkbox';
+  input.checked = checked;
+  input.setAttribute('aria-label', label);
+  input.addEventListener('change', onChange);
+  row.append(input, el('span', '', label), el('strong', '', String(count)));
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Detail panel
+// ---------------------------------------------------------------------------
+
+const DETAIL_TABS = [
+  { key: 'diagnosis', label: 'Diagnosis' },
+  { key: 'evidence', label: 'Evidence' },
+  { key: 'metrics', label: 'Metrics' },
+  { key: 'timeline', label: 'Timeline' },
+];
+
+/** A label/value row; a missing value is the explicit "Not measured" dash. */
+function factRow(label, value, why) {
+  const wrap = el('div');
+  wrap.append(el('span', 'meta-label', label));
+  const slot = el('span', 'meta-value');
+  if (value === null || value === undefined) slot.append(notMeasured(why));
+  else if (typeof value === 'string' || typeof value === 'number') slot.append(text(String(value)));
+  else slot.append(value);
+  wrap.append(slot);
+  return wrap;
+}
+
+/** Whether a rule's fix changes the settings of the CLI the session came from. */
+function fixScopeChip(session, rule) {
+  if (rule?.fixCli && rule.fixCli === session?.cli) return el('span', 'rx-chip', 'Fix available for your CLI');
+  const target = rule?.fixCliName || rule?.fixCli || 'another CLI';
+  const source = session?.cliName || session?.cli || 'this CLI';
+  const chip = el('span', 'rx-chip rx-chip-muted', 'Recommendation only');
+  chip.title = `No automated fix exists for ${source}. The available fix changes ${target}'s settings instead.`;
+  return chip;
+}
+
+function diagnosisTab(session, api) {
+  const box = el('div', 'tab-panel');
+  const observed = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed');
+  const unknown = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'unknown');
+  box.append(el('h3', '', 'Findings'));
+  if (!observed.length) {
+    box.append(el('p', 'note', unknown.length
+      ? 'No problem was observed among the checks that could run.'
+      : 'Checks ran; no problems observed.'));
+  }
+  observed.forEach((rule) => {
+    const row = el('div', 'fix-row');
+    const level = severity(rule);
+    row.append(el('span', 'rank', '!'), el('span', 'fix-title', ruleLabel(rule)), el('span', `severity ${level.toLowerCase()}`, level));
+    box.append(row);
+  });
+  if (unknown.length) box.append(el('p', 'not-measured', `${unknown.length} check${unknown.length === 1 ? '' : 's'} could not be measured. They are not passes.`));
+  const suggested = observed.filter((rule) => rule.fix);
+  if (suggested.length) {
+    box.append(el('h3', '', 'Suggested fixes'));
+    suggested.forEach((rule) => {
+      const review = uiButton('Review fix');
+      review.addEventListener('click', () => openFixModal({ fixId: rule.fix, rule, session, api }));
+      const row = el('div', 'fix-row');
+      row.append(el('span', 'fix-title', ruleLabel(rule)), fixScopeChip(session, rule), review);
+      box.append(row);
+    });
+  }
+  return box;
+}
+
+/** Every rule with its numbers, threshold and — for an unknown — its reason. */
+function evidenceTab(session, api, redraw) {
+  const box = el('div', 'tab-panel');
+  box.append(el('p', 'note', 'Every check, with the numbers it measured. Open a check to see its threshold and where the numbers came from.'));
+  box.append(verdictList(session, api, redraw));
+  return box;
+}
+
+function metricsTab(session) {
+  const box = el('div', 'tab-panel');
+  const grid = el('div', 'meta-grid');
+  const turns = Number.isFinite(session?.turnCount) ? groupInt(session.turnCount) : null;
+  const subSessions = Array.isArray(session?.subagentSessions) ? session.subagentSessions.length : null;
+  grid.append(
+    factRow('turns', turns, 'no turn count was recorded'),
+    factRow('duration', durationText(session?.startedAt, session?.endedAt), 'the session start or end was not recorded'),
+    factRow('model', session?.model ?? null, 'no model id was recorded'),
+    factRow('context window', windowValueNode(session?.window)),
+    factRow('sub-agent turns', subagentTurnsNode(session)),
+    factRow('sub-agent sessions', subSessions === null ? null : groupInt(subSessions), 'the collector did not report sub-agent sessions'),
+  );
+  box.append(grid);
+  box.append(scoreNode(session?.score, session?.rules));
+  return box;
+}
+
+/**
+ * What happened when.  The sessions API carries start/end times for the
+ * session and each sub-agent session, not per-turn records, so that is what is
+ * drawn — and the page says the turn-by-turn view is not measured rather than
+ * leaving the gap unexplained.
+ */
+function timelineTab(session) {
+  const box = el('div', 'tab-panel');
+  const events = [];
+  const add = (iso, label) => {
+    const ms = Date.parse(iso ?? '');
+    if (Number.isFinite(ms)) events.push({ ms, iso, label });
+  };
+  add(session?.startedAt, 'Session started');
+  (Array.isArray(session?.subagentSessions) ? session.subagentSessions : []).forEach((sub, index) => {
+    const name = `Sub-agent ${index + 1}${Number.isFinite(sub?.turnCount) ? ` (${groupInt(sub.turnCount)} turns)` : ''}`;
+    add(sub?.startedAt, `${name} started`);
+    add(sub?.endedAt, `${name} finished`);
+  });
+  add(session?.endedAt, 'Session ended');
+  events.sort((a, b) => a.ms - b.ms);
+
+  if (!events.length) box.append(el('p', 'not-measured', 'Not measured — this session recorded no start or end time.'));
+  else {
+    const list = el('ol', 'timeline-list');
+    events.forEach((event) => {
+      const item = el('li');
+      item.append(el('span', 'session-date', whenText(event.iso) ?? event.iso), text(` — ${event.label}`));
+      list.append(item);
+    });
+    box.append(list);
+    if (!session?.endedAt) box.append(el('p', 'not-measured', 'Session end: not measured.'));
+  }
+  box.append(el('p', 'note', 'Turn-by-turn timeline: not measured. This page receives session and sub-agent times, not the individual turns.'));
+  return box;
 }
 
 function detailPanel(session, api, redraw) {
-  const panel = el('aside','rx-card detail-panel'); const close=uiButton('Close','button button-quiet'); close.addEventListener('click',()=>{state.selected=null; redraw();}); const head=el('div','rx-card-head'); const title=el('div','rx-section-title tone-accent'); title.append(iconBadge('sessions'),el('h2','', 'Session details')); head.append(title,close); panel.append(head); const identity=el('div'); identity.append(cliIcon(session?.cliName || session?.cli),el('strong','',` ${session?.cliName || session?.cli || 'Unknown CLI'}`)); panel.append(identity,el('p','rx-label',dateText(session?.startedAt)),el('p','rx-label',`${duration(session?.startedAt,session?.endedAt)} · ${Number.isFinite(session?.turnCount) ? session.turnCount : 'not measured'} turns`),healthNode(session?.score)); const tabs=el('div','tab-strip'); ['Diagnosis','Evidence','Metrics','Timeline'].forEach((name,index)=>{const tab=uiButton(name,'tab-button'); if(index===0) tab.classList.add('is-active'); tabs.append(tab);}); panel.append(tabs); const observed=(session?.rules||[]).filter((r)=>r?.evidence?.status==='observed'); const unknown=(session?.rules||[]).filter((r)=>r?.evidence?.status==='unknown'); panel.append(el('h3','', 'Findings')); observed.forEach((rule)=>{const row=el('div','fix-row'); const level = severity(rule); row.append(el('span','rank','!'),el('span','fix-title',ruleLabel(rule)),el('span',`severity ${level.toLowerCase()}`,level)); panel.append(row);}); if (unknown.length) panel.append(el('p','not-measured',`${unknown.length} checks could not be measured. They are not passes.`)); const suggested=observed.filter((r)=>r.fix); if(suggested.length){panel.append(el('h3','', 'Suggested fixes')); suggested.forEach((rule)=>{const apply=uiButton('Review'); apply.addEventListener('click',()=>openFixModal({fixId:rule.fix,rule,session,api})); const row=el('div','fix-row'); row.append(el('span','fix-title',ruleLabel(rule)),apply); panel.append(row);});} return panel;
+  const panel = el('aside', 'rx-card detail-panel');
+  const close = uiButton('Close', 'button button-quiet');
+  close.addEventListener('click', () => { state.selected = null; redraw(); });
+  const head = el('div', 'rx-card-head');
+  const title = el('div', 'rx-section-title tone-accent');
+  title.append(iconBadge('sessions'), el('h2', '', 'Session details'));
+  head.append(title, close);
+  panel.append(head);
+  const identity = el('div');
+  identity.append(cliIcon(session?.cliName || session?.cli), el('strong', '', ` ${session?.cliName || session?.cli || 'Unknown CLI'}`));
+  panel.append(
+    identity,
+    el('p', 'rx-label', dateText(session?.startedAt)),
+    el('p', 'rx-label', `${duration(session?.startedAt, session?.endedAt)} · ${Number.isFinite(session?.turnCount) ? session.turnCount : 'not measured'} turns`),
+    healthNode(session?.score),
+  );
+
+  const active = DETAIL_TABS.some((tab) => tab.key === state.detailTab) ? state.detailTab : 'diagnosis';
+  const tabs = el('div', 'tab-strip');
+  tabs.setAttribute('role', 'tablist');
+  DETAIL_TABS.forEach(({ key, label }) => {
+    const tab = uiButton(label, 'tab-button');
+    tab.dataset.tab = key;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', key === active ? 'true' : 'false');
+    if (key === active) tab.classList.add('is-active');
+    tab.addEventListener('click', () => { state.detailTab = key; redraw(); });
+    tabs.append(tab);
+  });
+  panel.append(tabs);
+
+  const content = active === 'evidence' ? evidenceTab(session, api, redraw)
+    : active === 'metrics' ? metricsTab(session)
+      : active === 'timeline' ? timelineTab(session)
+        : diagnosisTab(session, api);
+  content.dataset.tab = active;
+  content.setAttribute('role', 'tabpanel');
+  panel.append(content);
+  return panel;
 }
 
 /**

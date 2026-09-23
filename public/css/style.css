@@ -703,3 +703,8 @@ td.num, th.num { text-align: right; }
   .summary-stat { min-width: 0; }
   .summary-action { justify-content: center; }
 }
+.rx-chip-muted { color: var(--muted); background: transparent; }
+.timeline-list { margin: 0 0 12px; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.filter-option input { cursor: pointer; }
+.filter-option.is-active { color: var(--text); font-weight: 600; }
+button.filter-option { width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; }

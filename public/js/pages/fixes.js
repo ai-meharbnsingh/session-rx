@@ -26,23 +26,42 @@ function diffView(diff) {
   return box;
 }
 
-function categoryCount(name, items) {
-  if (name === 'All issues') return items.length;
-  return items.filter(({ rule }) => {
-    const words = `${rule?.name || ''} ${rule?.fix || ''}`.toLowerCase();
-    if (name === 'Configuration') return words.includes('compact') || words.includes('config');
-    if (name === 'Context & memory') return words.includes('context') || words.includes('worker') || words.includes('agent');
-    if (name === 'Tool usage') return words.includes('tool') || words.includes('repeat') || words.includes('batch');
-    return words.includes('long') || words.includes('cache') || words.includes('performance');
-  }).length;
+const CATEGORIES = ['All issues', 'Configuration', 'Context & memory', 'Tool usage', 'Performance'];
+
+function inCategory(name, { rule }) {
+  if (name === 'All issues') return true;
+  const words = `${rule?.name || ''} ${rule?.fix || ''}`.toLowerCase();
+  if (name === 'Configuration') return words.includes('compact') || words.includes('config');
+  if (name === 'Context & memory') return words.includes('context') || words.includes('worker') || words.includes('agent');
+  if (name === 'Tool usage') return words.includes('tool') || words.includes('repeat') || words.includes('batch');
+  return words.includes('long') || words.includes('cache') || words.includes('performance');
 }
 
-function issueNavigation(index, total) {
+/** The hash for one issue within one category; the category is kept across Previous/Next. */
+function fixesHash(category, issue) {
+  const query = new URLSearchParams();
+  if (category && category !== 'All issues') query.set('cat', category);
+  query.set('issue', String(issue));
+  return `#/fixes?${query}`;
+}
+
+/**
+ * Whether the fix changes the settings of the CLI the finding came from.
+ * `rule.fixCli` is stamped by the server (annotateFixTitles); the /api/fixes
+ * catalogue carries no CLI, so it cannot answer this.
+ */
+function fixScopeChip(session, rule) {
+  if (!session || !rule?.fixCli) return el('span', 'rx-chip rx-chip-muted', 'Fix target not measured');
+  if (session.cli === rule.fixCli) return el('span', 'rx-chip', 'Fix available for your CLI');
+  return el('span', 'rx-chip rx-chip-muted', 'Recommendation only');
+}
+
+function issueNavigation(index, total, category) {
   const nav = el('div', 'issue-nav');
   const previous = button('‹ Previous', 'button button-sm'); previous.disabled = index <= 0;
-  previous.addEventListener('click', () => { location.hash = `#/fixes?issue=${index - 1}`; });
+  previous.addEventListener('click', () => { location.hash = fixesHash(category, index - 1); });
   const next = button('Next ›', 'button button-sm'); next.disabled = index >= total - 1;
-  next.addEventListener('click', () => { location.hash = `#/fixes?issue=${index + 1}`; });
+  next.addEventListener('click', () => { location.hash = fixesHash(category, index + 1); });
   nav.append(previous, el('span', 'rx-label', total ? `Issue ${index + 1} of ${total}` : 'No observed fixable issues'), next);
   return nav;
 }
@@ -52,9 +71,11 @@ async function renderFixes(mount, data, ctx = {}) {
   const api = ctx.api;
   const health = data?.health || await api.get(`/api/health${rangeQuery('/api/health')}`);
   const fixesPayload = data?.fixes || await api.get('/api/fixes');
-  const items = observedRules(health?.sessions || []).filter((item) => item.rule?.fix);
+  const allItems = observedRules(health?.sessions || []).filter((item) => item.rule?.fix);
   const catalog = fixesPayload?.fixes || [];
   const query = new URLSearchParams(location.hash.split('?')[1] || '');
+  const category = CATEGORIES.includes(query.get('cat')) ? query.get('cat') : 'All issues';
+  const items = allItems.filter((item) => inCategory(category, item));
   const requestedIndex = Number(query.get('issue') || 0);
   const selectedIndex = Math.min(Number.isFinite(requestedIndex) ? Math.max(0, requestedIndex) : 0, Math.max(0, items.length - 1));
   const selected = items[selectedIndex] || null;
@@ -65,16 +86,22 @@ async function renderFixes(mount, data, ctx = {}) {
 
   const root = el('div', 'rx-page');
   const top = el('div', 'rx-card-head'); const back = el('a', '', 'Back to issues'); back.href = '#/health';
-  top.append(back, issueNavigation(selectedIndex, items.length)); root.append(top);
+  top.append(back, issueNavigation(selectedIndex, items.length, category)); root.append(top);
   const layout = el('div', 'fix-layout');
   const steps = el('aside', 'rx-card step-list'); steps.append(sectionTitle('Fix workflow', 'fixes'));
   [['Diagnose', 'Issues detected from your sessions', 'done'], ['Review & Fix', 'Apply a targeted change', 'active'], ['Verify', 'Continue with a healthier setup', '']].forEach(([name, copy, kind], index) => { const step = el('div', `step ${kind}`); step.append(el('strong', '', `${index + 1}. ${name}`), el('small', '', copy)); steps.append(step); });
   const categories = el('div', 'filter-group'); categories.append(el('h3', '', 'Issue categories'));
-  ['All issues', 'Configuration', 'Context & memory', 'Tool usage', 'Performance'].forEach((name) => categories.append(el('div', 'filter-option', `${name} (${categoryCount(name, items)})`)));
+  CATEGORIES.forEach((name) => {
+    const choice = button(`${name} (${allItems.filter((item) => inCategory(name, item)).length})`, `filter-option${name === category ? ' is-active' : ''}`);
+    choice.dataset.category = name;
+    choice.setAttribute('aria-pressed', name === category ? 'true' : 'false');
+    choice.addEventListener('click', () => { location.hash = fixesHash(name, 0); });
+    categories.append(choice);
+  });
   steps.append(categories); layout.append(steps);
 
   const detail = el('main', 'rx-card');
-  if (!selected) detail.append(el('h2', '', 'No observed fixable issue'), el('p', 'not-measured', 'No rule with an available fix was observed in the current scan.'));
+  if (!selected) detail.append(el('h2', '', 'No observed fixable issue'), el('p', 'not-measured', category === 'All issues' ? 'No rule with an available fix was observed in the current scan.' : `No rule with an available fix was observed in the "${category}" category.`));
   else {
     detail.append(el('span', `severity ${severity(selected.rule).toLowerCase()}`, severity(selected.rule)), el('h1', 'issue-title', ruleLabel(selected.rule)));
     const problem = plainText(selected.rule, 'problem'); if (problem) detail.append(el('p', '', problem));
@@ -110,15 +137,26 @@ async function renderFixes(mount, data, ctx = {}) {
   }
   layout.append(detail);
 
-  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(sectionTitle('Proposed fix', 'fixes'), el('span', 'rx-chip', 'Safe change'), el('p', '', descriptor?.title || 'The selected fix'));
+  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(sectionTitle('Proposed fix', 'fixes'), fixScopeChip(selected?.session, selected?.rule), el('p', '', descriptor?.title || 'The selected fix'));
   proposed.append(el('p', 'rx-label', preview?.targets?.[0]?.display || preview?.files_affected?.[0] || 'Target file not measured'));
-  if (selected?.session && selected.session.cli !== descriptor?.cli) proposed.append(el('p', 'local-note', `This finding came from ${selected.session.cliName || selected.session.cli || 'one CLI'}; the proposed fix targets the configuration for another CLI.`));
+  if (selected?.session && selected.rule?.fixCli && selected.session.cli !== selected.rule.fixCli) proposed.append(el('p', 'local-note', `This finding came from ${selected.session.cliName || selected.session.cli || 'one CLI'}; no automated fix exists for it. The proposed fix changes ${selected.rule.fixCliName || selected.rule.fixCli}'s settings instead.`));
   proposed.append(preview?.error ? el('p', 'not-measured', preview.error) : diffView(preview?.diff));
-  const actions = el('div', 'toolbar'); [['Preview', 'button'], ['Apply fix', 'button button-primary'], ['Undo', 'button button-danger']].forEach(([label, className]) => { const action = button(label, className); action.addEventListener('click', () => openFixModal({ fixId, rule: selected?.rule, session: selected?.session, api })); actions.append(action); });
-  actions.append(el('span', 'local-note', 'Only local files are changed. Nothing is sent anywhere.')); proposed.append(actions); layout.append(proposed); root.append(layout);
+  // One button, one honest label. The modal is the whole workflow — it shows the
+  // exact change, applies it only on a second click, and offers Undo once it is
+  // applied — so three page buttons that all opened it were three promises of
+  // different actions kept by the same one.
+  const actions = el('div', 'toolbar');
+  const review = button('Review fix', 'button button-primary');
+  review.dataset.action = 'review-fix';
+  review.disabled = !fixId;
+  review.addEventListener('click', () => openFixModal({ fixId, rule: selected?.rule, session: selected?.session, api }));
+  actions.append(review);
+  actions.append(el('span', 'local-note', 'Opens the fix: check the exact change, apply it, and undo it from the same window. Only local files are changed. Nothing is sent anywhere.')); proposed.append(actions); layout.append(proposed); root.append(layout);
 
   const other = el('section', 'rx-card'); other.append(sectionTitle('Other recommended fixes', 'fixes')); const strip = el('div', 'rx-grid rx-grid-even');
-  catalog.filter((fix) => fix.id !== fixId).slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); review.addEventListener('click', () => { location.hash = `#/fixes?issue=${Math.max(0, items.findIndex((candidate) => candidate.rule?.fix === fix.id))}`; }); item.append(review); strip.append(item); });
+  catalog.filter((fix) => fix.id !== fixId).slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); const found = allItems.findIndex((candidate) => candidate.rule?.fix === fix.id);
+    // A fix no session triggered has no issue page to jump to; open the fix itself rather than landing on an unrelated issue.
+    review.addEventListener('click', () => { if (found >= 0) location.hash = fixesHash('All issues', found); else openFixModal({ fixId: fix.id, api }); }); item.append(review); strip.append(item); });
   other.append(strip); root.append(other); mount.replaceChildren(root);
 }
 

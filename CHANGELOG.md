@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Sessions: the Health status and Issue type checkboxes did nothing.** They were drawn without a click handler. Both now filter the table: ticks in one group widen (either one matches), ticks across groups narrow (all must match), and a Clear filters button appears while any filter is on. The number beside each box is the number of loaded rows it shows when ticked. Issue type now lists every observed issue, not only the first five.
+- **Sessions: the Diagnosis / Evidence / Metrics / Timeline tabs in the detail panel did nothing.** Each now shows its own content from the session's real data: findings and suggested fixes; every check with its numbers and reasons; turns, duration, model, context window and sub-agent counts; and start, sub-agent and end times. The page receives no per-turn records, so the Timeline says the turn-by-turn view is not measured instead of leaving a gap.
+- **Fixes: Preview, Apply and Undo all opened the same window.** They are replaced by one "Review fix" button that opens the full workflow (see the exact change, apply it, undo it).
+- **Fixes: the issue categories were plain labels.** They are now buttons that narrow the issue list, and Previous/Next stay inside the chosen category.
+- **Fixes: any Fixes address with a `?` in it — including the existing Previous/Next buttons — opened the Health page.** The router read `fixes?issue=1` as an unknown page name.
+- **Fixes: every finding was told its fix "targets the configuration for another CLI".** The check compared against a field the fix list never carries. Findings now read "Fix available for your CLI" or "Recommendation only" based on the CLI the fix actually changes; the Sessions detail panel uses the same labels.
+
 ## [0.1.2] - 2026-09-22
 
 ### Changed
