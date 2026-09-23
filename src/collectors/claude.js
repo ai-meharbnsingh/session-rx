@@ -308,9 +308,9 @@ async function parseSession(file, { project, diagnostic, maxBytes, sessionId: se
 }
 
 export class ClaudeCollector extends Collector {
-  constructor({ root, home, maxBytes, subagents = true } = {}) {
+  constructor({ root, home, maxBytes, subagents = true, env = process.env } = {}) {
     super({ id: "claude", displayName: "Claude Code", cli: "claude" });
-    this.home = home ?? path.join(os.homedir(), ".claude");
+    this.home = home ?? (env.CLAUDE_CONFIG_DIR?.trim() || path.join(os.homedir(), ".claude"));
     this.root = root ?? path.join(this.home, "projects");
     this.maxBytes = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_FILE_BYTES;
     /**

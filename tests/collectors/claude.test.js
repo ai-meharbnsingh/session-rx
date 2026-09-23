@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { cpSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -50,6 +51,18 @@ test("detect() reports supported, detection-only, and absent honestly", () => {
 test("collect() returns nothing and does not throw when the root is absent", async () => {
   const { sessions } = await collectFrom(MISSING);
   assert.deepEqual(sessions, []);
+});
+
+test("CLAUDE_CONFIG_DIR relocates the scan, while explicit home wins and blanks are unset", async () => {
+  const relocated = await mkdtemp(path.join(os.tmpdir(), "session-rx-claude-env-"));
+  cpSync(HOME, path.join(relocated, "projects"), { recursive: true });
+  const found = await new ClaudeCollector({ env: { CLAUDE_CONFIG_DIR: ` ${relocated} ` } }).collect();
+  assert.ok(found.some((session) => session.sessionId === "sess-dedupe"));
+
+  const explicit = new ClaudeCollector({ home: HOME, env: { CLAUDE_CONFIG_DIR: relocated } });
+  assert.equal(explicit.home, HOME);
+  assert.equal(new ClaudeCollector({ env: { CLAUDE_CONFIG_DIR: "   " } }).home, os.homedir() + "/.claude");
+  assert.equal(new ClaudeCollector({ env: {} }).home, os.homedir() + "/.claude");
 });
 
 test("THE DEDUPE RULE: cumulative usage is the last line, tool calls are the union", async () => {

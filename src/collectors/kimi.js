@@ -225,10 +225,15 @@ function subagentSessionId(parentSessionId, taskToolCallId) {
 }
 
 export class KimiCollector extends Collector {
-  constructor({ home = os.homedir(), maxBytes = MAX_FILE_BYTES, subagents = true } = {}) {
+  constructor({ home, maxBytes = MAX_FILE_BYTES, subagents = true, env = process.env } = {}) {
     super({ id: "kimi", displayName: "Kimi", cli: "kimi" });
-    this.home = home;
-    this.root = path.join(home, ".kimi", "sessions");
+    this.home = home ?? os.homedir();
+    // KIMI_CODE_HOME replaces the current data root; KIMI_SHARE_DIR replaces the legacy data root.
+    const codeRoot = env.KIMI_CODE_HOME?.trim() || path.join(this.home, ".kimi-code");
+    const legacyRoot = env.KIMI_SHARE_DIR?.trim() || path.join(this.home, ".kimi");
+    // The new CLI migrates old sessions, so prefer .kimi-code when IDs overlap.
+    this.roots = [path.join(codeRoot, "sessions"), path.join(legacyRoot, "sessions")];
+    this.root = this.roots[0];
     this.maxBytes = maxBytes;
     this.diagnostic = createDiagnostic("kimi");
     /**
@@ -254,42 +259,47 @@ export class KimiCollector extends Collector {
   }
 
   detect() {
-    const installed = existsSync(this.root);
+    const paths = this.roots.filter((root) => existsSync(root));
+    const installed = paths.length > 0;
     return {
       installed,
-      paths: installed ? [this.root] : [],
+      paths,
       status: installed ? "supported" : "absent",
     };
   }
 
   /** `~/.kimi/sessions/<workspace-hash>/<session-uuid>/wire.jsonl`, newest first. */
   sessionFiles() {
-    let workspaces;
-    try {
-      workspaces = readdirSync(this.root, { withFileTypes: true });
-    } catch {
-      return [];
-    }
     const files = [];
-    for (const workspace of workspaces) {
-      if (!workspace.isDirectory()) continue;
-      const workspaceDir = path.join(this.root, workspace.name);
-      let sessions;
+    const seen = new Set();
+    for (const root of this.roots) {
+      let workspaces;
       try {
-        sessions = readdirSync(workspaceDir, { withFileTypes: true });
+        workspaces = readdirSync(root, { withFileTypes: true });
       } catch {
         continue;
       }
-      for (const session of sessions) {
-        if (!session.isDirectory()) continue;
-        const file = path.join(workspaceDir, session.name, "wire.jsonl");
-        let mtimeMs;
+      for (const workspace of workspaces) {
+        if (!workspace.isDirectory()) continue;
+        const workspaceDir = path.join(root, workspace.name);
+        let sessions;
         try {
-          mtimeMs = statSync(file).mtimeMs;
+          sessions = readdirSync(workspaceDir, { withFileTypes: true });
         } catch {
           continue;
         }
-        files.push({ path: file, workspace: workspace.name, sessionId: session.name, mtimeMs });
+        for (const session of sessions) {
+          if (!session.isDirectory() || seen.has(session.name)) continue;
+          const file = path.join(workspaceDir, session.name, "wire.jsonl");
+          let mtimeMs;
+          try {
+            mtimeMs = statSync(file).mtimeMs;
+          } catch {
+            continue;
+          }
+          seen.add(session.name);
+          files.push({ path: file, workspace: workspace.name, sessionId: session.name, mtimeMs });
+        }
       }
     }
     return files.sort((a, b) => b.mtimeMs - a.mtimeMs);

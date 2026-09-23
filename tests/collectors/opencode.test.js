@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,33 @@ test("the read-only URI is a mode=ro file URI, never rw", () => {
   assert.ok(uri.startsWith("file:"), uri);
   assert.ok(uri.endsWith("?mode=ro"), uri);
   assert.ok(!/mode=rw/.test(uri), uri);
+});
+
+test("XDG_DATA_HOME relocates the database, explicit dbPath wins, and channel databases are fallback-only", async () => {
+  const xdg = scratch();
+  const dir = path.join(xdg, "opencode");
+  mkdirSync(dir, { recursive: true });
+  const relocated = path.join(dir, "opencode.db");
+  cpSync(FIXTURE_DB, relocated);
+  const found = await new OpenCodeCollector({ env: { XDG_DATA_HOME: ` ${xdg} ` } }).collect();
+  assert.ok(found.some((session) => session.sessionId === "ses_mapped"));
+
+  const channelDir = path.join(scratch(), "opencode");
+  mkdirSync(channelDir, { recursive: true });
+  const channel = path.join(channelDir, "opencode-dev.db");
+  cpSync(FIXTURE_DB, channel);
+  const channelCollector = new OpenCodeCollector({ env: { XDG_DATA_HOME: path.dirname(channelDir) } });
+  assert.equal(channelCollector.dbPath, channel);
+  const explicit = new OpenCodeCollector({ dbPath: FIXTURE_DB, env: { XDG_DATA_HOME: xdg } });
+  assert.equal(explicit.dbPath, FIXTURE_DB);
+  assert.equal(new OpenCodeCollector({ env: { XDG_DATA_HOME: "   " } }).dbPath,
+    path.join(os.homedir(), ".local", "share", "opencode", "opencode.db"));
+  assert.equal(new OpenCodeCollector({ env: {} }).dbPath,
+    path.join(os.homedir(), ".local", "share", "opencode", "opencode.db"));
+
+  cpSync(FIXTURE_DB, path.join(channelDir, "opencode.db"));
+  assert.equal(new OpenCodeCollector({ env: { XDG_DATA_HOME: path.dirname(channelDir) } }).dbPath,
+    path.join(channelDir, "opencode.db"));
 });
 
 test("collect returns sessions newest first", async () => {

@@ -1,5 +1,18 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import path from "node:path";
+
+/** Build SQLite's read-only URI form for POSIX and Windows file paths. */
+export function readOnlyFileUri(filePath) {
+  let p = path.resolve(filePath);
+  // A Windows-shaped input must remain a drive-letter path on POSIX too.
+  if (/^[A-Za-z]:[\\/]/.test(filePath)) p = filePath;
+  p = p.replace(/\\/g, "/");
+  if (!p.startsWith("/")) p = `/${p}`;
+  // Escape % first so the escapes for ? and # are not re-escaped.
+  p = p.replace(/%/g, "%25").replace(/\?/g, "%3f").replace(/#/g, "%23");
+  return `file://${p}?mode=ro`;
+}
 
 // Bumped on every change to MODEL_WINDOW_ENTRIES *or* to how they are
 // resolved.  `.3` demotes the table from authority to PRIOR: `resolveWindow`

@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import Collector, {
@@ -21,6 +22,7 @@ import Collector, {
   normalizeSession,
   normalizeTurn,
   peakContextTokens,
+  readOnlyFileUri,
   resolveWindow,
   safeReadJsonl,
   safeReadLines,
@@ -37,6 +39,36 @@ const BARE = path.join(ROBUST, "bare.jsonl");         // 6 valid lines
 const MISSING = path.join(ROBUST, "does-not-exist.jsonl");
 // 3 valid lines, each carrying a RAW U+2028 / U+2029 inside a JSON string (F-005)
 const LINE_SEPARATOR = path.join(ROBUST, "line-separator.jsonl");
+
+test("readOnlyFileUri uses the SQLite three-slash POSIX form", () => {
+  assert.equal(readOnlyFileUri("/abs/path"), "file:///abs/path?mode=ro");
+});
+
+test("readOnlyFileUri normalizes a Windows-shaped path deterministically", () => {
+  assert.equal(
+    readOnlyFileUri("C:\\Users\\Asha\\x\\store.db"),
+    "file:///C:/Users/Asha/x/store.db?mode=ro",
+  );
+});
+
+test("readOnlyFileUri escapes percent, question-mark, and hash once", () => {
+  const uri = readOnlyFileUri("/tmp/100%/store?part#1.db");
+  assert.equal(uri, "file:///tmp/100%25/store%3fpart%231.db?mode=ro");
+  assert.match(uri, /%25/);
+  assert.doesNotMatch(uri, /%2525/);
+});
+
+test("readOnlyFileUri opens a real temporary database read-only", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "session-rx-uri-"));
+  const file = path.join(dir, "store.db");
+  const writable = new DatabaseSync(file);
+  writable.exec("CREATE TABLE probe (value TEXT)");
+  writable.close();
+
+  const readOnly = new DatabaseSync(readOnlyFileUri(file), { readOnly: true });
+  assert.equal(readOnly.prepare("SELECT COUNT(*) AS count FROM probe").get().count, 0);
+  readOnly.close();
+});
 
 /** The entry `lookupWindow` must pick, computed from the exported table order. */
 function winnerFor(modelId) {

@@ -9,6 +9,7 @@ import {
   lookupWindow,
   normalizeSession,
   normalizeTurn,
+  readOnlyFileUri,
   safeReadJsonl,
 } from "./base.js";
 
@@ -266,8 +267,7 @@ export class CursorCollector extends Collector {
   }
 
   readOnlyUri(filePath) {
-    const escaped = filePath.replace(/%/g, "%25").replace(/\?/g, "%3f").replace(/#/g, "%23");
-    return `file:${escaped}?mode=ro`;
+    return readOnlyFileUri(filePath);
   }
 
   detect() {

@@ -237,9 +237,9 @@ async function parseSession(file, { diagnostic, maxBytes }) {
 }
 
 export class CodexCollector extends Collector {
-  constructor({ root, home, maxBytes } = {}) {
+  constructor({ root, home, maxBytes, env = process.env } = {}) {
     super({ id: "codex", displayName: "Codex", cli: "codex" });
-    this.home = home ?? path.join(os.homedir(), ".codex");
+    this.home = home ?? (env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex"));
     this.root = root ?? path.join(this.home, "sessions");
     this.maxBytes = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_FILE_BYTES;
     this.lastDiagnostic = createDiagnostic("codex");

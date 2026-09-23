@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-23
+
+### Fixed
+
+- **OpenCode and Cursor could not be read on Windows.** Both build a read-only SQLite URI as `file:<path>?mode=ro`. On Windows `os.homedir()` is `C:\Users\<name>`, producing `file:C:\Users\...?mode=ro`. Per sqlite.org/uri.html a Windows drive-letter path needs backslashes converted to forward slashes, a single `/` before the drive letter, and the blank authority — `file:///C:/Users/...` — and SQLite states that "a filename that is not a well-formed URI is interpreted as an ordinary filename". So the open failed AND the `mode=ro` guarantee silently stopped applying; only the separate `{readOnly: true}` option still held. Both collectors now share one `readOnlyFileUri` helper that emits the three-slash form on every platform. The `{readOnly: true}` option is kept as a second lock. The other five collectors read JSONL through `path.join` and were never affected.
+
+### Added
+
+- **Relocation environment variables are honoured.** `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode, on every OS including Windows), and `KIMI_CODE_HOME` / `KIMI_SHARE_DIR`. Cursor already honoured its three. A user who had relocated a CLI's data previously got that CLI reported as **absent** — telling someone who has the tool that they do not, which is the one thing this project exists not to do. An explicitly passed path still wins over the variable, and a variable that is empty after trimming counts as unset.
+- **Kimi's current CLI is read.** Kimi Code CLI moved its data root to `~/.kimi-code/` and migrates the old `~/.kimi/` across without deleting it. Both trees are now scanned and de-duplicated by session id, preferring the `.kimi-code` copy, so a migrated user does not see every session twice.
+- **OpenCode's non-stable install channels are read.** Those write `opencode-<channel>.db` beside `opencode.db`. When `opencode.db` is absent the most recently modified channel database is used; when both exist `opencode.db` wins and the two are never merged.
+
 ## [0.2.0] - 2026-09-23
 
 ### Added

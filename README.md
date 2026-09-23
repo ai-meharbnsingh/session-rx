@@ -117,6 +117,21 @@ writes down, so each row says what it can and cannot support.
 | Grok Build CLI | `~/.grok`, `~/.config/grok` (candidate paths) | Detected only, if the directory exists. The log format is unconfirmed and no parser was written on a guess. |
 | Amp | `~/.amp`, `~/.config/amp`, `~/.cache/amp` (candidate paths) | Detected only, on the same terms as Grok. |
 
+## Platform support
+
+SessionRx runs on macOS, Linux and Windows. Node.js 22.13 or newer is the only requirement — there is no platform-specific code in the project. Every path is built from `os.homedir()` and `path.join`, and every CLI stores its data in the same home-relative folder on all three platforms (`%USERPROFILE%\.claude` on Windows is the same `~/.claude`).
+
+Where a CLI documents an environment variable for relocating its data, SessionRx honours it. One honest caveat: reading a SQLite database in WAL mode read-only requires its `-shm` sidecar present and readable, which is true on every platform but noisier on Windows. When that fails the CLI reports `unknown` with the reason; it is never reported as a clean result.
+
+| CLI | Relocation variable honoured |
+|---|---|
+| Claude Code | `CLAUDE_CONFIG_DIR` |
+| Codex | `CODEX_HOME` |
+| OpenCode | `XDG_DATA_HOME` |
+| Kimi | `KIMI_CODE_HOME` (current CLI), `KIMI_SHARE_DIR` (legacy) |
+| Cursor CLI | `CURSOR_CONFIG_DIR`, `XDG_CONFIG_HOME`, `CURSOR_DATA_DIR` |
+| Gemini CLI, GitHub Copilot CLI | none documented; `~/.gemini`, `~/.copilot` |
+
 ## How fixes work
 
 Every fix is Preview, then Apply, then Undo.

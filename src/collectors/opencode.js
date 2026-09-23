@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -10,6 +10,7 @@ import {
   resolveWindow,
   normalizeSession,
   normalizeTurn,
+  readOnlyFileUri,
 } from "./base.js";
 
 /**
@@ -260,10 +261,24 @@ function finalizeTurn(draft, window) {
 }
 
 export class OpenCodeCollector extends Collector {
-  constructor({ home = os.homedir(), dbPath, sessionLimit = DEFAULT_SESSION_LIMIT } = {}) {
+  constructor({ home, dbPath, sessionLimit = DEFAULT_SESSION_LIMIT, env = process.env } = {}) {
     super({ id: "opencode", displayName: "OpenCode", cli: "opencode" });
-    this.home = home;
-    this.dbPath = dbPath ?? path.join(home, ".local", "share", "opencode", "opencode.db");
+    this.home = home ?? os.homedir();
+    const dataRoot = env.XDG_DATA_HOME?.trim() || path.join(this.home, ".local", "share");
+    const dataDir = path.join(dataRoot, "opencode");
+    this.dbPath = dbPath ?? path.join(dataDir, "opencode.db");
+    if (dbPath === undefined && !existsSync(this.dbPath)) {
+      try {
+        const channelDb = readdirSync(dataDir)
+          .filter((name) => /^opencode-.+\.db$/i.test(name))
+          .map((name) => path.join(dataDir, name))
+          .filter((candidate) => {
+            try { return statSync(candidate).isFile(); } catch { return false; }
+          })
+          .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+        if (channelDb) this.dbPath = channelDb;
+      } catch { /* absent data directory remains absent */ }
+    }
     this.sessionLimit = sessionLimit;
     this.diagnostic = createDiagnostic("opencode");
     /** Every distinct SQL string issued, for the security assertion in tests. */
@@ -278,11 +293,7 @@ export class OpenCodeCollector extends Collector {
 
   /** `file:<path>?mode=ro` - never rw, so the WAL write lock is never taken. */
   readOnlyUri() {
-    const escaped = this.dbPath
-      .replace(/%/g, "%25")
-      .replace(/\?/g, "%3f")
-      .replace(/#/g, "%23");
-    return `file:${escaped}?mode=ro`;
+    return readOnlyFileUri(this.dbPath);
   }
 
   detect() {

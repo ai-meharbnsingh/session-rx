@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { cpSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -43,6 +44,18 @@ test("detect() reports supported, detection-only, and absent honestly", () => {
 test("collect() returns nothing and does not throw when the root is absent", async () => {
   const { sessions } = await collectFrom(MISSING);
   assert.deepEqual(sessions, []);
+});
+
+test("CODEX_HOME relocates the scan, while explicit home wins and blanks are unset", async () => {
+  const relocated = await mkdtemp(path.join(os.tmpdir(), "session-rx-codex-env-"));
+  cpSync(HOME, path.join(relocated, "sessions"), { recursive: true });
+  const found = await new CodexCollector({ env: { CODEX_HOME: ` ${relocated} ` } }).collect();
+  assert.ok(found.some((session) => session.sessionId === "codex-sess-a"));
+
+  const explicit = new CodexCollector({ home: HOME, env: { CODEX_HOME: relocated } });
+  assert.equal(explicit.home, HOME);
+  assert.equal(new CodexCollector({ env: { CODEX_HOME: "" } }).home, os.homedir() + "/.codex");
+  assert.equal(new CodexCollector({ env: {} }).home, os.homedir() + "/.codex");
 });
 
 test("the context window is native: read from model_context_window, no model table", async () => {

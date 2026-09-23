@@ -58,6 +58,69 @@ test("wire.jsonl is discovered per workspace and session directory", () => {
   assert.deepEqual([...files.map((entry) => entry.sessionId)].sort(), [RICH_SESSION, SHORT_SESSION]);
 });
 
+test("Kimi scans both homes and prefers the .kimi-code copy by session id", async () => {
+  const home = scratch();
+  cpSync(path.join(FIXTURE_HOME, ".kimi"), path.join(home, ".kimi"), { recursive: true });
+  const newer = path.join(home, ".kimi-code", "sessions", "preferred-workspace", RICH_SESSION);
+  mkdirSync(newer, { recursive: true });
+  cpSync(path.join(FIXTURE_HOME, ".kimi", "sessions", WORKSPACE, RICH_SESSION, "wire.jsonl"),
+    path.join(newer, "wire.jsonl"));
+  const instance = new KimiCollector({ home, env: {} });
+  const sessions = await instance.collect();
+  assert.equal(sessions.filter((session) => session.sessionId === RICH_SESSION).length, 1);
+  assert.equal(sessions.find((session) => session.sessionId === RICH_SESSION).project, "preferred-workspace");
+  assert.deepEqual(instance.detect().paths, [path.join(home, ".kimi-code", "sessions"), path.join(home, ".kimi", "sessions")]);
+});
+
+test("KIMI_CODE_HOME relocates the current tree while legacy stays under home", () => {
+  const home = scratch();
+  const codeRoot = path.join(scratch(), "custom-code");
+  const instance = new KimiCollector({ home, env: { KIMI_CODE_HOME: ` ${codeRoot} ` } });
+  assert.deepEqual(instance.roots, [
+    path.join(codeRoot, "sessions"),
+    path.join(home, ".kimi", "sessions"),
+  ]);
+});
+
+test("KIMI_SHARE_DIR relocates the legacy tree while current stays under home", () => {
+  const home = scratch();
+  const shareRoot = path.join(scratch(), "custom-share");
+  const instance = new KimiCollector({ home, env: { KIMI_SHARE_DIR: ` ${shareRoot} ` } });
+  assert.deepEqual(instance.roots, [
+    path.join(home, ".kimi-code", "sessions"),
+    path.join(shareRoot, "sessions"),
+  ]);
+});
+
+test("KIMI_CODE_HOME and KIMI_SHARE_DIR resolve independently", () => {
+  const home = scratch();
+  const codeRoot = path.join(scratch(), "custom-code");
+  const shareRoot = path.join(scratch(), "custom-share");
+  const instance = new KimiCollector({ home, env: { KIMI_CODE_HOME: codeRoot, KIMI_SHARE_DIR: shareRoot } });
+  assert.deepEqual(instance.roots, [
+    path.join(codeRoot, "sessions"),
+    path.join(shareRoot, "sessions"),
+  ]);
+});
+
+test("blank Kimi data-root variables are ignored", () => {
+  const home = scratch();
+  for (const env of [{ KIMI_CODE_HOME: "" }, { KIMI_CODE_HOME: "   " }, { KIMI_SHARE_DIR: "" }, { KIMI_SHARE_DIR: "   " }]) {
+    assert.deepEqual(new KimiCollector({ home, env }).roots, [
+      path.join(home, ".kimi-code", "sessions"),
+      path.join(home, ".kimi", "sessions"),
+    ]);
+  }
+});
+
+test("without Kimi data-root variables, roots use the explicit home", () => {
+  const home = scratch();
+  assert.deepEqual(new KimiCollector({ home, env: {} }).roots, [
+    path.join(home, ".kimi-code", "sessions"),
+    path.join(home, ".kimi", "sessions"),
+  ]);
+});
+
 test("TurnBegin/TurnEnd delimit turns and an unterminated turn is kept", async () => {
   const session = await richSession();
   assert.equal(session.cli, "kimi");
