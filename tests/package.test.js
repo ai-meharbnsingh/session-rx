@@ -5,7 +5,7 @@
  * "packed artifact contains declared files and excludes fixtures/secrets".
  * Nothing in the suite asserted anything about `npm pack` output before this
  * file existed, so BP-010's GATE-FACTORY ("clean packed artifact contains no
- * secrets") and FVA-008 ("packaged smoke test proves npx session-rx is
+ * secrets") and FVA-008 ("packaged smoke test proves the session-rx executable is
  * offline and publishable") were untested claims.
  *
  * Every test below drives the SAME `npm pack --dry-run --json` invocation,
@@ -34,6 +34,7 @@ const PROJECT_ROOT = path.resolve(HERE, "..");
 const PACKAGE_JSON = JSON.parse(
   await fs.readFile(path.join(PROJECT_ROOT, "package.json"), "utf8"),
 );
+const PACKAGE_NAME = PACKAGE_JSON.name;
 
 // npm pack is slow (seconds, not milliseconds) compared to the rest of the
 // suite; give it real headroom rather than tuning a flaky-under-load number.
@@ -111,13 +112,29 @@ function packResultShape(value) {
   if (value === null) return "null";
   if (Array.isArray(value)) return value.length === 0 ? "empty array" : "array";
   if (typeof value === "object") {
-    return Array.isArray(value.files) ? "object with files array" : "object without files array";
+    if (Array.isArray(value.files)) return "object with files array";
+    const keys = Object.keys(value);
+    return keys.length > 0
+      ? `keyed object without files array (keys: ${keys.join(", ")})`
+      : "object without files array";
   }
   return typeof value;
 }
 
 function normalizePackReport(value, npmVersion = "unknown") {
-  const report = Array.isArray(value) ? value[0] : value;
+  let report;
+  if (Array.isArray(value)) {
+    report = value[0];
+  } else if (value !== null && typeof value === "object" && Array.isArray(value.files)) {
+    report = value;
+  } else if (value !== null && typeof value === "object") {
+    const entries = Object.values(value);
+    if (entries.length === 1) {
+      report = entries[0];
+    } else if (entries.length > 1) {
+      report = entries.find((entry) => entry?.name === PACKAGE_NAME);
+    }
+  }
   if (
     (Array.isArray(value) && value.length === 0) ||
     report === null ||
@@ -143,6 +160,11 @@ describe("npm pack report normalization", () => {
     assert.strictEqual(normalizePackReport(report, "12.1.0"), report);
   });
 
+  it("normalizes an npm 12 package-keyed report to its inner report", () => {
+    const report = { name: PACKAGE_NAME, files: [{ path: "package.json" }] };
+    assert.strictEqual(normalizePackReport({ [PACKAGE_NAME]: report }, "12.1.0"), report);
+  });
+
   it("throws with the received shape for invalid pack results", () => {
     for (const value of [[], {}, null, "string"]) {
       assert.throws(
@@ -150,6 +172,28 @@ describe("npm pack report normalization", () => {
         (error) => /shape=/.test(error.message) && /npm 12\.1\.0/.test(error.message),
       );
     }
+  });
+
+  it("throws when multiple keyed reports do not match this package", () => {
+    const value = {
+      first: { name: "first", files: [] },
+      second: { name: "second", files: [] },
+    };
+    assert.throws(
+      () => normalizePackReport(value, "12.1.0"),
+      (error) =>
+        /npm 12\.1\.0/.test(error.message) &&
+        /keyed object without files array \(keys: first, second\)/.test(error.message),
+    );
+  });
+
+  it("selects the matching report instead of the first keyed entry", () => {
+    const matching = { name: PACKAGE_NAME, files: [{ path: "package.json" }] };
+    const value = {
+      first: { name: "first", files: [] },
+      [PACKAGE_NAME]: matching,
+    };
+    assert.strictEqual(normalizePackReport(value, "12.1.0"), matching);
   });
 });
 
