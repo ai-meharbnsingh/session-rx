@@ -115,8 +115,9 @@ export const api = {
   post: (path, body = {}) => request(path, { method: 'POST', body: JSON.stringify(body) }),
 };
 
-const routeFromHash = () => {
-  const candidate = globalThis.location.hash.replace(/^#\/?/, '').split('/')[0];
+export const routeFromHash = () => {
+  // `#/fixes?cat=…&issue=2` is still the fixes route: the query belongs to the page.
+  const candidate = globalThis.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
   if (!candidate) return 'overview';
   return ROUTES.has(candidate) ? candidate : 'health';
 };

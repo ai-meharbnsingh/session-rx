@@ -553,3 +553,142 @@ test("re-rendering the same payload keeps the pages already loaded", async () =>
   sessionsPage.renderSessions(mount, page(corpus, 0, 20), { api });
   assert.equal(dataRows(mount).length, 20, "a new first page is a new list");
 });
+
+// ==========================================================================
+// Sidebar filters and the detail panel's tabs — every visible control acts.
+// ==========================================================================
+
+const rule = (id, name, status, extra = {}) => ({
+  id,
+  name,
+  severity: "warn",
+  threshold: { value: 0.5 },
+  evidence: status === "unknown"
+    ? { status, reason: "no-marker", values: [] }
+    : { status, values: [{ label: "measured", value: 3 }] },
+  ...extra,
+});
+
+/** Six sessions whose health and issues differ, so each filter has something to cut. */
+function mixedCorpus() {
+  const base = corpusOf(6);
+  const pressure = rule("context-pressure", "Context pressure", "observed", { fix: "claude-auto-compact", fixCli: "claude", fixCliName: "Claude Code" });
+  const repeats = rule("repeat-reads", "Repeated reads", "observed");
+  const blind = rule("subagent-concurrency", "High sub-agent concurrency", "unknown");
+  const clean = rule("cache-reuse", "Cache reuse", "not-observed");
+  const shapes = [
+    { rules: [pressure, clean], score: { total: 2, passed: 1, observed: 1, unknown: 0 } },
+    { rules: [repeats, blind], score: { total: 2, passed: 0, observed: 1, unknown: 1 } },
+    { rules: [pressure, repeats], score: { total: 2, passed: 0, observed: 2, unknown: 0 } },
+    { rules: [blind, clean], score: { total: 2, passed: 1, observed: 0, unknown: 1 } },
+    { rules: [clean], score: { total: 1, passed: 1, observed: 0, unknown: 0 } },
+    { rules: [pressure], score: { total: 1, passed: 0, observed: 1, unknown: 0 }, cli: "codex", cliName: "Codex", model: null },
+  ];
+  return base.map((session, index) => ({ ...session, ...shapes[index] }));
+}
+
+const optionIn = (mount, group, label) => {
+  const box = nodes(mount).find((node) => node.dataset?.filter === group);
+  const row = withClass(box, "filter-option").find((node) => node.childNodes[1]?.textContent === label);
+  return row ? { input: row.childNodes[0], count: Number(row.childNodes[2].textContent) } : null;
+};
+
+const shownIds = (mount) => dataRows(mount).map((row) => row.dataset.sessionId);
+
+test("Health status filters narrow the table, and each count equals the rows it then shows", () => {
+  const corpus = mixedCorpus();
+  const mount = paint(corpus, makeApi(corpus));
+  assert.equal(shownIds(mount).length, 6);
+
+  const problems = optionIn(mount, "health", "Problems found");
+  assert.equal(problems.count, 4);
+  fire(problems.input, "change");
+  assert.deepEqual(shownIds(mount), ["s-0000", "s-0001", "s-0002", "s-0005"]);
+  assert.equal(shownIds(mount).length, problems.count, "the number beside the box is the number of rows it shows");
+  assert.equal(optionIn(mount, "health", "Problems found").input.checked, true, "the box stays ticked after the redraw");
+
+  // Two ticks in one group widen (either one), they do not narrow.
+  fire(optionIn(mount, "health", "Could not be measured").input, "change");
+  assert.deepEqual(shownIds(mount), ["s-0000", "s-0001", "s-0002", "s-0003", "s-0005"]);
+
+  fire(optionIn(mount, "health", "Problems found").input, "change");
+  const unknownOnly = optionIn(mount, "health", "Could not be measured");
+  assert.deepEqual(shownIds(mount), ["s-0001", "s-0003"]);
+  assert.equal(shownIds(mount).length, unknownOnly.count);
+
+  fire(withClass(mount, "button").find((node) => node.dataset.action === "clear-filters"));
+  assert.equal(shownIds(mount).length, 6, "Clear filters puts every row back");
+});
+
+test("Issue type filters narrow the table, combine with health, and say when nothing matches", () => {
+  const corpus = mixedCorpus();
+  const mount = paint(corpus, makeApi(corpus));
+
+  const repeats = optionIn(mount, "issue", "Repeated reads");
+  assert.equal(repeats.count, 2);
+  fire(repeats.input, "change");
+  assert.deepEqual(shownIds(mount), ["s-0001", "s-0002"]);
+  assert.match(mount.textContent, /2 of 6 shown/, "the toolbar count follows the filters");
+
+  // Across groups a row must satisfy both.
+  fire(optionIn(mount, "health", "Could not be measured").input, "change");
+  assert.deepEqual(shownIds(mount), ["s-0001"]);
+
+  fire(optionIn(mount, "issue", "Context pressure").input, "change");
+  assert.deepEqual(shownIds(mount), ["s-0001"], "a second issue widens within its group only");
+
+  fire(optionIn(mount, "issue", "Repeated reads").input, "change");
+  assert.deepEqual(shownIds(mount), []);
+  assert.match(mount.textContent, /No session loaded so far matches the filters you picked\./);
+
+  fire(withClass(mount, "button").find((node) => node.dataset.action === "clear-filters"));
+  assert.equal(shownIds(mount).length, 6);
+});
+
+test("the detail panel's four tabs each switch to their own real content", () => {
+  const corpus = mixedCorpus();
+  const mount = paint(corpus, makeApi(corpus));
+  fire(dataRows(mount).find((row) => row.dataset.sessionId === "s-0005"));
+
+  const panel = () => withClass(mount, "detail-panel")[0];
+  const tab = (key) => withClass(panel(), "tab-button").find((node) => node.dataset.tab === key);
+  const content = () => nodes(panel()).find((node) => node.getAttribute?.("role") === "tabpanel");
+  assert.ok(panel(), "clicking a row opens its details");
+  assert.equal(withClass(panel(), "tab-button").length, 4);
+  assert.equal(content().dataset.tab, "diagnosis");
+  assert.match(content().textContent, /Context pressure/);
+  // A Codex finding whose only fix changes Claude Code's settings is not offered as a fix for Codex.
+  assert.match(content().textContent, /Recommendation only/);
+  assert.doesNotMatch(content().textContent, /Fix available for your CLI/);
+
+  fire(tab("evidence"));
+  assert.equal(content().dataset.tab, "evidence");
+  assert.equal(tab("evidence").getAttribute("aria-selected"), "true");
+  assert.equal(tab("diagnosis").getAttribute("aria-selected"), "false");
+  assert.equal(withClass(content(), "verdict").length, 1, "every rule's verdict is listed");
+
+  fire(tab("metrics"));
+  assert.equal(content().dataset.tab, "metrics");
+  assert.match(content().textContent, /turns15/);
+  const modelRow = nodes(content()).find((node) => node.childNodes?.[0]?.textContent === "model");
+  assert.equal(withClass(modelRow, "not-measured").length, 1, "a missing model is 'not measured', never blank");
+
+  fire(tab("timeline"));
+  assert.equal(content().dataset.tab, "timeline");
+  assert.match(content().textContent, /Session started/);
+  assert.match(content().textContent, /Session ended/);
+  assert.match(content().textContent, /Turn-by-turn timeline: not measured/);
+
+  fire(tab("diagnosis"));
+  fire(withClass(panel(), "button").find((node) => node.textContent === "Close"));
+  assert.equal(panel(), undefined);
+});
+
+test("a session whose fix targets its own CLI says the fix is available for it", () => {
+  const corpus = mixedCorpus();
+  const mount = paint(corpus, makeApi(corpus));
+  fire(dataRows(mount).find((row) => row.dataset.sessionId === "s-0000"));
+  const panel = withClass(mount, "detail-panel")[0];
+  assert.match(panel.textContent, /Fix available for your CLI/);
+  fire(withClass(panel, "button").find((node) => node.textContent === "Close"));
+});
