@@ -1580,8 +1580,48 @@ export function createApp(options = {}) {
     const page = sorted.slice(offset, offset + limit);
     const consumed = offset + page.length;
     const hasMore = consumed < matched.length;
+
+    // THE TREND COLUMN'S DATA, JOINED BACK ON.
+    //
+    // `analyzeSession` counts the turns it was given and then drops the array
+    // (`turnCount: turns.length`, src/analyzer/health.js), so an analyzed
+    // session carries no per-turn context reading at all. The Sessions table
+    // draws one — and, reading a field that was never sent, printed "not
+    // measured" on every row of every page since the column shipped. The
+    // readings exist: the collectors record `turn.context.inputTokens`, and
+    // `/api/report` below already joins them back the same way.
+    //
+    // Two properties this must keep:
+    //   1. NUMBERS ONLY. A turn object carries tool calls and their inputs —
+    //      that is how this endpoint measured 43.8MB before it was paginated.
+    //      A flat list of readings is a few dozen bytes a row.
+    //   2. COST IS THE PAGE. The join runs over `page`, never over `matched`
+    //      or the scan, so widening `?scan=` cannot widen this body.
+    const rawById = new Map();
+    for (const entry of Array.isArray(result.collected?.supported) ? result.collected.supported : []) {
+      for (const raw of Array.isArray(entry?.sessions) ? entry.sessions : []) {
+        if (raw?.sessionId !== null && raw?.sessionId !== undefined) rawById.set(String(raw.sessionId), raw);
+      }
+    }
+    const pageWithSeries = page.map((session) => {
+      const raw = rawById.get(String(session?.sessionId ?? ""));
+      // `null` and `[]` are DIFFERENT STATEMENTS and the page renders them
+      // differently. `[]` says the turns were read and none recorded a context
+      // size; `null` says this row's turns never reached this endpoint, so
+      // nothing is known either way. Sending `[]` for a join miss would be the
+      // same class of lie this whole change exists to remove.
+      const contextSeries = raw
+        ? (Array.isArray(raw.turns) ? raw.turns : [])
+          .map((turn) => turn?.context?.inputTokens)
+          // A null reading is ABSENT, not zero. It is dropped from the series;
+          // it is never coerced, and the series is never padded to turn count.
+          .filter((value) => typeof value === "number" && Number.isFinite(value))
+        : null;
+      return { ...session, contextSeries };
+    });
+
     await sendJson(res, 200, {
-      sessions: page,
+      sessions: pageWithSeries,
       // `total` is the whole filtered match, not the page — it is what the UI
       // says it is not showing, so it may never shrink to the page size.
       total: matched.length,

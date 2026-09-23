@@ -28,6 +28,113 @@ function diffView(diff) {
 
 const CATEGORIES = ['All issues', 'Configuration', 'Context & memory', 'Tool usage', 'Performance'];
 
+/**
+ * Whether one catalogue fix is in place on this machine, as exactly one of
+ * three answers: applied | not-applied | unknown. There is no fourth.
+ *
+ * WHY THE PAGE HAS TO ASK: the health verdicts cannot answer this. A fix that
+ * worked makes its own finding stop being observed, so a page that reads only
+ * the verdicts loses sight of every fix the user applied — which is the one
+ * list they need to undo anything.
+ *
+ * `unknown` is not "not applied" and is never a pass: a check that could not
+ * run, a fix that could not be loaded, and a request that failed all land here
+ * carrying the reason they gave, which the UI then puts on screen.
+ *
+ * @returns {Promise<{id: string, title: string, state: string, detail: ?string}>}
+ */
+async function fixApplyState(api, fix) {
+  const id = String(fix?.id ?? '');
+  const title = fix?.title || id;
+  const firstText = (...values) => values.find((value) => typeof value === 'string' && value.length) || null;
+  if (fix?.available === false) {
+    return { id, title, state: 'unknown', detail: firstText(fix?.reason) || 'this fix could not be loaded on this machine' };
+  }
+  let checked;
+  try {
+    checked = await api.get(`/api/fixes/${encodeURIComponent(id)}/check`);
+  } catch (error) {
+    return { id, title, state: 'unknown', detail: firstText(error?.message) || 'the check could not be reached' };
+  }
+  const status = typeof checked?.status === 'string' ? checked.status : null;
+  const said = firstText(checked?.message, checked?.reason);
+  const detail = said && checked?.reason && checked.message ? `${checked.message} (${checked.reason})` : said;
+  if (status === 'unknown') return { id, title, state: 'unknown', detail: detail || 'the check did not say why' };
+  if (status === 'applied' || checked?.applied === true) {
+    // A drifted-but-applied fix keeps its reason visible: the file moved under it.
+    return { id, title, state: 'applied', detail: checked?.drifted === true ? detail : null };
+  }
+  if (status === 'not-applied' || checked?.applied === false) return { id, title, state: 'not-applied', detail: null };
+  return { id, title, state: 'unknown', detail: 'the check did not report whether this fix is in place' };
+}
+
+/**
+ * Ask about every catalogue fix that can be applied at all.
+ *
+ * Returns `null` — not an empty list — when there is no client to ask with, so
+ * a caller renders nothing rather than an empty list that would read as "you
+ * have applied none of these".
+ */
+async function fixApplyStates(api, catalog) {
+  if (!api || typeof api.get !== 'function') return null;
+  const rows = (catalog || []).filter((fix) => fix?.id && fix?.applyable !== false);
+  if (!rows.length) return [];
+  return Promise.all(rows.map((fix) => fixApplyState(api, fix)));
+}
+
+/** The fixes already in place, each under the one action that reverses it. */
+function appliedFixesSection(states, api) {
+  const applied = states.filter((row) => row.state === 'applied');
+  if (!applied.length) return null;
+  const section = el('section', 'rx-card applied-fixes');
+  section.append(sectionTitle('Applied fixes', 'fixes'));
+  section.append(el('p', 'rx-label', applied.length === 1
+    ? 'One fix is in place on this machine. Undo restores the file it changed.'
+    : `${applied.length} fixes are in place on this machine. Undo restores the file each one changed.`));
+  const strip = el('div', 'rx-grid rx-grid-even');
+  // No slice: a user must be able to reach every fix they applied, not the first few.
+  applied.forEach((row) => {
+    const item = el('article', 'rx-card applied-fix');
+    item.dataset.fixId = row.id;
+    item.append(el('h3', '', row.title));
+    if (row.detail) item.append(el('p', 'not-measured', row.detail));
+    const undo = button('Undo', 'button button-sm');
+    undo.dataset.action = 'undo-fix';
+    undo.dataset.fixId = row.id;
+    undo.setAttribute('aria-label', `Undo ${row.title}`);
+    undo.addEventListener('click', () => openFixModal({ fixId: row.id, api }));
+    item.append(undo);
+    strip.append(item);
+  });
+  section.append(strip);
+  return section;
+}
+
+/** The third state, on screen with its reason — never folded into either of the other two. */
+function uncheckedFixesSection(states, api) {
+  const unknown = states.filter((row) => row.state === 'unknown');
+  if (!unknown.length) return null;
+  const section = el('section', 'rx-card unchecked-fixes');
+  section.append(sectionTitle('Fixes that could not be checked', 'fixes'));
+  section.append(el('p', 'not-measured', 'Whether these are already in place could not be worked out. That is not the same as "not applied", and it is not a pass.'));
+  const strip = el('div', 'rx-grid rx-grid-even');
+  unknown.forEach((row) => {
+    const item = el('article', 'rx-card unchecked-fix');
+    item.dataset.fixId = row.id;
+    item.append(el('h3', '', row.title));
+    item.append(el('p', 'not-measured', row.detail || 'no reason was recorded'));
+    const open = button('Open fix', 'button button-sm');
+    open.dataset.action = 'open-fix';
+    open.dataset.fixId = row.id;
+    open.setAttribute('aria-label', `Open ${row.title}`);
+    open.addEventListener('click', () => openFixModal({ fixId: row.id, api }));
+    item.append(open);
+    strip.append(item);
+  });
+  section.append(strip);
+  return section;
+}
+
 function inCategory(name, { rule }) {
   if (name === 'All issues') return true;
   const words = `${rule?.name || ''} ${rule?.fix || ''}`.toLowerCase();
@@ -83,6 +190,10 @@ async function renderFixes(mount, data, ctx = {}) {
   const descriptor = catalog.find((fix) => fix.id === fixId) || catalog[0];
   let preview = null;
   if (fixId) { try { preview = await api.post(`/api/fixes/${encodeURIComponent(fixId)}/preview`, {}); } catch (error) { preview = { error: error?.message || 'Preview unavailable' }; } }
+  // Which fixes are already in place. Asked of the server, because the health
+  // verdicts cannot say: a fix that worked stops its own finding being observed.
+  const states = await fixApplyStates(api, catalog) || [];
+  const stateById = new Map(states.map((row) => [row.id, row.state]));
 
   const root = el('div', 'rx-page');
   const top = el('div', 'rx-card-head'); const back = el('a', '', 'Back to issues'); back.href = '#/health';
@@ -153,8 +264,18 @@ async function renderFixes(mount, data, ctx = {}) {
   actions.append(review);
   actions.append(el('span', 'local-note', 'Opens the fix: check the exact change, apply it, and undo it from the same window. Only local files are changed. Nothing is sent anywhere.')); proposed.append(actions); layout.append(proposed); root.append(layout);
 
+  // Applied and could-not-check come FIRST, and are named for what they are.
+  // Until this existed, a fix the user had applied survived only as an
+  // unlabelled card in the recommendation strip below, six deep and capped.
+  const applied = appliedFixesSection(states, api);
+  if (applied) root.append(applied);
+  const unchecked = uncheckedFixesSection(states, api);
+  if (unchecked) root.append(unchecked);
+
   const other = el('section', 'rx-card'); other.append(sectionTitle('Other recommended fixes', 'fixes')); const strip = el('div', 'rx-grid rx-grid-even');
-  catalog.filter((fix) => fix.id !== fixId).slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); const found = allItems.findIndex((candidate) => candidate.rule?.fix === fix.id);
+  // A fix already in place, or one whose state could not be read, is shown in
+  // its own group above; recommending it here as well would say two things.
+  catalog.filter((fix) => fix.id !== fixId && stateById.get(fix.id) !== 'applied' && stateById.get(fix.id) !== 'unknown').slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); const found = allItems.findIndex((candidate) => candidate.rule?.fix === fix.id);
     // A fix no session triggered has no issue page to jump to; open the fix itself rather than landing on an unrelated issue.
     review.addEventListener('click', () => { if (found >= 0) location.hash = fixesHash('All issues', found); else openFixModal({ fixId: fix.id, api }); }); item.append(review); strip.append(item); });
   other.append(strip); root.append(other); mount.replaceChildren(root);

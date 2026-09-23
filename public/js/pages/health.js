@@ -1148,6 +1148,145 @@ export function healthSummaryNode(shown, actionableIndex) {
 }
 
 /** Collector diagnostics, folded away but never dropped (BP-002.08). */
+// ---------------------------------------------------------------------------
+// Fixes already applied
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether one catalogue fix is in place, as exactly one of three answers:
+ * applied | not-applied | unknown. There is no fourth.
+ *
+ * WHY THIS PAGE ASKS AT ALL: every fix offer on this page hangs off an
+ * *observed* finding, so a fix that worked removes its own offer — and with it
+ * the only way back to Undo. The verdicts cannot answer "what have I already
+ * applied?"; only `check` can.
+ *
+ * A check that could not run, a fix that could not be loaded and a request that
+ * failed are all `unknown`, carrying the reason they gave. `unknown` is not
+ * "not applied", and it is never a pass.
+ *
+ * @returns {Promise<{id: string, title: string, state: string, detail: ?string}>}
+ */
+async function fixApplyState(api, fix) {
+  const id = String(fix?.id ?? '');
+  const title = fix?.title || id;
+  const firstText = (...values) => values.find((value) => typeof value === 'string' && value.length) || null;
+  if (fix?.available === false) {
+    return { id, title, state: 'unknown', detail: firstText(fix?.reason) || 'this fix could not be loaded on this machine' };
+  }
+  let checked;
+  try {
+    checked = await api.get(`/api/fixes/${encodeURIComponent(id)}/check`);
+  } catch (error) {
+    return { id, title, state: 'unknown', detail: firstText(error?.message) || 'the check could not be reached' };
+  }
+  const status = typeof checked?.status === 'string' ? checked.status : null;
+  const said = firstText(checked?.message, checked?.reason);
+  const detail = said && checked?.reason && checked.message ? `${checked.message} (${checked.reason})` : said;
+  if (status === 'unknown') return { id, title, state: 'unknown', detail: detail || 'the check did not say why' };
+  if (status === 'applied' || checked?.applied === true) {
+    return { id, title, state: 'applied', detail: checked?.drifted === true ? detail : null };
+  }
+  if (status === 'not-applied' || checked?.applied === false) return { id, title, state: 'not-applied', detail: null };
+  return { id, title, state: 'unknown', detail: 'the check did not report whether this fix is in place' };
+}
+
+/** One applied fix, under the one action that reverses it. */
+function appliedFixRow(row, api) {
+  const item = el('li', 'applied-fix');
+  item.dataset.fixId = row.id;
+  item.append(el('span', 'applied-fix-title', row.title));
+  if (row.detail) item.append(el('p', 'note', row.detail));
+  const undo = el('button', 'button button-sm', 'Undo');
+  undo.type = 'button';
+  undo.dataset.action = 'undo-fix';
+  undo.dataset.fixId = row.id;
+  undo.setAttribute('aria-label', `Undo ${row.title}`);
+  undo.addEventListener('click', () => { openFixModal({ fixId: row.id, api }); });
+  item.append(undo);
+  return item;
+}
+
+/**
+ * The fixes already in place on this machine, and the ones whose state could
+ * not be read — the second group named as such, with its reason, never folded
+ * into the first and never rendered as a pass.
+ *
+ * The panel fills itself after the page has painted, because `check` is a
+ * request per fix and this render is synchronous. With no client to ask, it
+ * stays empty and hidden: no reading was taken, so no claim is made.
+ *
+ * @returns {HTMLElement} the panel, populated later
+ */
+function appliedFixesPanel(api) {
+  // The panel is the container for both groups; `applied-fixes` marks the
+  // applied group ALONE, so a panel holding only unknowns never reads as one.
+  const panel = el('section', 'card card-pad fix-state-panel');
+  panel.hidden = true;
+  if (!api || typeof api.get !== 'function') return panel;
+
+  const show = (...children) => { panel.replaceChildren(...children); panel.hidden = false; };
+
+  /** Neither group could be built: say so as an unknown, not as an empty list. */
+  const couldNotRead = (why) => {
+    const block = el('div', 'unchecked-fixes');
+    block.append(el('h2', null, 'Fixes that could not be checked'));
+    block.append(el('p', 'note', why));
+    return block;
+  };
+
+  (async () => {
+    let catalog = null;
+    try { catalog = await api.get('/api/fixes'); } catch { catalog = null; }
+    const rows = Array.isArray(catalog?.fixes) ? catalog.fixes : null;
+    if (!rows) {
+      show(couldNotRead('The list of fixes could not be read, so what is already applied cannot be listed here. That is not a statement that none are.'));
+      return;
+    }
+    const states = await Promise.all(
+      rows.filter((fix) => fix?.id && fix?.applyable !== false).map((fix) => fixApplyState(api, fix)),
+    );
+    const applied = states.filter((row) => row.state === 'applied');
+    const unknown = states.filter((row) => row.state === 'unknown');
+    if (!applied.length && !unknown.length) return;
+
+    const children = [];
+    if (applied.length) {
+      const block = el('div', 'applied-fixes');
+      block.append(el('h2', null, 'Applied fixes'));
+      block.append(el('p', 'note', 'Already in place on this machine. Undo restores the file each one changed.'));
+      // No cap: a user must be able to reach every fix they applied.
+      const list = el('ul', 'file-list');
+      applied.forEach((row) => list.append(appliedFixRow(row, api)));
+      block.append(list);
+      children.push(block);
+    }
+    if (unknown.length) {
+      const block = el('div', 'unchecked-fixes');
+      block.append(el('h2', null, 'Fixes that could not be checked'));
+      block.append(el('p', 'note', 'Whether these are already in place could not be worked out. That is not the same as "not applied", and it is not a pass.'));
+      const list = el('ul', 'file-list');
+      unknown.forEach((row) => {
+        const item = el('li', 'unchecked-fix');
+        item.dataset.fixId = row.id;
+        item.append(el('span', 'applied-fix-title', row.title));
+        item.append(el('p', 'note', row.detail || 'no reason was recorded'));
+        list.append(item);
+      });
+      block.append(list);
+      const link = el('a', null, 'Open these on the Fixes page');
+      link.href = '#/fixes';
+      block.append(link);
+      children.push(block);
+    }
+    show(...children);
+  })().catch(() => {
+    show(couldNotRead('What is already applied could not be read. That is not a statement that nothing is.'));
+  });
+
+  return panel;
+}
+
 function diagnosticsNode(diagnostics) {
   const rows = Array.isArray(diagnostics) ? diagnostics : [];
   if (!rows.length) return null;
@@ -1210,6 +1349,10 @@ export function renderHealth(mount, data, ctx = {}) {
   if (data?.scan?.note) stack.append(el('p', 'note', `Scan: ${data.scan.note}`));
 
   stack.append(collectorsPanel(data?.collectors));
+
+  // Before the early return below, so a fix the user applied stays reachable
+  // even on a scan that read no session at all.
+  stack.append(appliedFixesPanel(api));
 
   if (!shown.length) {
     stack.append(

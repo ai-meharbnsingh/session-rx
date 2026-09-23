@@ -213,7 +213,18 @@ const COLUMNS = [
     value: (session) => session?.turns?.length || session?.turnCount || null,
     cell: (session) => {
       const td = el('td');
-      const values = (session?.turns || []).map((turn) => turn?.context?.inputTokens).filter(Number.isFinite);
+      // `contextSeries` is the per-turn context reading, sent by /api/sessions
+      // as a flat list of numbers. It is read in preference to `session.turns`
+      // because `turns` is not in the payload and never was: the analyzer keeps
+      // the turn COUNT and discards the array, so this cell read an absent
+      // field and printed "not measured" over data that had been collected.
+      // The `turns` read is kept as a fallback for any caller that does hold a
+      // raw session (the single-session endpoint's shape).
+      const seriesSent = Array.isArray(session?.contextSeries);
+      const readings = seriesSent ? session.contextSeries : (session?.turns || []).map((turn) => turn?.context?.inputTokens);
+      // Still filtered, and still on the READING: a turn that recorded no
+      // context size contributes nothing rather than a zero.
+      const values = readings.filter(Number.isFinite);
       if (values.length >= 2) {
         // Colour the line by how the session scored, so the column reads at a
         // glance instead of being twenty identical strokes.
@@ -222,9 +233,13 @@ const COLUMNS = [
         const tone = measured === 0 ? 'unknown' : (score.observed || 0) >= 2 ? 'crit' : (score.observed || 0) === 1 ? 'warn' : 'pass';
         td.append(uiSparkline(values, `tone-${tone}`));
       } else {
-        // An empty cell reads as a rendering failure. A dash says what is true:
-        // fewer than two turns carried a context size, so there is no line to draw.
-        td.append(notMeasured('fewer than two turns in this session recorded a context size, so there is no trend to draw'));
+        // An empty cell reads as a rendering failure. A dash says what is true —
+        // and WHICH true thing, because "we read the turns and none carried a
+        // context size" and "this row's readings never reached the page" are
+        // different statements and only the first is a fact about the session.
+        td.append(notMeasured(seriesSent || Array.isArray(session?.turns)
+          ? 'fewer than two turns in this session recorded a context size, so there is no trend to draw'
+          : 'the per-turn context readings for this session did not reach this page, so no trend could be measured'));
       }
       return td;
     },
