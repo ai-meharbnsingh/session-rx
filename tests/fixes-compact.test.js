@@ -46,28 +46,27 @@ import {
 } from "./fixtures/fixes/4b/harness.mjs";
 
 function assertSymlinkTargetMentioned(message, link, real) {
-  const normalizePath = (value) => {
-    let candidate = value;
-    try {
-      candidate = realpathSync(candidate);
-    } catch {
-      // The value may be embedded in a diagnostic or may not exist yet.
-    }
-    const normalized = candidate.replaceAll("\\", "/");
+  const canon = (value) => {
+    const normalized = value.replaceAll("\\", "/");
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
 
-  const resolvedLink = normalizePath(link);
-  const expectedTarget = normalizePath(real);
-  const mentionedTarget = message.match(/\bto ([^;\n]+);/)?.[1];
-  const normalizedMessage = mentionedTarget === undefined
-    ? message.replaceAll("\\", "/")
-    : message.replace(mentionedTarget, normalizePath(mentionedTarget));
+  const resolvedLink = canon(realpathSync(link));
+  const canonicalMessage = canon(message);
+  const canonicalReal = canon(real);
+  const canonicalResolvedReal = canon(realpathSync(real));
+  const expectedTarget = canonicalResolvedReal;
 
   assert.equal(resolvedLink, expectedTarget);
-  const comparableMessage = process.platform === "win32" ? normalizedMessage.toLowerCase() : normalizedMessage;
-  assert.ok(comparableMessage.includes(expectedTarget),
-    `the diagnostic did not name the resolved symlink target: ${message}`);
+  assert.ok(
+    canonicalMessage.includes(canonicalReal) || canonicalMessage.includes(canonicalResolvedReal),
+    [
+      "the diagnostic did not name the resolved symlink target:",
+      `canonicalized message: ${canonicalMessage}`,
+      `canonicalized candidate (real): ${canonicalReal}`,
+      `canonicalized candidate (realpathSync(real)): ${canonicalResolvedReal}`,
+    ].join("\n"),
+  );
 }
 
 /** THE MERGED FRAGMENT under review, written out as a literal (BP-004.01). */
