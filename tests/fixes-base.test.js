@@ -916,7 +916,7 @@ test("the default environment points at the real home but is never used for IO h
   assert.equal(fallback.stateDir, path.join(path.resolve(os.homedir()), ".session-rx"));
   assert.equal(fallback.undoRoot, path.join(fallback.stateDir, "undo"));
   assert.equal(fallback.journalPath, path.join(fallback.stateDir, "journal.jsonl"));
-  assert.equal(fallback.display(path.join(os.homedir(), ".claude", "CLAUDE.md")), "~/.claude/CLAUDE.md");
+  assert.equal(fallback.display(path.join(os.homedir(), ".claude", "CLAUDE.md")), path.join("~", ".claude", "CLAUDE.md"));
   assert.equal(fallback.display("/elsewhere/file"), "/elsewhere/file");
   // Every fix in this suite goes through makeEnv, which refuses a home outside
   // the temp root, so nothing above this line can reach the real file.

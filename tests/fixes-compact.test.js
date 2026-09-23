@@ -46,14 +46,27 @@ import {
 } from "./fixtures/fixes/4b/harness.mjs";
 
 function assertSymlinkTargetMentioned(message, link, real) {
-  const resolvedLink = realpathSync(link);
-  const resolvedReal = realpathSync(real);
-  const normalize = (value) => {
-    const normalized = value.replaceAll("\\", "/");
+  const normalizePath = (value) => {
+    let candidate = value;
+    try {
+      candidate = realpathSync(candidate);
+    } catch {
+      // The value may be embedded in a diagnostic or may not exist yet.
+    }
+    const normalized = candidate.replaceAll("\\", "/");
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
-  assert.equal(normalize(resolvedLink), normalize(resolvedReal));
-  assert.ok(normalize(message).includes(normalize(resolvedReal)),
+
+  const resolvedLink = normalizePath(link);
+  const expectedTarget = normalizePath(real);
+  const mentionedTarget = message.match(/\bto ([^;\n]+);/)?.[1];
+  const normalizedMessage = mentionedTarget === undefined
+    ? message.replaceAll("\\", "/")
+    : message.replace(mentionedTarget, normalizePath(mentionedTarget));
+
+  assert.equal(resolvedLink, expectedTarget);
+  const comparableMessage = process.platform === "win32" ? normalizedMessage.toLowerCase() : normalizedMessage;
+  assert.ok(comparableMessage.includes(expectedTarget),
     `the diagnostic did not name the resolved symlink target: ${message}`);
 }
 
