@@ -192,19 +192,7 @@ const COLUMNS = [
     label: 'Key findings',
     type: 'text',
     value: (session) => (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed').length,
-    cell: (session) => {
-      const td = el('td');
-      const findings = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed');
-      const { total, unknown } = scoreParts(session?.score);
-      if (findings.length) findings.slice(0, 3).forEach((rule) => td.append(el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, ruleLabel(rule))));
-      else if (unknown > 0) {
-        const denominator = Number.isFinite(total) ? total : unknown;
-        td.append(el('span', 'finding-pill finding-unknown', `${unknown} of ${denominator} checks could not be measured`));
-      } else {
-        td.append(el('span', 'finding-pill finding-clear', 'Checks ran; no problems observed'));
-      }
-      return td;
-    },
+    cell: (session) => findingCell(session),
   },
   {
     key: 'trend',
@@ -310,6 +298,35 @@ const COLUMNS = [
   },
 ];
 
+/** Keep the findings presentation compact; the expanded diagnosis stays complete. */
+export function findingCell(session) {
+  const td = el('td', 'session-findings');
+  const findings = (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed');
+  const { total, unknown } = scoreParts(session?.score);
+  if (findings.length) {
+    const list = el('span', 'finding-list');
+    const visible = findings.slice(0, 1);
+    visible.forEach((rule) => list.append(el('span', `finding-pill finding-${severity(rule).toLowerCase()}`, ruleLabel(rule))));
+    const hidden = findings.slice(visible.length);
+    if (hidden.length) {
+      const counter = el('span', 'finding-counter', `+${hidden.length} more`);
+      counter.setAttribute('title', `Hidden findings: ${hidden.map((rule) => ruleLabel(rule)).join(', ')}`);
+      list.append(counter);
+    }
+    td.append(list);
+  } else if (unknown > 0) {
+    const denominator = Number.isFinite(total) ? total : unknown;
+    td.append(el('span', 'finding-pill finding-unknown', `${unknown} of ${denominator} checks could not be measured`));
+  } else {
+    td.append(el('span', 'finding-pill finding-clear', 'Checks ran; no problems observed'));
+  }
+  return td;
+}
+
+export function observedFindingCount(session) {
+  return (session?.rules || []).filter((rule) => rule?.evidence?.status === 'observed').length;
+}
+
 const COLUMN_BY_KEY = new Map(COLUMNS.map((column) => [column.key, column]));
 
 // ---------------------------------------------------------------------------
@@ -357,7 +374,7 @@ function sortRows(sessions) {
 // ---------------------------------------------------------------------------
 
 /** The expanded diagnosis row: metadata, score, then every rule verdict. */
-function diagnosisRow(session, api, redraw) {
+export function diagnosisRow(session, api, redraw) {
   const tr = el('tr', 'session-diagnosis');
   tr.dataset.sessionId = session?.sessionId ?? '';
   const cell = el('td');
