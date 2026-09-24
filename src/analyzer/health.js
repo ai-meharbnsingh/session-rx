@@ -53,20 +53,24 @@ import { RULES, evaluateRule } from "./rules.js";
 const SEVERITY_RANK = Object.freeze({ critical: 0, warn: 1, info: 2 });
 const STATUS_RANK = Object.freeze({ observed: 0, unknown: 1, "not-observed": 2 });
 const RULE_ORDER = new Map(RULES.map((rule, index) => [rule.id, index]));
-// The registry is the authority for collector capabilities.  Antigravity's
-// registered reader is deliberately detection-only; keep that distinction
-// attached to the registry entry rather than treating every registered ID as
-// a parser merely because its reader module exists.
-const DETECTION_ONLY_READER_PATHS = new Set(
-  COLLECTOR_SPECS
-    .filter(([, , modulePath]) => modulePath === "./antigravity.js")
-    .map(([, , modulePath]) => modulePath),
-);
-const PARSER_CLI_IDS = new Set(
-  COLLECTOR_SPECS
-    .filter(([, , modulePath]) => !DETECTION_ONLY_READER_PATHS.has(modulePath))
-    .map(([id]) => id),
-);
+const PARSER_CLI_IDS = new Set(COLLECTOR_SPECS.map(([id]) => id));
+
+const STRUCTURALLY_NOT_APPLICABLE = Object.freeze({
+  "subagent-concurrency": Object.freeze({
+    reasonCode: "cli-records-no-subagents",
+    reason: "This CLI's log format has no sub-agent identity or parent-link field, so sub-agent concurrency can never be measured from its sessions.",
+  }),
+});
+
+function notApplicableFor(cli, rule) {
+  if (rule.id !== "subagent-concurrency" || cli === "claude") return null;
+  return {
+    ruleId: rule.id,
+    name: rule.name,
+    reasonCode: cli === "codex" ? "codex-records-no-subagents" : STRUCTURALLY_NOT_APPLICABLE[rule.id].reasonCode,
+    reason: `${cli || "This CLI"}'s log format has no sub-agent identity or parent-link field, so sub-agent concurrency can never be measured from its sessions.`,
+  };
+}
 
 /** Keys a collector may use for the parent-session linkage (BP-002.19). */
 const PARENT_KEYS = Object.freeze(["parentSessionId", "parentId", "parentID", "parent_id"]);
@@ -202,7 +206,12 @@ export function analyzeSession(session, ctx = {}) {
     toolCallsRecorded: ctx?.toolCallsRecorded === true || ownToolCalls > 0,
   };
 
-  const results = RULES.map((rule) => evaluateRule(rule, session, ruleCtx)).sort(compareRuleResults);
+  const cli = str(session?.cli);
+  const notApplicable = RULES.map((rule) => notApplicableFor(cli, rule)).filter(Boolean);
+  const results = RULES
+    .filter((rule) => !notApplicableFor(cli, rule))
+    .map((rule) => evaluateRule(rule, session, ruleCtx))
+    .sort(compareRuleResults);
   const parentSessionId = parentOf(ruleCtx.sessionMeta);
 
   return {
@@ -222,6 +231,7 @@ export function analyzeSession(session, ctx = {}) {
     subagentTurns: sidechainTurns,
     score: scoreRules(results),
     rules: results,
+    notApplicable,
   };
 }
 
@@ -358,18 +368,12 @@ function setAsideCount(sessions, explicit) {
 }
 
 /** The CLIs a manager-facing summary always names, in this order, whether or not anything was read for them. */
-const SUMMARY_TOOLS = Object.freeze(["claude", "codex", "cursor", "antigravity"]);
+const SUMMARY_TOOLS = Object.freeze(["claude", "codex", "cursor"]);
 
 /**
  * A plain-language, manager-readable rollup of the same verdicts the report
  * renders — sessions analysed, how many checks came back observed /
  * not-observed / unknown, a per-check breakdown, and a per-tool breakdown.
- *
- * ANTIGRAVITY IS NEVER SHOWN AS "0 problems". It is detection-only (its
- * collector reads no session transcript), so `problems: null` and
- * `status: "detected-not-read"` are reported for it — a null there renders as
- * "detected, not read yet" on the page, never as a clean zero nothing
- * measured.
  *
  * @param {{sessions?: Array<object>, clis?: Array<object>}} input
  *   `sessions` are analyzed session-health objects (`analyzeSession` output,
@@ -410,7 +414,7 @@ export function buildManagerSummary(input = {}) {
   const cliByName = new Map(clis.map((row) => [str(row?.cli), row]));
   const perTool = SUMMARY_TOOLS.map((cli) => {
     const row = cliByName.get(cli) ?? null;
-    const detectionOnly = row?.support === "detection-only" || (!row && cli === "antigravity");
+    const detectionOnly = row?.support === "detection-only";
     if (detectionOnly) {
       return {
         cli,
@@ -491,12 +495,24 @@ export function buildReportInput(input = {}) {
   }
 
   const clis = Array.isArray(input?.clis) ? input.clis : [];
+  const notApplicable = [];
+  const seenNotApplicable = new Set();
+  for (const session of sessions) {
+    for (const item of Array.isArray(session?.notApplicable) ? session.notApplicable : []) {
+      const cli = str(session?.cli) || "unknown";
+      const key = `${cli}:${str(item?.ruleId)}`;
+      if (seenNotApplicable.has(key)) continue;
+      seenNotApplicable.add(key);
+      notApplicable.push({ cli, ...item });
+    }
+  }
 
   return {
     generatedAt: str(input?.generatedAt) || null,
     parserVersion,
     range,
     clis,
+    notApplicable,
     rules: aggregateRules(sessions, parserVersion),
     // Computed from the SAME session-health objects (and the same verdicts)
     // the rest of this report renders — never re-derived from the assembled
@@ -858,6 +874,15 @@ export function analyzeAll(collected = {}, options = {}) {
       byCli: setAsideByCli,
     },
     collectors: clis,
+    ruleApplicability: clis.map((entry) => {
+      const cli = str(entry?.cli) || "unknown";
+      const excluded = RULES.map((rule) => notApplicableFor(cli, rule)).filter(Boolean);
+      return {
+        cli,
+        applicable: RULES.filter((rule) => !notApplicableFor(cli, rule)).map((rule) => rule.id),
+        notApplicable: excluded,
+      };
+    }),
     promotions: promotions.all,
     diagnostics,
     reportInput: buildReportInput({

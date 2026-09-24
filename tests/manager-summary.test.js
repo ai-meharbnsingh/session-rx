@@ -7,8 +7,6 @@
  *
  * Pins the honesty rules the summary must keep:
  *   - `unknown` is its own bucket, never folded into observed/not-observed.
- *   - antigravity (detection-only) is NEVER reported as "0 problems" — it is
- *     `status: "detected-not-read"` with `problems: null`.
  *   - a null count stays null through the report generator, never becomes 0.
  */
 
@@ -70,27 +68,9 @@ test("buildManagerSummary: perCheck names match the plain rule names, and counts
   assert.equal(summedUnknown, summary.verdicts.unknown);
 });
 
-test("buildManagerSummary: antigravity is 'detected, not read yet' with problems: null — never 0", () => {
-  const summary = buildManagerSummary({
-    sessions: [],
-    clis: [{ cli: "antigravity", sessions: null, support: "detection-only", note: "installed, no transcript" }],
-  });
-  const row = summary.perTool.find((r) => r.cli === "antigravity");
-  assert.equal(row.status, "detected-not-read");
-  assert.equal(row.sessions, null);
-  assert.equal(row.problems, null, "antigravity must never be reported as a measured 0 problems");
-});
-
-test("buildManagerSummary: antigravity is detection-only even with no clis entry at all", () => {
+test("buildManagerSummary: perTool covers exactly the supported tools", () => {
   const summary = buildManagerSummary({ sessions: [], clis: [] });
-  const row = summary.perTool.find((r) => r.cli === "antigravity");
-  assert.equal(row.status, "detected-not-read");
-  assert.equal(row.problems, null);
-});
-
-test("buildManagerSummary: perTool covers claude, codex, cursor, antigravity, in that order", () => {
-  const summary = buildManagerSummary({ sessions: [], clis: [] });
-  assert.deepEqual(summary.perTool.map((r) => r.cli), ["claude", "codex", "cursor", "antigravity"]);
+  assert.deepEqual(summary.perTool.map((r) => r.cli), ["claude", "codex", "cursor"]);
 });
 
 test("buildManagerSummary: a tool with sessions read gets a real (non-null) problem count", () => {

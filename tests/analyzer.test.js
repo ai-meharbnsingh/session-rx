@@ -433,6 +433,36 @@ test("context-pressure: average above 0.70 of a real window is observed", () => 
   assert.equal(result.evidence.values.find((v) => v.label.includes("share of the window")).windowSource, "model-table");
 });
 
+test("context-pressure: an ambiguous Claude-family tier is unknown at the smaller-tier threshold", () => {
+  const session = makeSession({
+    window: { tokens: 200000, source: "model-table", ambiguous: true, candidateTiers: [200000, 1000000] },
+    turns: [{ ts: at(1), inputTokens: 150000 }, { ts: at(2), inputTokens: 150000 }],
+  });
+  const result = verdict("context-pressure", session);
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(result.evidence.reasonCode, "window-tier-ambiguous");
+  assert.match(result.evidence.reason, /200,000.*1,000,000/);
+  assert.match(result.evidence.reason, /150,000/);
+});
+
+test("context-pressure: an ambiguous Claude-family tier below both thresholds remains not-observed", () => {
+  const session = makeSession({
+    window: { tokens: 200000, source: "model-table", ambiguous: true, candidateTiers: [200000, 1000000] },
+    turns: [{ ts: at(1), inputTokens: 100000 }, { ts: at(2), inputTokens: 100000 }],
+  });
+  assert.equal(verdict("context-pressure", session).evidence.status, "not-observed");
+});
+
+test("context-pressure: a single-tier GPT-5 breach remains observed", () => {
+  const session = makeSession({
+    cli: "codex",
+    model: "gpt-5",
+    window: { tokens: 400000, source: "model-table" },
+    turns: [{ ts: at(1), inputTokens: 300000 }, { ts: at(2), inputTokens: 300000 }],
+  });
+  assert.equal(verdict("context-pressure", session).evidence.status, "observed");
+});
+
 test("context-pressure: average below 0.70 is not-observed, and the numbers are still reported", () => {
   const result = verdict("context-pressure", contextCalm);
   assert.equal(result.evidence.status, "not-observed");
@@ -989,6 +1019,24 @@ test("subagent-concurrency: Claude with no children is unknown while a limit cou
   assert.equal(valueOf(complete, "linked to this session"), 0);
 });
 
+test("a Claude scan-bounded sub-agent check remains unknown, not not-applicable", () => {
+  const result = verdict("subagent-concurrency", makeSession({ cli: "claude" }), { corpusComplete: false });
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(result.evidence.reasonCode, "scan-bounded");
+});
+
+test("analyzeSession excludes structurally inapplicable Codex sub-agent concurrency", () => {
+  const health = analyzeSession(makeSession({ cli: "codex", model: "gpt-5" }));
+  assert.equal(health.rules.some((rule) => rule.id === "subagent-concurrency"), false);
+  assert.equal(health.score.total, 5);
+  assert.deepEqual(health.notApplicable, [{
+    ruleId: "subagent-concurrency",
+    name: "Too many helper agents at once",
+    reasonCode: "codex-records-no-subagents",
+    reason: "codex's log format has no sub-agent identity or parent-link field, so sub-agent concurrency can never be measured from its sessions.",
+  }]);
+});
+
 // ===========================================================================
 // the honesty contract, across all rules
 // ===========================================================================
@@ -1059,11 +1107,13 @@ test("no rule ever emits a zero as the evidence for an unmeasurable check", () =
 // analyzeSession: all six rules, always, and a score that cannot hide unknowns
 // ===========================================================================
 
-test("analyzeSession emits all six rules for every session, whatever the verdicts", () => {
+test("analyzeSession emits all applicable rules and records structural exclusions", () => {
   for (const session of [contextHeavy, contextObservedFloor, nativeFractionHigh, toolCallsNoResultBytes, makeSession({ turns: [] })]) {
     const health = analyzeSession(session);
-    assert.equal(health.rules.length, 6);
-    assert.deepEqual([...health.rules.map((rule) => rule.id)].sort(), [...RULE_IDS].sort());
+    const expectedCount = session.cli === "claude" ? 6 : 5;
+    assert.equal(health.rules.length, expectedCount);
+    assert.deepEqual([...health.rules.map((rule) => rule.id)].sort(), [...RULE_IDS.filter((id) => session.cli === "claude" || id !== "subagent-concurrency")].sort());
+    assert.equal(health.notApplicable.length, session.cli === "claude" ? 0 : 1);
   }
 });
 
@@ -1079,8 +1129,8 @@ test("analyzeSession ranks observed rules first, then unmeasurable, then passes"
 test("an unknown never counts toward the score, and the score always states how many there were", () => {
   const health = analyzeSession(toolCallsNoResultBytes);
   const { score } = health;
-  assert.equal(score.total, 6);
-  assert.equal(score.passed + score.observed + score.unknown, 6);
+  assert.equal(score.total, 5);
+  assert.equal(score.passed + score.observed + score.unknown, 5);
   const unknownRules = health.rules.filter((rule) => rule.evidence.status === "unknown").length;
   assert.equal(score.unknown, unknownRules);
   assert.ok(score.unknown > 0, "this fixture exists to produce unknowns");
@@ -1200,11 +1250,12 @@ test("analyzeAll surfaces windowPromotions in the per-CLI note, rather than sile
 test("analyzeAll only claims a measured zero for sub-agents when the corpus was not cut off by a limit", () => {
   const withLimit = analyzeAll(corpus(), { limit: 1 });
   const withoutLimit = analyzeAll(corpus());
-  const cursorOf = (out) => out.sessions.find((session) => session.cli === "cursor")
-    .rules.find((rule) => rule.id === "subagent-concurrency").evidence.status;
+  const cursorHasConcurrency = (out) => out.sessions.find((session) => session.cli === "cursor")
+    .rules.some((rule) => rule.id === "subagent-concurrency");
   assert.equal(withLimit.sessions.length, 5);
-  assert.equal(cursorOf(withLimit), "unknown");
-  assert.equal(cursorOf(withoutLimit), "not-observed");
+  assert.equal(cursorHasConcurrency(withLimit), false);
+  assert.equal(cursorHasConcurrency(withoutLimit), false);
+  assert.ok(withLimit.ruleApplicability.find((row) => row.cli === "codex").notApplicable.some((rule) => rule.ruleId === "subagent-concurrency"));
 });
 
 test("analyzeAll counts a limited collection in the note, so a partial corpus is visible", () => {
@@ -1452,7 +1503,7 @@ test("F-023: the set-aside count reaches the rendered report, next to the count 
 // the report contract (R_3C)
 // ===========================================================================
 
-const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "rules", "summary", "fixes", "trend"];
+const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "notApplicable", "rules", "summary", "fixes", "trend"];
 const RULE_RESULT_KEYS = ["id", "name", "severity", "fix", "threshold", "evidence"];
 const EVIDENCE_KEYS = ["status", "reason", "values", "sources", "derivation", "parserVersion"];
 const VALUE_KEYS = ["label", "value", "unit", "windowSource", "sessionId"];

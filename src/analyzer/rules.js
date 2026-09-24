@@ -219,6 +219,23 @@ function windowDenominator(session, ctx) {
   const tokens = num(window.tokens);
   const promotionLadder = str(ctx?.promotion?.ladder) || null;
 
+  if (window.ambiguous === true) {
+    const candidates = Array.isArray(window.candidateTiers) && window.candidateTiers.length
+      ? window.candidateTiers
+      : [tokens].filter((value) => value !== null);
+    return {
+      usable: true,
+      ambiguous: true,
+      source,
+      tokens,
+      candidates,
+      code: "window-tier-ambiguous",
+      reason:
+        `the log identifies a model-table window of ${tokens === null ? "unknown" : tokens.toLocaleString("en-US")} tokens, ` +
+        `but this model's vendor also ships candidate tier${candidates.length === 2 ? "" : "s"} ${candidates.map((tier) => tier.toLocaleString("en-US")).join(" and ")} and the log does not record which tier applied.`,
+    };
+  }
+
   if (source === "observed-floor") {
     return {
       usable: false,
@@ -350,6 +367,13 @@ const contextPressure = {
       const derivation =
         `mean and max of per-turn context.inputTokens over ${tokenReadings.length} of ${turns.length} turns, divided by the window resolved for this session ` +
         `(${denominator.tokens.toLocaleString("en-US")} tokens, source "${denominator.source}"). Turns with no context reading are excluded from the mean rather than counted as zero.`;
+      if (denominator.ambiguous && avgFraction >= this.threshold.value) {
+        return unknown(
+          `${denominator.reason} The measured average is ${Math.round(avg).toLocaleString("en-US")} tokens (${round(avgFraction)} of the smallest candidate window); reporting a problem would depend on an unrecorded tier.`,
+          values,
+          denominator.code,
+        );
+      }
       return avgFraction > this.threshold.value
         ? observed(values, derivation, avgFraction)
         : notObserved(values, derivation, avgFraction);
@@ -818,6 +842,23 @@ const longRisingContext = {
         `this session carries no usable elapsed time: startedAt is ${session?.startedAt === undefined ? "absent" : JSON.stringify(session?.startedAt ?? null)}, endedAt is ${JSON.stringify(session?.endedAt ?? null)}, and ${stamps.length} of ${turns.length} turns carry a timestamp — fewer than the two needed to span an interval. Duration is half of this rule, so this rule cannot be decided either way.`,
         points.length ? [countValue("context observations available", points.length)] : [],
         "no-elapsed-time",
+      );
+    }
+    // Once the elapsed-time precondition is known to be too short, the rule
+    // is settled even if there are too few points to calculate a slope. A
+    // short session cannot satisfy the conjunction; it is not an evidence gap.
+    if (elapsedHours <= hoursNeeded) {
+      const shortSlope = points.length >= 2 && points[points.length - 1].x !== points[0].x
+        ? wholeRate(((points[points.length - 1].y - points[0].y) / (points[points.length - 1].x - points[0].x)) * HOUR_MS)
+        : null;
+      return notObserved(
+        [
+          { label: "session elapsed", value: round(elapsedHours, 2), unit: "hours", sessionId },
+          { label: "context trend", value: shortSlope, unit: "tokens per hour", sessionId },
+          countValue("context observations available", points.length),
+        ],
+        `elapsed time is ${round(elapsedHours, 2)} hours, at or below the more-than-${hoursNeeded}-hour precondition, so this rule is not met regardless of the context trend.`,
+        0,
       );
     }
     if (points.length < minimumPoints) {

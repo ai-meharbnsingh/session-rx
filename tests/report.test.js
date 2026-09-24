@@ -61,10 +61,6 @@ test("date range, per-CLI session counts and trend direction all appear", () => 
   assert.match(md, /\| claude \| 96 \|/);
   assert.match(md, /\| codex \| 14 \|/);
   assert.match(md, /\| cursor \| 8 \|/);
-  assert.match(md, /\| widget \| 2 \|/);
-  // detection-only: a missing count is stated as missing, never as zero (DIS-007).
-  // The set-aside sub-agent count is missing for the same reason: nothing was read.
-  assert.match(md, /\| antigravity \| not recorded \(not zero\) \| not recorded \(not zero\) \| detection-only \|/);
 
   assert.match(md, /^Direction: declining$/m);
   assert.match(md, /Reason: mean session context rose/);
@@ -136,8 +132,6 @@ test("L8: sub-agent sessions set aside are printed next to the count that exclud
   assert.match(md, /evidence about the session that launched it, not a session of the user's own/);
   assert.match(md, /\| claude \| 10 \| 106 \| supported \|/);
   assert.match(md, /\| codex \| 10 \| 0 \| supported \|/);
-  // nothing read for this CLI: not recorded, and specifically not zero
-  assert.match(md, /\| antigravity \| not recorded \(not zero\) \| not recorded \(not zero\) \| detection-only \|/);
 });
 
 test("L8: an input that does not record the set-aside count says so, rather than printing zero", () => {

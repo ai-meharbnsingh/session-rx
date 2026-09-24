@@ -44,12 +44,9 @@
  *       perTool: Array<{cli: string, status: "read" | "detected-not-read" |
  *                        "not-installed", sessions: number|null,
  *                        problems: number|null, note: string|null}>
- *                                     // antigravity is detection-only: it is
- *                                     // ALWAYS "detected-not-read" with
- *                                     // problems: null, never a measured 0.
  *     }
  *     clis: Array<{
- *       cli:       string             // "claude" | "codex" | "cursor" | ...
+ *       cli:       string             // "claude" | "codex" | "cursor"
  *       sessions:  number | null      // null = count not recoverable (NOT zero)
  *       subagentSessions?: number | null
  *                                     // sub-agent sessions set aside for this
@@ -647,7 +644,7 @@ function renderRange(range) {
 }
 
 function renderClis(clis) {
-  const rows = asArray(clis);
+  const rows = asArray(clis).filter((row) => ["claude", "codex", "cursor"].includes(str(row?.cli)));
   const lines = ["## 2. CLIs detected", ""];
   if (rows.length === 0) {
     lines.push("No CLI was detected. That is a detection result, not a statement that no CLI is installed.");
@@ -745,7 +742,7 @@ function renderFindings(rules) {
   return lines;
 }
 
-function renderRuleCoverage(rules) {
+function renderRuleCoverage(rules, notApplicable = []) {
   const rows = asArray(rules);
   const lines = ["## 4. Rule coverage", ""];
   if (rows.length === 0) {
@@ -777,6 +774,15 @@ function renderRuleCoverage(rules) {
     for (const rule of unknowns) {
       const name = str(rule?.name).trim() || str(rule?.id).trim() || "unnamed rule";
       lines.push(`- \`${cell(rule?.id)}\` ${name}: unknown — ${cell(unknownReason(rule))}`);
+    }
+    lines.push("");
+  }
+  const excluded = asArray(notApplicable);
+  if (excluded.length > 0) {
+    lines.push("The following checks are excluded because the CLI log format cannot ever carry the evidence they require:");
+    lines.push("");
+    for (const item of excluded) {
+      lines.push(`- ${cell(item?.cli)}: ${cell(item?.name || item?.ruleId)} — ${cell(item?.reason)}`);
     }
     lines.push("");
   }
@@ -920,7 +926,7 @@ function assemble(data) {
     ...renderRange(data.range),
     ...renderClis(data.clis),
     ...renderFindings(data.rules),
-    ...renderRuleCoverage(data.rules),
+    ...renderRuleCoverage(data.rules, data.notApplicable),
     ...renderFixes(data.fixes),
     ...renderTrend(data.trend),
     "---",

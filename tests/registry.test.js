@@ -106,6 +106,10 @@ test("detectMany classifies each status into its own bucket", async () => {
   assert.deepEqual(result.absent.map((entry) => entry.id), ["no"]);
 });
 
+test("the collector registry exposes exactly claude, codex, and cursor", () => {
+  assert.deepEqual(collectorDefinitions.map(([id]) => id), ["claude", "codex", "cursor"]);
+});
+
 test("collectAll returns the same five keys over the real registry", async () => {
   const result = await collectAll({ limit: 1 });
   assert.deepEqual(
@@ -485,15 +489,15 @@ test("a reader that needs a built-in this Node lacks is NOT reported absent", as
 });
 
 test("a reader that throws while loading, and one that never landed its export, both say so", async () => {
-  const threw = await loadCollector(["antigravity", "Antigravity CLI", THROWING_READER, "AntigravityCollector"]);
+  const threw = await loadCollector(["cursor", "Cursor CLI", THROWING_READER, "CursorCollector"]);
   assert.equal(threw.detect().status, COULD_NOT_READ);
   assert.match(threw.detect().reason, /boom while loading/);
 
   // The file IS on disk: a half-landed reader is a broken reader, not an
   // unwritten one, and saying "absent" about it would be the same false claim.
-  const noExport = await loadCollector(["antigravity", "Antigravity CLI", NO_EXPORT_READER, "AntigravityCollector"]);
+  const noExport = await loadCollector(["cursor", "Cursor CLI", NO_EXPORT_READER, "CursorCollector"]);
   assert.equal(noExport.detect().status, COULD_NOT_READ);
-  assert.match(noExport.detect().reason, /exports no AntigravityCollector/);
+  assert.match(noExport.detect().reason, /exports no CursorCollector/);
 });
 
 test("a reader that could not be loaded refuses to collect rather than returning nothing", async () => {
@@ -540,19 +544,17 @@ test("one reader failing to load suppresses neither the readers that work nor th
     ["claude", "Claude Code", "./claude.js", "ClaudeCollector"],
     ["cursor", "Cursor CLI", MISSING_BUILTIN_READER, "CursorCollector"],
     ["codex", "Codex", "./codex.js", "CodexCollector"],
-    ["antigravity", "Antigravity CLI", MISSING_READER, "AntigravityCollector"],
   ].map(loadCollector));
 
   const result = await detectMany(found);
   const seen = [...result.supported, ...result.detectionOnly, ...result.absent, ...result.unreadable];
 
-  // All four slots survive, each classified once and on its own merits.
-  assert.deepEqual(seen.map((entry) => entry.id).sort(), ["antigravity", "claude", "codex", "cursor"]);
-  assert.equal(new Set(seen.map((entry) => entry.id)).size, 4);
+  // All three registered slots survive, each classified once and on its own merits.
+  assert.deepEqual(seen.map((entry) => entry.id).sort(), ["claude", "codex", "cursor"]);
+  assert.equal(new Set(seen.map((entry) => entry.id)).size, 3);
   assert.deepEqual(result.unreadable.map((entry) => entry.id), ["cursor"]);
   // Claude and Codex are real host probes, so their absent status depends on
-  // which AI CLIs happen to be installed; Antigravity is always absent because its reader is missing.
-  assert.ok(result.absent.some((entry) => entry.id === "antigravity"));
+  // which AI CLIs happen to be installed.
 
   // The real readers loaded: neither is a bare fallback slot, whatever this
   // machine has installed.

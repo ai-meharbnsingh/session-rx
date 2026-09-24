@@ -333,7 +333,19 @@ export function resolveWindow(modelId, options = {}) {
   // The table is consistent with what the session actually held: keep it, and
   // keep reporting it as the table reading it is.
   if (observedFloor === null || observedFloor <= table.tokens) {
-    return { tokens: table.tokens, source: table.source, observedFloor, promotion: null };
+    const result = { tokens: table.tokens, source: table.source, observedFloor, promotion: null };
+    // A plain model id can match more than one vendor tier. Keep the existing
+    // table number for compatibility, but mark it when the log cannot say
+    // which of the vendor's tiers applied.
+    const vendorTiers = entry?.vendor ? KNOWN_WINDOW_TIERS_BY_VENDOR[entry.vendor] ?? [] : [];
+    if (vendorTiers.some((tier) => tier > table.tokens)) {
+      Object.defineProperty(result, "ambiguous", { value: true, enumerable: false });
+      Object.defineProperty(result, "candidateTiers", {
+        value: Object.freeze([table.tokens, ...vendorTiers.filter((tier) => tier > table.tokens)]),
+        enumerable: false,
+      });
+    }
+    return result;
   }
 
   // observedFloor > table window: the table is WRONG for this session. Promote
@@ -420,6 +432,17 @@ export function normalizeTurn(fields = {}) {
 
 export function normalizeSession(fields = {}) {
   const window = fields.window ?? {};
+  const normalizedWindow = {
+    tokens: window.tokens ?? null,
+    source: window.source ?? "unknown",
+  };
+  if (window.ambiguous === true) Object.defineProperty(normalizedWindow, "ambiguous", { value: true, enumerable: false });
+  if (Array.isArray(window.candidateTiers)) {
+    Object.defineProperty(normalizedWindow, "candidateTiers", {
+      value: Object.freeze([...window.candidateTiers]),
+      enumerable: false,
+    });
+  }
   return {
     cli: fields.cli ?? null,
     support: fields.support ?? "supported",
@@ -427,10 +450,7 @@ export function normalizeSession(fields = {}) {
     project: fields.project ?? null,
     cwd: fields.cwd ?? null,
     model: fields.model ?? null,
-    window: {
-      tokens: window.tokens ?? null,
-      source: window.source ?? "unknown",
-    },
+    window: normalizedWindow,
     startedAt: fields.startedAt ?? null,
     endedAt: fields.endedAt ?? null,
     turns: Array.isArray(fields.turns) ? fields.turns.map(normalizeTurn) : [],

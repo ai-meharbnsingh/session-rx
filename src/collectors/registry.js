@@ -13,7 +13,6 @@ const definitions = [
   ["claude", "Claude Code", "./claude.js", "ClaudeCollector"],
   ["codex", "Codex", "./codex.js", "CodexCollector"],
   ["cursor", "Cursor CLI", "./cursor.js", "CursorCollector"],
-  ["antigravity", "Antigravity CLI", "./antigravity.js", "AntigravityCollector"],
 ];
 
 /** The registry-owned display names used by API annotations as well as detection. */

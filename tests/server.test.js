@@ -1328,7 +1328,11 @@ describe("BP-005.02 — /api/sessions is paginated", () => {
       assert.ok(res.json.sessions.length > 0, `${target} must return rows for this assertion to mean anything`);
       for (const session of res.json.sessions) {
         const rule = session.rules.find((candidate) => candidate.id === "subagent-concurrency");
-        assert.ok(rule, `session ${session.sessionId} must carry the subagent-concurrency rule`);
+        if (!rule) {
+          assert.notEqual(session.cli, "claude", `only structurally inapplicable non-Claude sessions may omit the rule: ${session.sessionId}`);
+          assert.ok(session.notApplicable?.some((candidate) => candidate.ruleId === "subagent-concurrency"));
+          continue;
+        }
         // Had pagination narrowed the COLLECTION limit instead of the
         // serialization slice, corpusComplete would flip false and this
         // MEASURED zero would become `unknown` across the whole corpus. That
