@@ -835,7 +835,7 @@ function jargonPayload() {
     collectors: [
       { cli: "codex", sessions: 1, support: "supported", note: SET_ASIDE_NOTE },
       { cli: "claude", sessions: 1, support: "supported", note: null },
-      { cli: "antigravity", sessions: 0, support: "detection-only", note: null },
+      { cli: "widget", sessions: 0, support: "detection-only", note: null },
     ],
     scan: { limitPerCollector: 250, defaulted: true, atLimit: true, note: SCAN_NOTE },
   });

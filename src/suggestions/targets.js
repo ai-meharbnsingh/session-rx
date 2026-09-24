@@ -76,16 +76,6 @@ export const TOOLS = Object.freeze({
       note: "Cursor CLI reads AGENTS.md and .cursor/rules/ at the project root.",
     },
   },
-  antigravity: {
-    id: "antigravity",
-    label: "Antigravity CLI",
-    global: {
-      kind: "file",
-      resolve: ({ home }) => path.join(homeOf(home), ".gemini", "GEMINI.md"),
-      display: () => "~/.gemini/GEMINI.md",
-    },
-    project: { kind: "file", display: () => "./AGENTS.md" },
-  },
 });
 
 export const TOOL_IDS = Object.freeze(Object.keys(TOOLS));

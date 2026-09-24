@@ -6,7 +6,7 @@
  * what those fixes used to append, unchanged. Each section is written as
  * guidance an AGENT reads and acts on, not phrased for any one CLI, so the
  * same body works whether the target file is Claude Code's CLAUDE.md,
- * Codex's AGENTS.md, Cursor's AGENTS.md, or Antigravity's GEMINI.md.
+ * Codex's AGENTS.md, or Cursor's AGENTS.md.
  *
  * `marker` is the stable, versioned HTML comment SessionRx looks for to tell
  * whether a section has already been added (the idempotence gate — see

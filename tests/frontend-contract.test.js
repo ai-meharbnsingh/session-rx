@@ -499,12 +499,12 @@ test("Overview counts installed supported and detection-only CLIs, ignoring abse
   await overviewPage.default(mount, overviewHealth({ collectors: [
     { cli: "Claude Code", support: "supported", installed: true },
     { cli: "Cursor", support: "detection-only", installed: true },
-    { cli: "Antigravity", support: "supported", installed: false },
+    { cli: "Widget", support: "supported", installed: false },
   ] }), { api: overviewApi });
   assert.match(mount.textContent, /2 CLIs detected/);
   assert.match(mount.textContent, /Claude Code/);
   assert.match(mount.textContent, /Cursor/);
-  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Antigravity/);
+  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Widget/);
   assert.equal(withClass(mount, "rx-chip").length, 2);
 });
 

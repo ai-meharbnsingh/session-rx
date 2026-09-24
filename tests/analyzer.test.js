@@ -1181,7 +1181,7 @@ function corpus() {
         },
       },
     ],
-    detectionOnly: [{ id: "antigravity", displayName: "Antigravity CLI", installed: true, paths: [], status: "detection-only" }],
+    detectionOnly: [{ id: "unknown-tool", displayName: "Unknown Tool", installed: true, paths: [], status: "detection-only" }],
     absent: [{ id: "widget", displayName: "Widget", installed: false, paths: [], status: "absent" }],
     diagnostics: [promotionDiagnostic("claude", contextHeavy.sessionId)],
   });
@@ -1190,8 +1190,8 @@ function corpus() {
 test("analyzeAll analyzes every supported session and reports every collector", () => {
   const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
   assert.equal(out.sessions.length, 5);
-  assert.deepEqual(out.collectors.map((entry) => entry.cli), ["claude", "codex", "cursor", "antigravity", "widget"]);
-  assert.equal(out.collectors.find((entry) => entry.cli === "antigravity").sessions, null, "a detection-only CLI has no session count, and null is not zero");
+  assert.deepEqual(out.collectors.map((entry) => entry.cli), ["claude", "codex", "cursor", "unknown-tool", "widget"]);
+  assert.equal(out.collectors.find((entry) => entry.cli === "unknown-tool").sessions, null, "a detection-only CLI has no session count, and null is not zero");
   assert.equal(out.collectors.find((entry) => entry.cli === "widget").support, "detection-only");
   assert.equal(out.collectors.find((entry) => entry.cli === "widget").installed, false);
 });
@@ -1203,10 +1203,10 @@ test("a detection-only collector reason reaches the health note unchanged", () =
 });
 
 test("collector support is identical whether the CLI is installed or absent", () => {
-  const cliSet = ["claude", "codex", "antigravity", "cursor", "widget"];
+  const cliSet = ["claude", "codex", "unknown-tool", "cursor", "widget"];
   const installed = analyzeAll({
     supported: [{ id: "claude", sessions: [contextHeavy] }],
-    detectionOnly: [{ id: "antigravity" }],
+    detectionOnly: [{ id: "unknown-tool" }],
     absent: [{ id: "codex" }, { id: "cursor" }, { id: "widget" }],
   });
 
@@ -1222,9 +1222,9 @@ test("collector support is identical whether the CLI is installed or absent", ()
     assert.equal(absentByCli.get(cli).support, installedByCli.get(cli).support, `${cli} support changed with installation state`);
   }
   assert.equal(installedByCli.get("claude").installed, true);
-  assert.equal(installedByCli.get("antigravity").installed, true);
+  assert.equal(installedByCli.get("unknown-tool").installed, true);
   for (const cli of cliSet) assert.equal(absentByCli.get(cli).installed, false, `${cli} absent state changed`);
-  assert.equal(absentByCli.get("antigravity").support, "detection-only");
+  assert.equal(absentByCli.get("unknown-tool").support, "detection-only");
   assert.equal(absentByCli.get("codex").support, "supported");
   assert.equal(absentByCli.get("cursor").support, "supported");
   assert.equal(absentByCli.get("widget").support, "detection-only");

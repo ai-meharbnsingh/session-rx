@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-24
+
+### Removed
+
+- **The Antigravity collector source file (`src/collectors/antigravity.js`) and its test file.** Antigravity was already dropped from the collector registry in 0.3.0; only the now-unreachable source remained. Both were archived, not deleted. The test count went 766 to 759, which is exactly the 7 tests in that archived file, so no other coverage was lost.
+- **Dead CSS in `public/css/style.css`: `.cli-icon` background rules for `data-cli="gemini"`, `"kimi"` and `"opencode"`.** Those three CLIs are no longer read, so no code path could ever emit those values.
+
+### Added
+
+- **A `.cli-icon` background colour for `data-cli="cursor"`**, which had no rule of its own and so rendered with no colour.
+
+### Documentation
+
+- **README rewritten to describe 0.3.x.** It still described the removed Preview/Apply workflow, four summary cards, five CLIs, and quoted a 51% unknown rate from a measurement taken before the unsupported CLIs were dropped.
+- **The verdict counts table now carries a measurement taken on 2026-09-24 against this build:** 481 sessions across three CLIs, 2,641 attempted verdicts — not-observed 2,256 (85.4%), observed 375 (14.2%), unknown 10 (0.4%) — plus 245 not-applicable rule-session pairs that sit outside the denominator.
+- **The Health page ASCII example was internally contradictory:** it marked "Long session that kept growing" as a problem on a four-minute session while printing 0.07 hours elapsed, though that rule requires more than four hours. Corrected, along with an invented rule name.
+- **Screenshots regenerated against the current UI;** the "Screenshots show an earlier version" disclaimer is gone.
+
 ## [0.3.0] - 2026-09-24
 
 ### Breaking

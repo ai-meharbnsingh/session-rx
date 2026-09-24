@@ -29,7 +29,7 @@ export const happyInput = {
     { cli: "codex", sessions: 14, support: "supported", note: null },
     { cli: "cursor", sessions: 8, support: "supported", note: "tool results carry no stable byte length; see DIS-006" },
     { cli: "widget", sessions: 2, support: "supported", note: "native context fraction only; absolute window left null per DIS-005" },
-    { cli: "antigravity", sessions: null, support: "detection-only", note: "installed, but Antigravity exposes no transcript; absence of sessions is not an absence of usage (DIS-007)" },
+    { cli: "widget", sessions: null, support: "detection-only", note: "installed, but the CLI exposes no transcript; absence of sessions is not an absence of usage (DIS-007)" },
   ],
   rules: [
     {
