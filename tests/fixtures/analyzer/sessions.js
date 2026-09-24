@@ -149,12 +149,12 @@ export const contextPromotedNoLadder = makeSession({
 
 /** 10 / (10 + 90) = 0.10. */
 export const cacheLow = makeSession({
-  turns: [{ ts: at(1), cacheRead: 10, cacheCreate: 90 }],
+  turns: Array.from({ length: 5 }, (_, index) => ({ ts: at(index + 1), cacheRead: 10, cacheCreate: 90 })),
 });
 
 /** 9,500 / 10,000 = 0.95. */
 export const cacheHigh = makeSession({
-  turns: [{ ts: at(1), cacheRead: 9500, cacheCreate: 500 }],
+  turns: Array.from({ length: 5 }, (_, index) => ({ ts: at(index + 1), cacheRead: 9500, cacheCreate: 500 })),
 });
 
 /** Reads recorded, creations never recorded: a rate here would be a fake 1.00. */

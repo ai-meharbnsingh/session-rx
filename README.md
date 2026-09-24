@@ -50,28 +50,20 @@ into a clean bill of health; unknown is never silently turned into a pass, the
 page states how many checks could not be measured, and the Report gives the
 reason for each. A blank check is not a healthy check.
 
-It is now the least common answer. Measured on one developer machine on
-2026-09-24, at the default scan — 481 sessions across three CLIs, 2,641
-verdicts. Unknown used to be common because checks that a CLI's log format can
-never support were counted as unknowns; those checks are now reported as
-not-applicable and leave the denominator entirely. Part of the drop also comes
-from removing the CLIs that recorded the least data.
+Unknown is uncommon but real, and it is concentrated almost entirely in one place: short sessions, where a cache hit rate cannot be formed from one or two turns. Measured on one developer machine on 2026-09-24, at the default scan — 481 sessions across three CLIs, 2,641 verdicts. This number went up in 0.3.3 on purpose, because the previous smaller number was partly built on sessions the tool could not actually assess. A rise in `unknown` here is the contract working, not a regression.
 
 | | count | share |
 |---|---|---|
-| `not-observed` — a genuine pass | 2,256 | 85.4% |
-| `observed` — a real problem found | 375 | 14.2% |
-| `unknown` — could not be measured | 10 | 0.4% |
+| `not-observed` — a genuine pass | 2,207 | 83.6% |
+| `observed` — a real problem found | 233 | 8.8% |
+| `unknown` — could not be measured | 201 | 7.6% |
 
 Note: 245 rule-session pairs were not applicable (the sub-agent concurrency
 check on Codex sessions, which Codex's log format cannot support), and were
 excluded from the denominator. The three rows above sum to 2,641 attempted verdicts.
 
 Your numbers will differ, because they depend entirely on which CLIs you use
-and what those CLIs record. Unknown is now rare on Claude Code and Codex, but
-a machine that uses Cursor heavily will see far more unknowns, because Cursor
-does not persist per-turn token counts on disk (see the Supported CLIs table).
-Printing `0` and a green tick instead of acknowledging what could not be
+and what those CLIs record. Of the 201 unknowns, 193 are from the cache-hit rule on short sessions. Printing `0` and a green tick instead of acknowledging what could not be
 measured is the thing this tool exists not to do.
 
 ### The Health page

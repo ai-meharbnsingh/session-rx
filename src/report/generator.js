@@ -7,7 +7,7 @@
  *
  * ============================================================================
  * INPUT CONTRACT — the wave that builds src/analyzer/{health,rules,trends}.js
- * MUST emit exactly this shape.  This module imports nothing from the analyzer;
+ * MUST emit exactly this shape.  This module imports no analyzer rule implementation;
  * the object below is the whole interface between them.
  * ============================================================================
  *
@@ -163,6 +163,8 @@
  *                                                  FVA-004)
  *   REPORT_FOOTER                -> string
  */
+
+import { CACHE_SAMPLE_MIN_TURNS } from "../constants.js";
 
 /** Verbatim, by operator specification. Must be the document's last line. */
 export const REPORT_FOOTER = "Diagnosed by SessionRx — built by Adaptive Mind";
@@ -448,8 +450,8 @@ function evidenceTable(values) {
           break;
         }
       }
-      if (count && count.value < 5) {
-        value += " — rate is not meaningful at fewer than 5 cache-read-carrying turns";
+      if (count && count.value < CACHE_SAMPLE_MIN_TURNS) {
+        value += ` — rate is not meaningful at fewer than ${CACHE_SAMPLE_MIN_TURNS} cache-read-carrying turns`;
       }
     }
     lines.push(`| ${cell(entry?.label)} | ${cell(value)} | ${cell(entry?.sessionId)} | ${cell(windowNote(entry?.windowSource))} |`);

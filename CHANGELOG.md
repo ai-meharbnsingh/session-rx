@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-09-24
+
+### Fixed
+
+- **The cache-hit rule fired on a sample too small to support a verdict.** The analyzer had guards for every missing counter but none for a counter that was present but tiny. A 1-turn session with 0 cache reads computed a 0.00 rate and fired `observed`, while the report printed "rate is not meaningful at fewer than 5 cache-read-carrying turns" beside it. The analyzer now returns `unknown` (reason code `cache-sample-too-small`) when a session carried fewer than 5 cache-read-carrying turns. Threshold lives in `src/constants.js` as `CACHE_SAMPLE_MIN_TURNS`, read by both the analyzer and the report generator so the two cannot drift.
+- **The measured effect on a 1,888-session scan:** cache-hit `observed` fell from 642 to 2. Of the 640 removed, 589 had exactly 1 turn. cache-hit `unknown` rose from 5 to 936 (931 `cache-sample-too-small`, 5 `no-cache-traffic`). Importantly, the guard removed false passes as well as false problems: 291 sessions that previously read as `not-observed` were also below the sample threshold and are now honestly `unknown`. A short session with a flattering rate was a false all-clear before.
+
+### Changed
+
+- **The README verdict table now carries new figures from the same scan:** not-observed 2,207 (83.6%), observed 233 (8.8%), unknown 201 (7.6%), with the same 245 not-applicable pairs and 2,641 total attempted verdicts. The note about unknown rose from 0.4% to 7.6% deliberately, because the smaller number was partly built on sessions the tool could not actually assess.
+
 ## [0.3.2] - 2026-09-24
 
 ### Documentation
