@@ -100,8 +100,8 @@ const MODEL_WINDOW_ENTRIES = [
     examples: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
   },
   {
-    // Model name, not CLI: Cursor and Antigravity sessions can run on Gemini
-    // models, so this entry stays even though the Gemini CLI reader is gone.
+    // Model name, not CLI: Cursor sessions can run on Gemini models, so this
+    // entry stays even though the Gemini CLI reader is gone.
     id: "gemini-family",
     vendor: "google",
     pattern: /gemini-(?:2|3)(?:[. -]?\d+)?/i,

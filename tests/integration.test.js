@@ -439,7 +439,7 @@ const FIXTURES = {
   "/api/collectors": {
     collectors: [
       { id: "claude", displayName: "Claude Code", installed: true, status: "supported", paths: ["~/.claude/projects"] },
-      { id: "antigravity", displayName: "Antigravity CLI", installed: false, status: "not detected", paths: [] },
+      { id: "widget", displayName: "Widget CLI", installed: false, status: "not detected", paths: [] },
     ],
     diagnostics: [],
   },

@@ -120,7 +120,7 @@ test("L8: sub-agent sessions set aside are printed next to the count that exclud
     clis: [
       { cli: "claude", sessions: 10, subagentSessions: 106, support: "supported", note: null },
       { cli: "codex", sessions: 10, subagentSessions: 0, support: "supported", note: null },
-      { cli: "antigravity", sessions: null, subagentSessions: null, support: "detection-only", note: "no transcript" },
+      { cli: "widget", sessions: null, subagentSessions: null, support: "detection-only", note: "no transcript" },
     ],
     rules: [],
     fixes: [],
@@ -856,7 +856,7 @@ const VOCABULARY_SESSIONS = Object.freeze([
   { cli: "claude", sessionId: "v-claude" },
   { cli: "codex", sessionId: "v-codex" },
   { cli: "cursor", sessionId: "v-cursor" },
-  { cli: "antigravity", sessionId: "v-antigravity" },
+  { cli: "widget", sessionId: "v-widget" },
   { cli: "some-other-cli", sessionId: "v-other" },
   // One per window shape: each is a different reason from `windowDenominator`.
   { cli: "claude", sessionId: "v-floor", model: "an-unlisted-model", window: { tokens: 91000, source: "observed-floor" }, turns: [{ ts: 1, context: { inputTokens: 80000 } }] },

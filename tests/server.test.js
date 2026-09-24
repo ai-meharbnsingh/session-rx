@@ -1574,8 +1574,6 @@ describe("GET /api/suggestions — THE SUGGESTION CONTRACT", () => {
     assert.equal(byKey.get("claude:project").targetLabel, "./CLAUDE.md");
     assert.equal(byKey.get("codex:global").targetLabel, "~/.codex/AGENTS.md");
     assert.equal(byKey.get("codex:project").targetLabel, "./AGENTS.md");
-    assert.equal(byKey.get("antigravity:global").targetLabel, "~/.gemini/GEMINI.md");
-    assert.equal(byKey.get("antigravity:project").targetLabel, "./AGENTS.md");
     assert.equal(byKey.get("cursor:project").targetLabel, "./AGENTS.md");
   });
 
@@ -1590,7 +1588,7 @@ describe("GET /api/suggestions — THE SUGGESTION CONTRACT", () => {
 
   it("project scope never claims already-added or not-added — it is always unknown", async () => {
     const running = await server();
-    for (const tool of ["claude", "codex", "antigravity", "cursor"]) {
+    for (const tool of ["claude", "codex", "cursor"]) {
       const res = await running.get(`/api/suggestions?id=claude-output-hygiene&tool=${tool}&scope=project`);
       const suggestion = res.json.suggestions[0];
       assert.equal(suggestion.status, "unknown", `${tool} project scope`);

@@ -88,10 +88,6 @@ test("detectAll splits the real registry into supported / detection-only / absen
     assert.equal(entry.diagnostic.cli, entry.id);
   }
 
-  // BP-002.07: Antigravity has no parser and can never be "supported".
-  for (const id of ["antigravity"]) {
-    assert.ok(!result.supported.some((entry) => entry.id === id), `${id} is never supported`);
-  }
 });
 
 test("detectMany classifies each status into its own bucket", async () => {

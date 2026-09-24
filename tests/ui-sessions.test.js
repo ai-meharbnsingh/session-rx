@@ -468,7 +468,7 @@ test("CLI facet options include CLIs absent from the first page, and selecting o
           { cli: "claude", count: 3 },
           { cli: "codex", count: 20 },
           { cli: "cursor", count: 4 },
-          { cli: "antigravity", count: 2 },
+          { cli: "widget", count: 2 },
           { cli: "widget", count: 1 },
         ],
       };
@@ -481,7 +481,7 @@ test("CLI facet options include CLIs absent from the first page, and selecting o
       { cli: "claude", count: 3 },
       { cli: "codex", count: 20 },
       { cli: "cursor", count: 4 },
-      { cli: "antigravity", count: 2 },
+      { cli: "widget", count: 2 },
       { cli: "widget", count: 1 },
     ],
   }, { api });
@@ -489,7 +489,7 @@ test("CLI facet options include CLIs absent from the first page, and selecting o
   const select = withTag(mount, "SELECT")[0];
   assert.match(select.textContent, /claude \(3\)/);
   assert.match(select.textContent, /cursor \(4\)/);
-  assert.match(select.textContent, /antigravity \(2\)/);
+  assert.match(select.textContent, /widget \(2\)/);
   assert.match(select.textContent, /widget \(1\)/);
   select.value = "claude";
   fire(select, "change");

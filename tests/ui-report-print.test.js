@@ -214,7 +214,7 @@ const REPORT = (over = {}) => ({
     perCheck: [{ id: "repeat-tool", name: "Ran the same command again and again", observed: 1, notObserved: 0, unknown: 0 }],
     perTool: [
       { cli: "claude", status: "read", sessions: 1, problems: 1, note: null },
-      { cli: "antigravity", status: "detected-not-read", sessions: null, problems: null, note: "detected, not read yet" },
+      { cli: "widget", status: "detected-not-read", sessions: null, problems: null, note: "detected, not read yet" },
     ],
   },
   ...over,
@@ -418,10 +418,10 @@ test("the Report page renders its observed/not-observed/unknown summary cards fr
   assert.match(text, /Passed/i);
   assert.match(text, /Could not be measured/i);
   assert.match(text, /not a pass/i, "the unknown card states plainly that it is not a pass");
-  // antigravity is detection-only: it must read as "detected, not read yet",
+  // widget is detection-only: it must read as "detected, not read yet",
   // never as a measured zero.
   assert.match(text, /detected, not read yet/i);
-  assert.ok(!/antigravity.{0,40}\b0\b.{0,15}problem/i.test(text), "antigravity must never render as 0 problems");
+  assert.ok(!/widget.{0,40}\b0\b.{0,15}problem/i.test(text), "widget must never render as 0 problems");
 });
 
 test("a report with no structured summary renders no summary cards, and no fabricated zero", () => {
