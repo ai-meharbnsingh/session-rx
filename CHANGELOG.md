@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+
+- **Apply and Undo are removed.** SessionRx no longer writes user files. The Preview/Apply/Undo workflow is gone. Each observed problem now gets a suggestion: a preview of the exact text to add and a ready-made request to paste into the user's own AI tool. Suggestions target the tool whose session showed the problem.
+
+### Removed
+
+- **Gemini CLI, Kimi, OpenCode, GitHub Copilot CLI, Grok and Amp are no longer read.** SessionRx now reads only Claude Code, Codex, and Cursor CLI. Antigravity CLI (the Gemini CLI successor) is detected but not parsed, pending confirmation of its on-disk format from real files.
+
 ## [0.2.2] - 2026-09-23
 
 ### Fixed
