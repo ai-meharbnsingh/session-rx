@@ -133,6 +133,22 @@ function download(markdown, filename) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Open the browser's own print dialog. No PDF library, no server round trip:
+ * `window.print()` is the same "Save as PDF" flow a reader would reach through
+ * the browser's own menu, wired to a button so they do not have to know it is
+ * there. `public/css/print.css` (`media="print"`) is what actually reshapes the
+ * page for it — this function only opens the dialog.
+ *
+ * `globalThis.print`, not `window.print`, so this file makes the same
+ * assumption about its runtime as the rest of the module (`globalThis.location`
+ * in filenameFor's caller, `globalThis` throughout app.js) and so a test can
+ * stub it without constructing a `window` global the DOM shim does not provide.
+ */
+function printReport() {
+  if (typeof globalThis.print === 'function') globalThis.print();
+}
+
 /** Copy to the clipboard, and say plainly when the browser refused. */
 async function copy(markdown) {
   try {
@@ -232,6 +248,16 @@ function draw() {
   copyButton.disabled = markdown === null || state.busy;
   copyButton.addEventListener('click', () => { copy(markdown ?? ''); });
   bar.append(copyButton);
+
+  const printButton = el('button', 'button', 'Print / Save as PDF');
+  printButton.type = 'button';
+  printButton.disabled = markdown === null || state.busy;
+  printButton.setAttribute(
+    'title',
+    'Opens this browser\'s own print dialog — choose "Save as PDF" there for a PDF file. Nothing is generated or sent anywhere.',
+  );
+  printButton.addEventListener('click', () => { printReport(); });
+  bar.append(printButton);
 
   bar.append(el('span', 'toolbar-spacer'));
   if (markdown !== null) bar.append(el('span', 'chart-sub', filenameFor(report)));

@@ -18,6 +18,11 @@
          no such string. No remote URL anywhere — GATE-OFFLINE. -->
     <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgBAMAAACBVGfHAAAAMFBMVEWhzv5xl8pEcKk8WH4gLUAWHy4UGSUSFyMSFyISFyERFiERFR8RFR4QFR8OERoLDRSqZf30AAABSElEQVR42mWSPUgDQRCF3+wtKDHhVmxMd14RsYqaTgujVhYiRBBBNKViEbGxFNKItW2qVCpYWapVDFpFAhEExTORYCJI2LMUsmdxPznNVLsfb+fN8JaOsssSftFshLc3WSoAnbsSNdPPFV9CqdUoZbqjIlA4h1OUuj1Br1plZtuhO3SdURUAlAe6grmHwcDaA4m0D7jb60yfMMKK8fr9XPiJ2pLdlT89VGDjAm0Pzno9BD7eNGGHFBbqmngxOpbl2tKxU4wb5Vxb4KoGDsTWHJnMz/MDicQwOJzkLhCdVhsXQIQ8W1Z4x6s/OjUWMXT5JB5oQcZEiwPNG7SLMKr8ms5r4IDaBjPi+9mZHZjuHKZpQGXo1DQBaCNLnwBAlQFdAj9fzF9KFaquoTPpkbwAoEmm6x4wAMC2+4PqizL3+D3WC7tRov/f4Rf8f2okPzA3ygAAAABJRU5ErkJggg==">
     <link rel="stylesheet" href="/css/style.css">
+    <!-- Print / Save-as-PDF only: `media="print"` means this stylesheet never
+         applies to the screen, only inside the browser's print pipeline that
+         `window.print()` opens (public/js/pages/report.js "Print / Save as
+         PDF" button). Local file, same as style.css — no CDN, no network. -->
+    <link rel="stylesheet" href="/css/print.css" media="print">
     <!-- Content-Security-Policy is served as a RESPONSE HEADER by src/server.js
          (default-src 'self'; script-src 'self'; connect-src 'self'). It is not
          repeated as a meta tag here on purpose: a meta policy would be
