@@ -37,6 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
+import { classifyRule } from "./analyzer/health.js";
 import { RULES } from "./analyzer/rules.js";
 import { dayKeysEndingAt, localDayKey } from "./analyzer/trends.js";
 import { buildSuggestions, listSuggestionIds, suggestionTitleFor, TOOL_IDS, toolLabel } from "./suggestions/index.js";
@@ -402,22 +403,6 @@ function ruleCatalog(sessions, analysis) {
     }
   }
   return catalog;
-}
-
-function isNotApplicable(session, ruleId, ruleApplicability) {
-  if (Array.isArray(session?.notApplicable) && session.notApplicable.some((entry) => entry?.ruleId === ruleId)) return true;
-  const cli = typeof session?.cli === "string" ? session.cli : "unknown";
-  return Array.isArray(ruleApplicability)
-    && ruleApplicability.some((entry) => entry?.cli === cli
-      && Array.isArray(entry?.notApplicable)
-      && entry.notApplicable.some((item) => item?.ruleId === ruleId));
-}
-
-function classifyRule(session, ruleId, ruleApplicability) {
-  if (isNotApplicable(session, ruleId, ruleApplicability)) return "notApplicable";
-  const rule = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
-  const status = rule?.evidence?.status;
-  return status === "observed" || status === "not-observed" ? status : "unknown";
 }
 
 function calculateWindowTotals(sessions, analysis) {

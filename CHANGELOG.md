@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Checks a CLI's log format cannot support are now excluded and explained.** They are no longer reported as "could not be measured" on every session of that CLI. On a real 500-session scan, unmeasured checks fell from 609 to 10.
-- **Trends no longer counted sessions outside the selected date window as unmeasurable.** Of the 20,055 items previously described as unable to be measured, 19,465 were simply outside the reader's selected window.
+- **Checks a CLI's log format cannot support are now excluded and explained.** They are no longer reported as "could not be measured" on every session of that CLI; the limitation is disclosed as not applicable to that CLI's log format.
+- **Trends no longer count sessions outside the selected date window as unmeasurable.** Only sessions inside the reader's selected window contribute to its measured and unmeasured trend counts.
 - **Sub-agent concurrency can now be answered by a bounded scan.** Claude records each parent's sub-agents under the parent, so a complete corpus scan is no longer required.
 - **Sessions with no transcript turns are no longer reported as five failed checks.**
 - **The Health page no longer crashes on load in a real browser.** It was calling `.find` on a NodeList.

@@ -72,6 +72,24 @@ function notApplicableFor(cli, rule) {
   };
 }
 
+/**
+ * Classify one rule for one analyzed session. Applicability belongs to the
+ * analyzer; server consumers must use this rather than re-deriving it.
+ */
+export function classifyRule(session, ruleId, ruleApplicability = []) {
+  const cli = typeof session?.cli === "string" ? session.cli : "unknown";
+  const sessionNotApplicable = Array.isArray(session?.notApplicable)
+    && session.notApplicable.some((entry) => entry?.ruleId === ruleId);
+  const publishedNotApplicable = Array.isArray(ruleApplicability)
+    && ruleApplicability.some((entry) => entry?.cli === cli
+      && Array.isArray(entry?.notApplicable)
+      && entry.notApplicable.some((entry) => entry?.ruleId === ruleId));
+  if (sessionNotApplicable || publishedNotApplicable) return "notApplicable";
+  const result = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+  const status = result?.evidence?.status;
+  return status === "observed" || status === "not-observed" ? status : "unknown";
+}
+
 /** Keys a collector may use for the parent-session linkage (BP-002.19). */
 const PARENT_KEYS = Object.freeze(["parentSessionId", "parentId", "parentID", "parent_id"]);
 
