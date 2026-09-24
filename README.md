@@ -79,22 +79,18 @@ measured is the thing this tool exists not to do.
 One card per session, one line per check, with the suggestion on its own line:
 
 ```
-CODEX  01a0bebe-3ce5-79b3-8130-132d288e…                  4m | 26 turns
-[████████████████░░░░░░░░░░░░░░░░]
-3/5 checks passed - 2 problems observed
-
-  ! Ran the same command again and again
-                         identical tool call + input + result, most
-                         repeated 7 times            [! PROBLEM FOUND]
-    → View suggestion and copy text for Codex
+CODEX  01a0d293-a25a-7722-b87e-2f96791e…                  1m | 12 turns
+[████████████████████████░░░░░░]
+4/5 checks passed - 1 problem observed
 
   ! Commands returned very long output
-                         largest single tool result: 184,220 characters  [! PROBLEM FOUND]
-    → View suggestion and copy text for Codex
+                         turns whose tool results totalled more than 10,240 bytes: 7  [! PROBLEM FOUND]
+    → Bound large tool output in the instructions file    View suggestion
 
-  ✓ Long session that kept growing   session elapsed: 0.07 hours       [✓ PASSED]
-  ✓ Conversation got too full     average per-turn context: 52,612 tokens       [✓ PASSED]
+  ✓ Long session that kept growing   session elapsed: 0.03 hours       [✓ PASSED]
+  ✓ Conversation got too full     average per-turn context: 52,718 tokens       [✓ PASSED]
   ✓ Re-read the same material instead of reusing it        cache hit rate: 100.0%  [✓ PASSED]
+  ✓ Ran the same command again and again        highest number of identical tool call + input + result occurrences: 1  [✓ PASSED]
 ```
 
 Each line has a `why` and an `evidence` disclosure. `why` gives the threshold

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-09-24
+
+### Documentation
+
+- **The Health page example in the README.** It quoted an evidence string the tool does not produce: "largest single tool result: 184,220 characters", where the real check reports "turns whose tool results totalled more than 10,240 bytes: 7". The block is now a verbatim transcript of one real Codex session, evidence strings included, rather than a composite written by hand.
+
 ## [0.3.1] - 2026-09-24
 
 ### Removed
