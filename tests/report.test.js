@@ -11,6 +11,7 @@ import { happyInput } from "./fixtures/report/happy.js";
 import { zeroFindingsInput, twoFindingsInput } from "./fixtures/report/sparse.js";
 import { secretsInput, SEEDED, SEEDED_VALUES } from "./fixtures/report/secrets.js";
 import { RULES, evaluateRule } from "../src/analyzer/rules.js";
+import { CACHE_SAMPLE_MIN_TURNS } from "../src/constants.js";
 
 const HEADING = /^(#{1,6}) (.+)$/;
 
@@ -87,8 +88,9 @@ test("cache-length annotation pairs each rate with the next count in its row gro
     }],
   });
 
-  assert.equal((md.match(/rate is not meaningful at fewer than 5 cache-read-carrying turns/g) ?? []).length, 1);
-  assert.match(md, /\| cache hit rate \| 0\.00 — rate is not meaningful at fewer than 5 cache-read-carrying turns \| session-a \|/);
+  const wording = `rate is not meaningful at fewer than ${CACHE_SAMPLE_MIN_TURNS} cache-read-carrying turns`;
+  assert.equal((md.match(new RegExp(wording, "g")) ?? []).length, 1);
+  assert.match(md, new RegExp(`\\| cache hit rate \\| 0\\.00 — ${wording} \\| session-a \\|`));
   assert.match(md, /\| cache hit rate \| 0\.20 \| session-b \|/);
 });
 

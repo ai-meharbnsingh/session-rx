@@ -52,6 +52,7 @@
 
 import { createHash } from "node:crypto";
 import { MODEL_WINDOWS_VERSION } from "../collectors/base.js";
+import { CACHE_SAMPLE_MIN_TURNS } from "../constants.js";
 
 /** The BP-003 evidence triad. Anything else is coerced to `unknown`. */
 export const EVIDENCE_STATUSES = Object.freeze(["observed", "not-observed", "unknown"]);
@@ -459,6 +460,8 @@ const cacheHit = {
         "This tool recorded how much prompt content was built fresh but never how much was read back from cache, so a reuse rate cannot be formed. Treating the missing reads as zero would flag this session on a number that was never recorded, so no rate is given.",
       "no-cache-traffic":
         "Both cache numbers were recorded for this session and both are zero on every turn, so there was no cache activity to rate at all. No cache traffic is not a good cache result and is not scored as one.",
+      "cache-sample-too-small":
+        "This session carried a cache-read count on fewer than 5 turns, so a hit rate over that small a sample is not meaningful. It is left unknown rather than treated as a pass.",
     },
   },
   evaluate(session) {
@@ -517,6 +520,13 @@ const cacheHit = {
       countValue("turns carrying a cache-read count", readTurns),
       countValue("turns carrying a cache-creation count", createTurns),
     ];
+    if (readTurns < CACHE_SAMPLE_MIN_TURNS) {
+      return unknown(
+        `${cli} carried a cache-read count on ${readTurns} turn${readTurns === 1 ? "" : "s"}, fewer than the ${CACHE_SAMPLE_MIN_TURNS} needed for a meaningful hit rate. A hit rate over fewer than ${CACHE_SAMPLE_MIN_TURNS} cache-read-carrying turns is not meaningful, so this is unknown and is NOT a pass.`,
+        values,
+        "cache-sample-too-small",
+      );
+    }
     const derivation =
       `cacheRead / (cacheRead + cacheCreate) summed over the session: ${readSum.toLocaleString("en-US")} / ${denominator.toLocaleString("en-US")}. ` +
       "Turns missing a counter contribute nothing to either side rather than contributing a zero.";

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 
 import { RULES, evaluateRule, EVIDENCE_STATUSES } from "../src/analyzer/rules.js";
+import { CACHE_SAMPLE_MIN_TURNS } from "../src/constants.js";
 import { analyzeSession, analyzeAll, buildReportInput } from "../src/analyzer/health.js";
 import { generateReport, generateReportDocument } from "../src/report/generator.js";
 import { annotateSuggestions } from "../src/server.js";
@@ -222,6 +223,7 @@ const UNMEASURED_BRANCHES = [
   ["cache-hit", "no-cache-creation-counter", cacheReadsOnly, {}],
   ["cache-hit", "no-cache-read-counter", cacheCreatesOnly, {}],
   ["cache-hit", "no-cache-traffic", cacheAllZero, {}],
+  ["cache-hit", "cache-sample-too-small", makeSession({ turns: [{ ts: at(1), cacheRead: 1, cacheCreate: 99 }] }), {}],
 
   ["repeat-tool", "no-turns", makeSession({ turns: [] }), {}],
   ["repeat-tool", "no-tool-calls-anywhere", noToolCalls, {}],
@@ -568,6 +570,34 @@ test("cache-hit: both counters present and zero is unknown, because 0/0 is not a
 
 test("cache-hit: no cache counters at all is unknown", () => {
   assertUnknownWithReason(verdict("cache-hit", contextHeavy), "neither a cache-read nor a cache-creation");
+});
+
+test("cache-hit: fewer than the minimum cache-read sample is unknown with evidence, not observed", () => {
+  for (const count of [1, CACHE_SAMPLE_MIN_TURNS - 1]) {
+    const result = verdict("cache-hit", makeSession({
+      turns: Array.from({ length: count }, (_, index) => ({ ts: at(index + 1), cacheRead: 0, cacheCreate: 100 })),
+    }));
+    assert.equal(result.evidence.status, "unknown");
+    assert.equal(result.evidence.reasonCode, "cache-sample-too-small");
+    assert.match(result.evidence.reason, new RegExp(`${count}.*not meaningful.*NOT a pass`, "i"));
+    assert.ok(result.evidence.values.some((value) => value.label === "cache hit rate"));
+  }
+});
+
+test("cache-hit: exactly the minimum sample is evaluated normally", () => {
+  const result = verdict("cache-hit", makeSession({
+    turns: Array.from({ length: CACHE_SAMPLE_MIN_TURNS }, (_, index) => ({ ts: at(index + 1), cacheRead: 0, cacheCreate: 100 })),
+  }));
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(result.evidence.reasonCode, null);
+});
+
+test("cache-hit: a genuinely low rate over many turns remains observed", () => {
+  const result = verdict("cache-hit", makeSession({
+    turns: Array.from({ length: 20 }, (_, index) => ({ ts: at(index + 1), cacheRead: 10, cacheCreate: 90 })),
+  }));
+  assert.equal(result.evidence.status, "observed");
+  assert.equal(valueOf(result, "cache hit rate"), 0.1);
 });
 
 // ===========================================================================
