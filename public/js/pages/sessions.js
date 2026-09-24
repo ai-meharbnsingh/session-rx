@@ -39,7 +39,7 @@
  */
 
 import { rangeQuery, registerPage, api as appApi } from '../app.js';
-import { openFixModal } from '../components/fix-modal.js';
+import { openSuggestionPanel } from '../components/suggestion-panel.js';
 import { dateText, duration, el as uiEl, healthNode, cliIcon, icon, ruleLabel, scoreParts, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
 import {
   callout,
@@ -69,6 +69,10 @@ function iconBadge(name) {
   const badge = el('span', 'rx-icon');
   badge.append(icon(name));
   return badge;
+}
+
+function sessionHealthNode(score, compact = false) {
+  return healthNode(score, compact);
 }
 
 /**
@@ -291,7 +295,7 @@ const COLUMNS = [
     value: (session) => (Number.isFinite(session?.score?.passed) ? session.score.passed : null),
     cell: (session) => {
       const td = el('td', 'num');
-      td.append(healthNode(session?.score, true));
+      td.append(sessionHealthNode(session?.score, true));
       return td;
     },
   },
@@ -319,10 +323,9 @@ export function findingCell(session) {
     }
     td.append(list);
   } else if (unknown > 0) {
-    const denominator = Number.isFinite(total) ? total : unknown;
     const list = el('span', 'finding-list');
-    const label = `${unknown} of ${denominator} checks could not be measured`;
-    const pill = el('span', 'finding-pill finding-unknown', label);
+    const label = 'No observed problem shown';
+    const pill = el('span', 'finding-pill finding-muted', label);
     pill.setAttribute('title', label);
     list.append(pill);
     td.append(list);
@@ -630,8 +633,8 @@ async function loadNextPage(api, redraw) {
     absorb(payload, false);
     state.error = null;
   } catch (error) {
-    // app.js's request helper has already turned a dead server or a stale CSRF
-    // nonce into a sentence a person can act on; it is shown verbatim.
+    // app.js's request helper has already turned a dead server into a
+    // sentence a person can act on; it is shown verbatim.
     state.error = error?.message || 'The next page of sessions could not be loaded.';
     state.requested.delete(offset);
   } finally {
@@ -839,6 +842,16 @@ function draw() {
     stack.append(el('p', 'empty-state', 'No session loaded so far matches the filters you picked.'));
   }
 
+  const unmeasured = all.reduce((total, session) => {
+    const excluded = new Set((Array.isArray(session?.notApplicable) ? session.notApplicable : [])
+      .map((entry) => entry?.ruleId));
+    return total + (Array.isArray(session?.rules) ? session.rules : [])
+      .filter((rule) => !excluded.has(rule?.id) && rule?.evidence?.status === 'unknown').length;
+  }, 0);
+  if (unmeasured > 0) {
+    stack.append(el('p', 'note unmeasured-page-note', `${unmeasured} check${unmeasured === 1 ? '' : 's'} could not be measured from the session logs; they were not treated as passes. This is NOT a pass — the check could not run here.`));
+  }
+
   const strip = pager(api, draw);
   if (strip) stack.append(strip);
   mount.append(stack);
@@ -950,13 +963,12 @@ function factRow(label, value, why) {
   return wrap;
 }
 
-/** Whether a rule's fix changes the settings of the CLI the session came from. */
+/** Whether SessionRx can offer a suggestion for the tool this session used. */
 function fixScopeChip(session, rule) {
-  if (rule?.fixCli && rule.fixCli === session?.cli) return el('span', 'rx-chip', 'Fix available for your CLI');
-  const target = rule?.fixCliName || rule?.fixCli || 'another CLI';
+  if (rule?.suggestionAvailable) return el('span', 'rx-chip', `Suggested change for ${rule.suggestionToolName || rule.suggestionTool || 'this CLI'}`);
   const source = session?.cliName || session?.cli || 'this CLI';
-  const chip = el('span', 'rx-chip rx-chip-muted', 'Recommendation only');
-  chip.title = `No automated fix exists for ${source}. The available fix changes ${target}'s settings instead.`;
+  const chip = el('span', 'rx-chip rx-chip-muted', 'No suggested change');
+  chip.title = `SessionRx has no suggested change for ${source}.`;
   return chip;
 }
 
@@ -976,13 +988,13 @@ function diagnosisTab(session, api) {
     row.append(el('span', 'rank', '!'), el('span', 'fix-title', ruleLabel(rule)), el('span', `severity ${level.toLowerCase()}`, level));
     box.append(row);
   });
-  if (unknown.length) box.append(el('p', 'not-measured', `${unknown.length} check${unknown.length === 1 ? '' : 's'} could not be measured. They are not passes.`));
   const suggested = observed.filter((rule) => rule.fix);
   if (suggested.length) {
-    box.append(el('h3', '', 'Suggested fixes'));
+    box.append(el('h3', '', 'Suggested changes'));
     suggested.forEach((rule) => {
-      const review = uiButton('Review fix');
-      review.addEventListener('click', () => openFixModal({ fixId: rule.fix, rule, session, api }));
+      const review = uiButton('View suggestion');
+      review.disabled = !rule.suggestionAvailable;
+      review.addEventListener('click', () => openSuggestionPanel({ id: rule.fix, toolId: rule.suggestionTool, title: rule.suggestionTitle || ruleLabel(rule), api }));
       const row = el('div', 'fix-row');
       row.append(el('span', 'fix-title', ruleLabel(rule)), fixScopeChip(session, rule), review);
       box.append(row);
@@ -995,7 +1007,7 @@ function diagnosisTab(session, api) {
 function evidenceTab(session, api, redraw) {
   const box = el('div', 'tab-panel');
   box.append(el('p', 'note', 'Every check, with the numbers it measured. Open a check to see its threshold and where the numbers came from.'));
-  box.append(verdictList(session, api, redraw));
+  box.append(verdictList(session, api, redraw, { includeUnknown: false }));
   return box;
 }
 
@@ -1013,7 +1025,7 @@ function metricsTab(session) {
     factRow('sub-agent sessions', subSessions === null ? null : groupInt(subSessions), 'the collector did not report sub-agent sessions'),
   );
   box.append(grid);
-  box.append(scoreNode(session?.score, session?.rules));
+  box.append(scoreNode(session?.score, session?.rules, { showUnknownCallout: false }));
   return box;
 }
 
@@ -1069,7 +1081,7 @@ function detailPanel(session, api, redraw) {
     identity,
     el('p', 'rx-label', dateText(session?.startedAt)),
     el('p', 'rx-label', `${duration(session?.startedAt, session?.endedAt)} · ${Number.isFinite(session?.turnCount) ? session.turnCount : 'not measured'} turns`),
-    healthNode(session?.score),
+    sessionHealthNode(session?.score),
   );
 
   const active = DETAIL_TABS.some((tab) => tab.key === state.detailTab) ? state.detailTab : 'diagnosis';

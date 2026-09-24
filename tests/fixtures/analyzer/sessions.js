@@ -85,7 +85,7 @@ export const contextCalm = makeSession({
 
 /** F-014: the window IS the session's own peak, so no fraction exists. */
 export const contextObservedFloor = makeSession({
-  cli: "opencode",
+  cli: "cursor",
   model: "nemotron-3.5-lightning-free",
   window: { tokens: 41344, source: "observed-floor" },
   turns: [
@@ -96,16 +96,16 @@ export const contextObservedFloor = makeSession({
 
 /** A trivial session that `observed-floor` would also report at 1.00. */
 export const contextObservedFloorTiny = makeSession({
-  cli: "opencode",
+  cli: "cursor",
   model: "nemotron-3.5-lightning-free",
   window: { tokens: 5000, source: "observed-floor" },
   turns: [{ ts: at(1), inputTokens: 5000 }],
 });
 
-/** DIS-005: Kimi — native fraction, no absolute window. 0.9 avg. */
-export const kimiNativeHigh = makeSession({
-  cli: "kimi",
-  model: "kimi-k2",
+/** DIS-005: a native-fraction-reporting CLI, no absolute window. 0.9 avg. */
+export const nativeFractionHigh = makeSession({
+  cli: "cursor",
+  model: "mystery-model-native-fraction",
   window: { tokens: null, source: "unknown" },
   turns: [
     { ts: at(1), fraction: 0.88, contextSource: "native" },
@@ -114,9 +114,9 @@ export const kimiNativeHigh = makeSession({
 });
 
 /** Same shape, healthy. */
-export const kimiNativeLow = makeSession({
-  cli: "kimi",
-  model: "kimi-k2",
+export const nativeFractionLow = makeSession({
+  cli: "cursor",
+  model: "mystery-model-native-fraction",
   window: { tokens: null, source: "unknown" },
   turns: [
     { ts: at(1), fraction: 0.11, contextSource: "native" },
@@ -125,16 +125,16 @@ export const kimiNativeLow = makeSession({
 });
 
 /** A native fraction above 1.0 is not rescaled and not clamped. */
-export const kimiFractionAboveOne = makeSession({
-  cli: "kimi",
+export const fractionAboveOne = makeSession({
+  cli: "cursor",
   window: { tokens: null, source: "unknown" },
   turns: [{ ts: at(1), fraction: 42, contextSource: "native" }],
 });
 
 /** No window, no fraction: nothing to divide. */
 export const contextNoWindowNoFraction = makeSession({
-  cli: "gemini",
-  model: "gemini-3.5-flash",
+  cli: "cursor",
+  model: "mystery-model-9",
   window: { tokens: null, source: "unknown" },
   turns: [{ ts: at(1), inputTokens: 9000 }],
 });
@@ -196,10 +196,10 @@ export const repeatPartialCoverage = makeSession({
   ],
 });
 
-/** DIS-006: Gemini proves the CALLS but records no result byte length. */
-export const geminiToolCallsNoBytes = makeSession({
-  cli: "gemini",
-  model: "gemini-3.5-flash",
+/** DIS-006: a CLI proves the CALLS but records no result byte length. */
+export const toolCallsNoResultBytes = makeSession({
+  cli: "codex",
+  model: "mystery-model-tool-calls",
   window: { tokens: 1000000, source: "model-map" },
   turns: [
     { ts: at(1), inputTokens: 5000, toolCalls: [call("read_file", { path: "a.txt" })], toolResultBytes: null },

@@ -1,6 +1,6 @@
 {
   "name": "session-rx",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Diagnose and fix inefficient AI coding sessions. Local, private, one command.",
   "type": "module",
   "bin": {
@@ -33,9 +33,8 @@
     "diagnostics",
     "claude-code",
     "codex",
-    "gemini-cli",
-    "kimi",
-    "opencode",
+    "cursor",
+    "antigravity",
     "local-first",
     "cli"
   ],

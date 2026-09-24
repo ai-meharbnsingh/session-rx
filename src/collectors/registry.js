@@ -1,10 +1,6 @@
 import { existsSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Collector, createDiagnostic } from "./base.js";
-
-const home = os.homedir();
 
 /**
  * The `status` of a slot whose reader is installed with SessionRx but could not
@@ -13,41 +9,16 @@ const home = os.homedir();
  */
 export const COULD_NOT_READ = "could-not-read";
 
-class ExistenceProbeCollector extends Collector {
-  constructor(id, displayName, candidates) {
-    super({ id, displayName, cli: id });
-    this.candidates = candidates;
-  }
-
-  detect() {
-    const paths = this.candidates.map((candidate) => path.join(home, candidate));
-    const installedPaths = paths.filter((candidate) => existsSync(candidate));
-    return {
-      installed: installedPaths.length > 0,
-      paths: installedPaths,
-      status: installedPaths.length > 0 ? "detection-only" : "absent",
-    };
-  }
-
-  async collect() { return []; }
-}
-
 const definitions = [
   ["claude", "Claude Code", "./claude.js", "ClaudeCollector"],
   ["codex", "Codex", "./codex.js", "CodexCollector"],
-  ["gemini", "Gemini CLI", "./gemini.js", "GeminiCollector"],
-  ["kimi", "Kimi", "./kimi.js", "KimiCollector"],
-  ["opencode", "OpenCode", "./opencode.js", "OpenCodeCollector"],
   ["cursor", "Cursor CLI", "./cursor.js", "CursorCollector"],
-  ["copilot", "GitHub Copilot CLI", "./copilot.js", "CopilotCollector"],
 ];
 
 /** The registry-owned display names used by API annotations as well as detection. */
 export const COLLECTOR_SPECS = definitions;
 
-const stubs = [
-  new ExistenceProbeCollector("grok-amp", "Grok / Amp", [".grok", ".config/grok", ".amp", ".config/amp", ".cache/amp"]),
-];
+const stubs = [];
 
 /** Why a reader that is shipped with SessionRx could not be loaded here. */
 function loadFailureReason(displayName, error) {
@@ -209,9 +180,10 @@ function mergeCollectorDiagnostics(target, collector) {
 }
 
 /**
- * Per-session facts BP-002's NormalizedSession has no slot for — OpenCode's
- * `session`-row totals and the DIS-004 `parent_id` linkage — published by a
- * collector on `sessionMeta`, keyed by session id.
+ * Per-session facts BP-002's NormalizedSession has no slot for — such as the
+ * DIS-004 parent-session linkage a collector like Claude's publishes for its
+ * sub-agent transcripts — published by a collector on `sessionMeta`, keyed by
+ * session id.
  *
  * Returned as a plain object because a `Map` JSON-serializes to `{}`, and the
  * response crosses the HTTP boundary. Joins to a session on `sessionId`.

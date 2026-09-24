@@ -1,0 +1,182 @@
+/* SessionRx print stylesheet — "Print / Save as PDF" (public/js/pages/report.js).
+ *
+ * Loaded with `media="print"` (public/index.html), so nothing here touches the
+ * screen appearance — it applies only inside the browser's print / Save-as-PDF
+ * pipeline, the same one `window.print()` opens. No new dependency, no
+ * network: this is a local stylesheet like every other file under public/css.
+ *
+ * WHAT THIS FILE IS FOR
+ * ----------------------
+ * The on-screen app is dark, chrome-heavy (tabs, the date-range picker, the
+ * detected-CLI sidebar, per-row action buttons) and built for a mouse. A
+ * printed page keeps none of that: it hides navigation and interactive
+ * controls, switches to black-on-white so it is legible and cheap to print,
+ * and lets long content (the Markdown report body, verdict tables, session
+ * cards) flow across pages without losing rows or being cut mid-card where a
+ * page break can reasonably be avoided.
+ *
+ * HONESTY CONTRACT ON PAPER
+ * -------------------------
+ * Nothing here recolours or hides an `unknown` verdict to look like a pass —
+ * `.verdict-unknown`, `.badge-unknown`, `.finding-pill-unknown`, `.not-measured`
+ * and `.score-seg-unknown` keep their dashed / hatched / italic treatment,
+ * redrawn for print contrast instead of removed. A grey-scale printer or a
+ * black-and-white photocopy must still be able to tell "not measured" apart
+ * from "measured, and clean" — the hatch and the dashed border are what do
+ * that when colour does not survive the trip through a printer driver.
+ */
+
+@media print {
+  /* ---------------------------------------------------------- chrome, gone */
+
+  /* Everything that exists to be clicked, or to navigate a screen that no
+   * longer exists once this is paper: the tab bar, the date-range picker, the
+   * "Local only" status pill, the detected-CLI sidebar, the loading/error
+   * status banner, every button, and every page's own action row. The Report
+   * page's toolbar (Generate / Download / Copy / Print buttons) is included —
+   * printing the "Print" button on the printed page would be circular. */
+  .topbar,
+  .cli-panel,
+  .range-coverage,
+  #app-status,
+  .toolbar,
+  .fix-actions,
+  .verdict-actions,
+  .verdict-offer .verdict-actions,
+  .summary-action,
+  .filter-panel,
+  .pager-buttons,
+  .sessions-pager,
+  .tab-strip,
+  button,
+  select,
+  .modal-root,
+  noscript {
+    display: none !important;
+  }
+
+  /* The single-column shell fits the page width; the sidebar column this
+   * grid otherwise reserves is not needed once `.cli-panel` is hidden. */
+  .workspace { display: block; }
+  .app-shell { max-width: none; padding: 0; margin: 0; }
+  .page-mount[hidden] { display: none !important; }
+
+  /* ------------------------------------------------------- black on white */
+
+  html, body {
+    background: #ffffff !important;
+    color: #0b0e13 !important;
+  }
+  body {
+    font-size: 12pt;
+    line-height: 1.45;
+  }
+  h1 { font-size: 20pt; }
+  h2 { font-size: 15pt; }
+  h3 { font-size: 13pt; }
+  h4 { font-size: 11pt; }
+
+  a { color: #0b0e13; text-decoration: underline; }
+
+  /* Cards, callouts and tables lose their dark glass panels and glow shadows —
+   * a border is legible on paper, a soft shadow is not, and a coloured card
+   * fill on a photocopier is a grey rectangle hiding the text inside it. */
+  .card, .rx-card, .callout, .verdict, .modal-facts, .diff, .diff-box,
+  .health-summary, .chart-container, .table-wrap,
+  .report-summary, .summary-metric-card {
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: 1px solid #999999 !important;
+  }
+  .card-head, .card-foot { border-color: #cccccc !important; background: #ffffff !important; }
+
+  /* Text tokens: everything that was a light grey/blue on a dark surface
+   * becomes a dark grey on white, so nothing prints as a near-invisible pale
+   * mark on a bright page. */
+  .muted, .subtle, .note, .meta-label, .chart-sub, .diff-caption,
+  .verdict-rule, .verdict-toggle, .callout-title {
+    color: #333333 !important;
+  }
+
+  /* --------------------------------------------- the honesty contract, on
+   * paper: unknown/not-measured stays visually distinct from pass/fail by
+   * shape (hatch + dashed border + italic), not only by a colour a printer
+   * may not reproduce. */
+  .not-measured, .lower-bound, .verdict-unknown .verdict-name,
+  .score-unknown-callout, .verdict-reason {
+    color: #333333 !important;
+    font-style: italic;
+  }
+  .badge-unknown, .verdict-unknown, .finding-pill-unknown, .health-pill.health-unknown,
+  .score-seg-unknown, .heatmap-cell.is-null, .summary-metric-unknown {
+    background-image: repeating-linear-gradient(135deg, #00000022 0 4px, transparent 4px 8px) !important;
+    background-color: #ffffff !important;
+    border-style: dashed !important;
+    border-color: #555555 !important;
+  }
+  .verdict-pass, .badge-ok, .badge-pass { border-left-color: #2f7d5c !important; }
+  .verdict-warn, .badge-warn { border-left-color: #8a6100 !important; }
+  .verdict-critical, .badge-critical, .badge-crit { border-left-color: #a4293a !important; }
+
+  /* ---------------------------------------------------- keep content whole
+   *
+   * `break-inside: avoid` is a request, not a guarantee — a card taller than
+   * one page still splits, because there is nowhere else to put it. Applied
+   * to the unit a reader actually wants kept together: one card, one table
+   * row, one verdict, one session card — not the whole report, which must be
+   * free to span pages or nothing would print past page one. */
+  .card, .rx-card, .verdict, .health-card, .callout, tr, .modal-facts,
+  .chart-container, .summary-card, .summary-metric-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .report-summary-stats { display: flex; flex-wrap: wrap; gap: 8pt; }
+  h1, h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
+
+  /* ------------------------------------------- collapsed disclosure, opened
+   *
+   * `.verdict-why` (a rule's evidence fold on the Health page) and any other
+   * `<details>` default to closed on screen. A printed page cannot be
+   * clicked open, so it is forced open here — this only changes what renders
+   * on paper; `[open]` on screen is untouched, and JavaScript is not needed
+   * for it to take effect. Chrome and Firefox both render a closed
+   * `<details>`'s content once its `display` is overridden this way. */
+  details:not([open]) { }
+  details:not([open]) > *:not(summary) {
+    display: block !important;
+  }
+  details > summary {
+    /* The disclosure triangle / "expand" affordance is meaningless once the
+     * content is already shown below it. */
+    list-style: none;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::marker { display: none; content: ""; }
+  .verdict-toggle { display: none !important; }
+
+  /* --------------------------------------------------- the report's own
+   * preformatted Markdown source: it is plain text at whatever width the
+   * generator produced it, so without wrapping a long line runs off the
+   * right edge of the page and is lost rather than merely ugly. */
+  pre, .diff, .diff-box, code {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere !important;
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* Sticky table headers and sticky filter panels have no meaning on a page
+   * that does not scroll, and a `position: sticky` element can otherwise
+   * repeat itself oddly across a print engine's page boundaries. */
+  th, .filter-panel, .detail-panel { position: static !important; }
+
+  /* Long horizontally-scrolled tables: let them wrap and shrink instead of
+   * being clipped to the screen's viewport width, which does not exist here. */
+  .table-wrap, .rx-table-wrap, .heatmap-scroll { overflow: visible !important; }
+
+  /* A manager reading a printout has no way to open a modal in the first
+   * place, but if one was open at the moment of printing it must not cover
+   * the page — already hidden above via `.modal-root`, restated here for
+   * `@page` engines that ignore `display: none` on a fixed-position ancestor. */
+  .modal-root { position: static !important; }
+}

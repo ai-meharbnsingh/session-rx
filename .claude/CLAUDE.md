@@ -14,20 +14,21 @@ Every health-rule verdict is exactly one of: `observed` | `not-observed` | `unkn
 
 A new rule that cannot produce `unknown` honestly is not mergeable.
 
-## THE FIX CONTRACT
+## THE SUGGESTION CONTRACT
 
-Every fix implements `preview()` / `apply()` / `undo()` / `check()`.
+SessionRx never writes a user's files. Every observed finding that names a fix produces a SUGGESTION instead: a preview of the exact text to add, and a ready-made request the user copies into their own AI coding tool, which makes the change itself.
 
 | Gate | Rule |
 |---|---|
-| Preview output | must equal what `apply()` writes, byte-for-byte |
-| Backup | before any write, copies target file to `~/.session-rx/undo/<timestamp>/` |
-| Idempotence | fixes are idempotent; `check()` reads a stable marker and does not re-offer if already applied |
-| Append-only config | never overwrite or reformat existing user content (sections only); never remove an existing key from JSON files |
+| No writes | a suggestion never writes any file — not the target, not a backup, not state |
+| Preview | is exactly the text the request asks the target tool to add, byte-for-byte |
+| Append-only request | the request tells the tool to add a section or a key without changing or removing anything already there |
+| Idempotence | the marker (or, for a settings key, the key/value) is the idempotence gate: a resolvable target already carrying it is reported `already-added`, never re-offered |
+| Own tool | a suggestion targets the SAME tool whose session showed the problem — a Codex finding gets a Codex-targeted suggestion, never always Claude |
 
 ## READ-ONLY BY DEFAULT
 
-Collectors stream user log files with `createReadStream` — never opened for writing. The OpenCode SQLite database is opened through a `file:<path>?mode=ro` URI, so its database file is never written; reading may advance the mtime of the WAL index sidecar file but never alters its content. The only writes to user files or settings are inside a fix's `apply()`, after an explicit user click.
+Collectors stream user log files with `createReadStream` — never opened for writing. The Cursor CLI SQLite database is opened through a `file:<path>?mode=ro` URI, so its database file is never written; reading may advance the mtime of the WAL index sidecar file but never alters its content. SessionRx never writes a user's files at all. The only thing it ever deletes is its own leftover data under `~/.session-rx/` (backups an earlier version made), and only via `session-rx clean`, on an explicit `--yes`.
 
 ## NO NETWORK
 
@@ -52,11 +53,12 @@ Never invent a log format. Confirm the real on-disk shape first by examining act
 | Directory | Responsibility |
 |---|---|
 | `src/analyzer/` | Health rules, verdict logic, trend analysis |
-| `src/collectors/` | CLI log parsers (Claude Code, Codex, Gemini, Kimi, OpenCode, etc.) |
-| `src/fixes/` | User-facing fixes (config rewrites, settings changes) |
+| `src/collectors/` | CLI log parsers (Claude Code, Codex, Cursor) and detection for Antigravity |
+| `src/suggestions/` | Suggestion definitions, tool targets, and request/preview generation |
+| `src/clean.js` | `session-rx clean` — deletes only SessionRx's own leftover data |
 | `src/report/` | Markdown report generation + secret redaction |
-| `public/js/pages/` | Page modules (health, report, sessions, trends) |
-| `public/js/components/` | UI components (chart, fix-modal, etc.) |
+| `public/js/pages/` | Page modules (health, report, sessions, trends, fixes/Suggestions) |
+| `public/js/components/` | UI components (chart, suggestion-panel, etc.) |
 | `public/css/` | Stylesheets |
 | `public/vendor/` | Vendored third-party libraries (Chart.js) |
 | `tests/` | Test suites (parallel structure matching src/) |

@@ -31,7 +31,7 @@
  *   BP-002.14          an `observed-promoted` window whose `promotion.ladder`
  *                      is `none` has the observed floor as its denominator, so
  *                      it falls under BP-002.18 too.
- *   DIS-005            `window.tokens` null (Kimi) ⇒ use the CLI's own native
+ *   DIS-005            `window.tokens` null (a native-fraction-reporting CLI) ⇒ use the CLI's own native
  *                      fraction if it reported one, else unknown.  Never invent
  *                      absolute tokens from a fraction.
  *   DIS-003            no recoverable tool RESULT signature ⇒ unknown.  Never
@@ -219,6 +219,23 @@ function windowDenominator(session, ctx) {
   const tokens = num(window.tokens);
   const promotionLadder = str(ctx?.promotion?.ladder) || null;
 
+  if (window.ambiguous === true) {
+    const candidates = Array.isArray(window.candidateTiers) && window.candidateTiers.length
+      ? window.candidateTiers
+      : [tokens].filter((value) => value !== null);
+    return {
+      usable: true,
+      ambiguous: true,
+      source,
+      tokens,
+      candidates,
+      code: "window-tier-ambiguous",
+      reason:
+        `the log identifies a model-table window of ${tokens === null ? "unknown" : tokens.toLocaleString("en-US")} tokens, ` +
+        `but this model's vendor also ships candidate tier${candidates.length === 2 ? "" : "s"} ${candidates.map((tier) => tier.toLocaleString("en-US")).join(" and ")} and the log does not record which tier applied.`,
+    };
+  }
+
   if (source === "observed-floor") {
     return {
       usable: false,
@@ -265,7 +282,7 @@ function windowDenominator(session, ctx) {
 
 const contextPressure = {
   id: "context-pressure",
-  name: "Context pressure",
+  name: "Conversation got too full",
   description:
     "The session's average per-turn context, as a share of the window it actually had. High average context means every later turn is paying to carry the whole history.",
   threshold: {
@@ -284,9 +301,9 @@ const contextPressure = {
   // `magnitude` — never a number invented on the client.
   plain: {
     problem:
-      "Your AI's context has been averaging {pct} of its available window in this session. When context runs this high, older parts of the conversation are more likely to get pushed out, summarized, or dropped before they should be.",
+      "During this conversation, the AI has been carrying an average of {pct} of everything it can hold at once — its memory limit, measured in tokens (chunks of text the AI reads). When it runs this full, older parts of the conversation are more likely to get pushed out, shortened, or dropped before they should be.",
     why:
-      "This is a warning about headroom, not proof that anything went wrong — a big task can legitimately use a lot of context. It flags sessions where compacting the conversation, or splitting the task into smaller pieces, would likely help.",
+      "This is a warning about how much room is left, not proof that anything went wrong — a big task can legitimately use a lot of that memory. It flags conversations where summarising what has been discussed so far, or splitting the task into smaller pieces, would likely help.",
     // One sentence per CAUSE, because this rule goes unmeasured for several
     // different reasons and a single sentence would be false for the others.
     // The renderer picks by `evidence.reasonCode` and falls back to `default`.
@@ -326,7 +343,7 @@ const contextPressure = {
 
     const denominator = windowDenominator(session, ctx);
 
-    // --- absolute-window path (Claude, Codex, OpenCode with a real tier) ----
+    // --- absolute-window path (Claude, Codex, Cursor with a real tier) ------
     if (denominator.usable) {
       if (!tokenReadings.length) {
         return unknown(
@@ -350,12 +367,19 @@ const contextPressure = {
       const derivation =
         `mean and max of per-turn context.inputTokens over ${tokenReadings.length} of ${turns.length} turns, divided by the window resolved for this session ` +
         `(${denominator.tokens.toLocaleString("en-US")} tokens, source "${denominator.source}"). Turns with no context reading are excluded from the mean rather than counted as zero.`;
+      if (denominator.ambiguous && avgFraction >= this.threshold.value) {
+        return unknown(
+          `${denominator.reason} The measured average is ${Math.round(avg).toLocaleString("en-US")} tokens (${round(avgFraction)} of the smallest candidate window); reporting a problem would depend on an unrecorded tier.`,
+          values,
+          denominator.code,
+        );
+      }
       return avgFraction > this.threshold.value
         ? observed(values, derivation, avgFraction)
         : notObserved(values, derivation, avgFraction);
     }
 
-    // --- native-fraction path (DIS-005: Kimi reports a fraction, no tokens) -
+    // --- native-fraction path (DIS-005: a CLI reports a fraction, no tokens) -
     if (nativeFractions.length) {
       const avg = mean(nativeFractions);
       const peak = Math.max(...nativeFractions);
@@ -405,7 +429,7 @@ const contextPressure = {
 
 const cacheHit = {
   id: "cache-hit",
-  name: "Low cache hit",
+  name: "Re-read the same material instead of reusing it",
   description:
     "How much of the cacheable prompt prefix was READ back from cache rather than re-created. A low rate means the session keeps paying to rebuild a prefix it already had.",
   threshold: {
@@ -418,9 +442,9 @@ const cacheHit = {
   fix: "claude-output-hygiene",
   plain: {
     problem:
-      "About {pct} of this session's reusable prompt content had to be rebuilt from scratch instead of being read back from cache.",
+      "About {pct} of the material the AI could have reused from earlier in this conversation had to be rebuilt from scratch instead of being reused. Reused material is cheaper and faster than rebuilding it.",
     why:
-      "A low cache hit rate usually means the reusable part of the prompt — system instructions, tool descriptions, file contents — kept changing between calls, or caching could not take advantage of a stable prefix. It is not a sign that the task itself was done wrong.",
+      "This usually means the reusable part of what is sent to the AI — instructions, command descriptions, file contents — kept changing between requests, so it could not be reused. It is not a sign that the task itself was done wrong.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -508,7 +532,7 @@ const cacheHit = {
 
 const repeatTool = {
   id: "repeat-tool",
-  name: "Repeated tool work",
+  name: "Ran the same command again and again",
   description:
     "The same tool, called with the same input, returning a result of the same size, five or more times in one session — the session paying again for an answer that shows no sign of having changed.",
   threshold: {
@@ -522,9 +546,9 @@ const repeatTool = {
   fix: "claude-batch-commands",
   plain: {
     problem:
-      "Your AI made the same tool call — same tool, same input, and a result of the same size — {count} times in this session.",
+      "Your AI ran the same command — same command, same input, and an answer of the same size — {count} times in this session.",
     why:
-      "This may indicate wasted work, but repeated calls are not always unnecessary — a command can legitimately return the same answer more than once. This is a DETECTED REPETITION, not CONFIRMED WASTE: it is worth checking whether anything should have changed between those calls before assuming time was lost.",
+      "This may indicate wasted work, but repeated commands are not always unnecessary — a command can legitimately return the same answer more than once. This is a DETECTED REPETITION, not CONFIRMED WASTE: it is worth checking whether anything should have changed between those commands before assuming time was lost.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -545,25 +569,29 @@ const repeatTool = {
     const sessionId = str(session?.sessionId) || null;
     const cli = str(session?.cli) || "this CLI";
 
-    // A result signature is only attributable to ONE call: `toolResultBytes`
-    // is recorded per TURN, so a turn making two calls cannot say which of
-    // them produced those bytes.  Attributing it anyway would invent the
-    // pairing, so those calls are counted as UNMEASURED, not as non-repeats.
+    // Claude publishes result lengths by tool id. Prefer that per-call evidence
+    // when present; the scalar remains the compatibility path for collectors
+    // whose normalized format only records one total per turn.
     let totalCalls = 0;
     let attributableCalls = 0;
     const groups = new Map();
     for (const turn of turns) {
       const calls = Array.isArray(turn?.toolCalls) ? turn.toolCalls : [];
       totalCalls += calls.length;
-      const bytes = num(turn?.toolResultBytes);
-      if (calls.length !== 1 || bytes === null) continue;
-      const call = calls[0];
-      const name = str(call?.name).trim().toLowerCase() || "(unnamed tool)";
-      const key = `${name}|${signature(call?.input ?? null)}|${bytes}`;
-      attributableCalls += 1;
-      const existing = groups.get(key);
-      if (existing) existing.count += 1;
-      else groups.set(key, { count: 1, name, bytes });
+      const perCall = Array.isArray(turn?.toolResultBytesByCall) && turn.toolResultBytesByCall.length === calls.length
+        ? turn.toolResultBytesByCall
+        : calls.length === 1 ? [turn?.toolResultBytes] : null;
+      if (!perCall) continue;
+      calls.forEach((call, index) => {
+        const bytes = num(perCall[index]);
+        if (bytes === null) return;
+        const name = str(call?.name).trim().toLowerCase() || "(unnamed tool)";
+        const key = `${name}|${signature(call?.input ?? null)}|${bytes}`;
+        attributableCalls += 1;
+        const existing = groups.get(key);
+        if (existing) existing.count += 1;
+        else groups.set(key, { count: 1, name, bytes });
+      });
     }
 
     if (totalCalls === 0) {
@@ -604,7 +632,7 @@ const repeatTool = {
     }
     if (attributableCalls < totalCalls) {
       return unknown(
-        `no group of identical tool call + input + result reached ${this.threshold.value} among the ${attributableCalls} of ${totalCalls} calls whose result could be attributed to a single call (the highest was ${worst.count}). The remaining ${totalCalls - attributableCalls} call${totalCalls - attributableCalls === 1 ? "" : "s"} shared a turn with another call, so their results cannot be separated — and unmeasured calls are exactly where a repeat would hide, so this is not reported as a clean result.`,
+        `no group of identical tool call + input + result reached ${this.threshold.value} among the ${attributableCalls} of ${totalCalls} calls whose result could be attributed to a single call (the highest was ${worst.count}). The remaining ${totalCalls - attributableCalls} call${totalCalls - attributableCalls === 1 ? "" : "s"} have no recorded result signature, so their results cannot be separated or checked — and unmeasured calls are exactly where a repeat would hide, so this is not reported as a clean result.`,
         values,
         "partial-result-coverage",
       );
@@ -619,7 +647,7 @@ const repeatTool = {
 
 const largeToolResult = {
   id: "large-tool-result",
-  name: "Large tool results",
+  name: "Commands returned very long output",
   description:
     "Tool results large enough that they dominate the context they land in, happening often enough in one session to be a habit rather than one necessary answer.",
   threshold: {
@@ -632,9 +660,9 @@ const largeToolResult = {
   fix: "claude-output-hygiene",
   plain: {
     problem:
-      "This session pulled in an unusually large tool result {count} separate times, each one big enough on its own to crowd out other context.",
+      "This session pulled in an unusually long command result {count} separate times, each one big enough on its own to crowd out the room left for everything else the AI needs to remember.",
     why:
-      "One large result answering one real question is normal. Several large results in one session usually means a whole file or a whole log was read in rather than just the part that was needed.",
+      "One long result answering one real question is normal. Several long results in one session usually means a whole file or a whole log was read in rather than just the part that was needed.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -754,7 +782,7 @@ function theilSenSlope(points, cap = 300) {
 
 const longRisingContext = {
   id: "long-rising-context",
-  name: "Long rising context",
+  name: "Long session that kept growing",
   description:
     "A session that has run for hours AND whose context is still trending upward — it is not compacting, it is accumulating.",
   threshold: {
@@ -767,9 +795,9 @@ const longRisingContext = {
   fix: "claude-compact-contract",
   plain: {
     problem:
-      "This session has been running for more than four hours, and its context size keeps climbing rather than levelling off or shrinking.",
+      "This conversation has been running for more than four hours, and the amount it is carrying — tokens, the chunks of text the AI reads — keeps climbing rather than levelling off or shrinking.",
     why:
-      "A long session is fine by itself if it periodically compacts its context. This only fires when BOTH the length and the upward trend hold together — a session that runs long but stays flat is not flagged, and a session that spikes briefly and then compacts is not flagged either.",
+      "A long conversation is fine by itself if it periodically summarises what has been discussed so far. This only fires when BOTH the length and the upward trend hold together — a conversation that runs long but stays flat is not flagged, and one that spikes briefly and then gets summarised is not flagged either.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -818,6 +846,23 @@ const longRisingContext = {
         `this session carries no usable elapsed time: startedAt is ${session?.startedAt === undefined ? "absent" : JSON.stringify(session?.startedAt ?? null)}, endedAt is ${JSON.stringify(session?.endedAt ?? null)}, and ${stamps.length} of ${turns.length} turns carry a timestamp — fewer than the two needed to span an interval. Duration is half of this rule, so this rule cannot be decided either way.`,
         points.length ? [countValue("context observations available", points.length)] : [],
         "no-elapsed-time",
+      );
+    }
+    // Once the elapsed-time precondition is known to be too short, the rule
+    // is settled even if there are too few points to calculate a slope. A
+    // short session cannot satisfy the conjunction; it is not an evidence gap.
+    if (elapsedHours <= hoursNeeded) {
+      const shortSlope = points.length >= 2 && points[points.length - 1].x !== points[0].x
+        ? wholeRate(((points[points.length - 1].y - points[0].y) / (points[points.length - 1].x - points[0].x)) * HOUR_MS)
+        : null;
+      return notObserved(
+        [
+          { label: "session elapsed", value: round(elapsedHours, 2), unit: "hours", sessionId },
+          { label: "context trend", value: shortSlope, unit: "tokens per hour", sessionId },
+          countValue("context observations available", points.length),
+        ],
+        `elapsed time is ${round(elapsedHours, 2)} hours, at or below the more-than-${hoursNeeded}-hour precondition, so this rule is not met regardless of the context trend.`,
+        0,
       );
     }
     if (points.length < minimumPoints) {
@@ -913,6 +958,7 @@ function scanWidthClause(ctx) {
  */
 function scanWidthCode(ctx) {
   const meta = ctx?.sessionMeta;
+  if (meta?.subagentReadError) return "subagent-reading-partial";
   const ids = meta && typeof meta === "object" ? meta.subagentSessionIds : undefined;
   if (ids === null) return "subagent-reading-off";
   if (ctx?.corpusComplete !== true) return "scan-bounded";
@@ -923,11 +969,11 @@ function scanWidthCode(ctx) {
  * Why this CLI cannot establish sub-agent intervals for this session.
  *
  * Each reason names the specific missing thing, because "unknown" without a
- * reason is indistinguishable from a shrug.  Claude, Kimi and OpenCode all DO
- * read sub-agent evidence now (BP-003.07 - BP-003.09), so for them the missing
- * thing is never the parser: it is that no sub-agent was collected for THIS
- * session inside the scanned window, which is `scanWidthClause` above.  Codex
- * and Gemini publish no such evidence at all, which is structural (DIS-004).
+ * reason is indistinguishable from a shrug.  Claude DOES read sub-agent
+ * evidence (BP-003.07), so for it the missing thing is never the parser: it is
+ * that no sub-agent was collected for THIS session inside the scanned window,
+ * which is `scanWidthClause` above.  Codex publishes no such evidence at all,
+ * which is structural (DIS-004).
  *
  * These strings are the product's honesty surface, so a claim here that has
  * gone stale is a defect: it sends a reader to fix something already fixed.
@@ -937,26 +983,16 @@ function subagentReason(session, ctx) {
   const sidechainTurns = ctx?.sidechainTurns ?? 0;
   switch (cli) {
     case "claude":
+      if (ctx?.sessionMeta?.subagentReadError) {
+        return `Claude's sub-agent records could not be read completely: ${ctx.sessionMeta.subagentReadError}. A partial child list is not evidence that no sub-agent ran, so concurrency is unknown until the unreadable records are read.`;
+      }
       return (
         "Claude's sub-agent transcripts ARE read: `src/collectors/claude.js` reads `<project-slug>/<session-id>/subagents/agent-*.jsonl` and turns each one it collects into a child session carrying its own start and end, which is what lets this rule return a figure at all (BP-003.07). " +
         `The \`isSidechain\` marker is not a substitute, which is why an empty child list is never read off it: the marker is never \`true\` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the count of marked turns recorded here (${sidechainTurns}) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end, so even a turn that does carry it cannot be attributed to one sub-agent or overlapped with another (DIS-004). ` +
         scanWidthClause(ctx)
       );
-    case "opencode":
-      return (
-        "OpenCode does link a child session to its parent (`sessionMeta.parentSessionId`), and no child session in the collected set names this session as its parent. " +
-        "The collected set is bounded by the collection limit and by the time window, so an empty child list here is not proof that no sub-agent was dispatched — only that none was collected."
-      );
-    case "kimi":
-      return (
-        "Kimi's sub-agent records ARE read: `SubagentEvent`, keyed by `task_tool_call_id` and a large share of all its records, nests a complete sub-agent wire stream, and `src/collectors/kimi.js` unwraps each one into a child session carrying its own start and end (BP-003.08). " +
-        "So an empty child list here is not the parser gap F-006 once described — that gap is closed, and this rule now produces real concurrency figures for Kimi. " +
-        scanWidthClause(ctx)
-      );
     case "codex":
       return "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
-    case "gemini":
-      return "Nothing in Gemini's history records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
     default:
       return `no turn marker and no record tying a child session to the session that dispatched it is available for ${cli || "this CLI"}, so sub-agent intervals cannot be established (DIS-004).`;
   }
@@ -965,23 +1001,19 @@ function subagentReason(session, ctx) {
 /**
  * The reason CLASS behind `subagentReason`, branch for branch.
  *
- * Codex and Gemini get one each rather than sharing the structural class,
- * because the plain-English sentence names the tool and `plain.unmeasured` is
- * static data that cannot interpolate one.
+ * Codex gets its own reason rather than sharing the structural class, because
+ * the plain-English sentence names the tool and `plain.unmeasured` is static
+ * data that cannot interpolate one.
  *
  * @returns {string} a key of `subagentConcurrency.plain.unmeasured`
  */
 function subagentReasonCode(session, ctx) {
   switch (str(session?.cli)) {
     case "claude":
-    case "kimi":
+      if (ctx?.sessionMeta?.subagentReadError) return "subagent-reading-partial";
       return scanWidthCode(ctx);
-    case "opencode":
-      return "no-subagent-collected";
     case "codex":
       return "codex-records-no-subagents";
-    case "gemini":
-      return "gemini-records-no-subagents";
     default:
       return "cli-records-no-subagents";
   }
@@ -1008,7 +1040,7 @@ function peakOverlap(intervals) {
 
 const subagentConcurrency = {
   id: "subagent-concurrency",
-  name: "High sub-agent concurrency",
+  name: "Too many helper agents at once",
   description:
     "How many sub-agents were running at the same moment, against how many the session dispatched in total — a burst of parallel workers rather than staged work.",
   threshold: {
@@ -1022,17 +1054,15 @@ const subagentConcurrency = {
   fix: "claude-worker-cap",
   plain: {
     problem:
-      "At its busiest moment, this session had sub-agents running at the same time equal to {pct} of everything it dispatched — a burst of parallel work rather than one thing at a time.",
+      "At its busiest moment, this session had helper agents (AI assistants the main session hands sub-tasks to) running at the same time equal to {pct} of everything it started — a burst of parallel work rather than one thing at a time.",
     why:
-      "Running several sub-agents at once can be a deliberate and efficient way to fan work out. This only flags it when at least two of them were genuinely running together AND more than half of what was dispatched was active at the same moment — one sub-agent working on its own is never flagged, whatever share of the session's dispatches it happens to be — so it is worth a quick check that the burst was intentional rather than accidental.",
+      "Running several helper agents at once can be a deliberate and efficient way to split work up. This only flags it when at least two of them were genuinely running together AND more than half of what was started was active at the same moment — one helper agent working on its own is never flagged, whatever share of the session's total it happens to be — so it is worth a quick check that the burst was intentional rather than accidental.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
         "Whether this session had several sub-agents running at the same moment could not be worked out from what was recorded, so that question is still open about this session.",
       "codex-records-no-subagents":
         "Codex's logs don't record which turns belonged to a sub-agent or which parent started them, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
-      "gemini-records-no-subagents":
-        "Gemini's history files don't record which turns belonged to a sub-agent or which parent started them, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
       "cli-records-no-subagents":
         "Nothing this tool records identifies a sub-agent, or says when one started and finished, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
       "subagent-reading-off":
@@ -1041,6 +1071,8 @@ const subagentConcurrency = {
         "Only part of this tool's sessions were read on this run, so a sub-agent belonging to this session may simply have fallen outside what was looked at. An unread sub-agent is not an absent one, so this is not a statement that none ran. Reading more sessions settles it.",
       "no-subagent-collected":
         "No sub-agent record was found alongside this session, and nothing in what was read ties a sub-agent back to it, so an empty list cannot be treated as a real zero. This is not a statement that no sub-agents ran.",
+      "subagent-reading-partial":
+        "Some sub-agent records could not be read, so the list is incomplete and an empty or partial result cannot be treated as a measured zero.",
       "no-subagent-times":
         "Sub-agents are known to belong to this session, but not one of them recorded when it started and finished, so there is no way to work out which of them were running together. How many ran is known; how many ran at once is not. A start and finish time recorded for each sub-agent would make it measurable.",
       "partial-subagent-times":
@@ -1052,11 +1084,20 @@ const subagentConcurrency = {
     const children = Array.isArray(ctx?.children) ? ctx.children : [];
     const dispatched = children.length;
 
+    if (ctx?.sessionMeta?.subagentReadError) {
+      return unknown(
+        `the linked sub-agent list is incomplete: ${ctx.sessionMeta.subagentReadError}. A partial child read cannot establish a definitive concurrency measurement.`,
+        dispatched ? [countValue("sub-agent sessions linked to this session", dispatched)] : [],
+        "subagent-reading-partial",
+      );
+    }
+
     if (dispatched === 0) {
-      // A measured zero is only honest when the whole corpus was scanned: with
-      // a collection limit in force, a child session may simply not have been
-      // collected.
-      if (ctx?.childLinkageAvailable === true && ctx?.corpusComplete === true) {
+      // Claude's collector reads the subagents directory beside every selected
+      // parent, so an array here is complete evidence for THIS parent even when
+      // the top-level session scan is bounded. `undefined` retains the defensive
+      // unknown for callers that did not provide collector metadata.
+      if (ctx?.childLinkageAvailable === true && !ctx?.sessionMeta?.subagentReadError && (Array.isArray(ctx?.sessionMeta?.subagentSessionIds) || ctx?.corpusComplete === true)) {
         return notObserved(
           [countValue("sub-agent sessions linked to this session", 0)],
           "this CLI records which session dispatched each sub-agent session, the scan was not cut short by the collection limit, and no session names this one as its parent. This is a measured zero, not a missing field.",

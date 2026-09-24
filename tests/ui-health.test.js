@@ -195,9 +195,10 @@ const RULE = (over) => ({
   name: "Low cache hit",
   severity: "warn",
   fix: "claude-output-hygiene",
-  fixTitle: "Output hygiene instruction",
-  fixCli: "claude",
-  fixCliName: "Claude Code",
+  suggestionTitle: "Output hygiene instruction",
+  suggestionAvailable: true,
+  suggestionTool: "claude",
+  suggestionToolName: "Claude Code",
   threshold: { value: 0.85, derivation: "cacheRead / (cacheRead + cacheCreate) < 0.85" },
   magnitude: null,
   plain: null,
@@ -241,6 +242,34 @@ const render = (data, ctx = { api: {} }) => {
   healthPage.renderHealth(mount, data, ctx);
   return mount;
 };
+
+test("the Health render entry point survives browser NodeList childNodes and keeps all score wording", () => {
+  const cases = [
+    [{ total: 5, passed: 5, observed: 0, unknown: 0, label: "" }, "5/5 checks passed"],
+    [{ total: 5, passed: 4, observed: 1, unknown: 0, label: "" }, "4/5 checks passed · 1 problem observed"],
+    [{ total: 6, passed: 4, observed: 0, unknown: 2, label: "" }, "4/6 checks passed · 2 could not be measured"],
+  ];
+
+  for (const [score, expected] of cases) {
+    const mount = render(PAYLOAD({ sessions: [SESSION({ score })] }));
+    const headline = withClass(mount, "score-headline")[0];
+    assert.ok(headline, "the real Health renderer must produce a score headline");
+    assert.equal(headline.textContent, expected);
+    assert.ok(mount.textContent.length > 100, "the page must contain real content, not an error box");
+  }
+});
+
+test("the Health page names all three verdicts and does not claim unknown is most common", () => {
+  const mount = render(PAYLOAD());
+  const note = withClass(mount, "note").find((node) => node.textContent.includes("Every check returns one of three verdicts"));
+
+  assert.ok(note, "the verdict explanation must be rendered on the Health page");
+  assert.match(note.textContent, /a problem was observed/);
+  assert.match(note.textContent, /nothing was observed/);
+  assert.match(note.textContent, /it could not be measured/);
+  assert.match(note.textContent, /The third is not a pass\./);
+  assert.doesNotMatch(note.textContent, /most common answer on real data/);
+});
 
 // ==========================================================================
 // 1. The compact summary
@@ -301,13 +330,55 @@ test("the health page renders a summary region, before any card, with all four r
   assert.equal(stats.get("Problems found").textContent.trim(), "2");
   // Renamed from "Fixes available": the Overview card of that name counts
   // DISTINCT fixes, this one counts fixable FINDINGS. Same count, honest label.
-  assert.equal(stats.get("Fixable findings").textContent.trim(), "1");
-  assert.equal(stats.get("Checks not measured").textContent.trim(), "1");
+  assert.equal(stats.get("Findings with a suggestion").textContent.trim(), "1");
 
   const action = withClass(mount, "summary-action")[0];
-  assert.ok(action, "a 'Review fixes' action must render");
-  assert.equal(action.textContent.trim(), "Review fixes");
+  assert.ok(action, "a 'Review suggestions' action must render");
+  assert.equal(action.textContent.trim(), "Review suggestions");
   assert.equal(action.tagName, "BUTTON");
+});
+
+test("an unmeasured health check is disclosed once at page bottom, not as an inline row", () => {
+  const unknown = RULE({
+    id: "no-window",
+    name: "No window",
+    evidence: { status: "unknown", reason: "the log has no window", values: [], sources: [], derivation: null, parserVersion: "t" },
+  });
+  const mount = render(PAYLOAD({ sessions: [SESSION({
+    score: { total: 2, passed: 1, observed: 0, unknown: 1, label: "1 of 2 checks passed, 0 problems observed, 1 could not be measured" },
+    rules: [RULE({ id: "cache-hit" }), unknown],
+  })] }));
+  const notes = withClass(mount, "unmeasured-page-note");
+  assert.equal(notes.length, 1);
+  assert.match(notes[0].textContent, /1 check could not be measured/);
+  assert.equal(withClass(mount, "verdict-unknown").length, 0);
+  assert.doesNotMatch(mount.textContent, /verdict-reason|Not measured\. This is NOT a pass/);
+  assert.match(mount.textContent, /1\/2 checks passed/);
+  assert.doesNotMatch(mount.textContent, /0 checks|— could not be measured/);
+});
+
+test("a not-applicable health check is omitted from the rendered page", () => {
+  const notApplicable = RULE({ id: "unsupported-rule", name: "Never supported", evidence: { status: "unknown", reason: "not applicable", values: [], sources: [], derivation: null, parserVersion: "t" } });
+  const mount = render(PAYLOAD({ sessions: [SESSION({
+    notApplicable: [{ ruleId: "unsupported-rule", name: "Never supported", reasonCode: "unsupported", reason: "not supported by this CLI" }],
+    rules: [RULE({ id: "cache-hit" }), notApplicable],
+  })] }));
+  assert.doesNotMatch(mount.textContent, /Never supported|unsupported-rule|not supported by this CLI/);
+});
+
+test("detection-only health collectors use the truthful note and current wording", () => {
+  const note = "Cursor's configuration directory is here, but no Cursor CLI chat store was found under it.";
+  const mount = render(PAYLOAD({ collectors: [{ cli: "cursor", support: "detection-only", sessions: null, note }] }));
+  assert.match(mount.textContent, new RegExp(note.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(mount.textContent, /detected, not read yet/);
+  assert.doesNotMatch(mount.textContent, /support coming soon/);
+});
+
+test("health summary names suggestions rather than fixes", () => {
+  const observed = RULE({ evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" }, fix: "suggestion" });
+  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [observed] })] }));
+  assert.match(mount.textContent, /Findings with a suggestion/);
+  assert.match(mount.textContent, /Review suggestions/);
 });
 
 test("the Health summary and the Overview cards never share a label for two different quantities", () => {
@@ -335,22 +406,22 @@ test("the Health summary and the Overview cards never share a label for two diff
   // The Health stat names findings, and still counts findings: TWO observed
   // findings carrying a fix, even though they name ONE distinct fix between
   // them — which is exactly the divergence the shared label hid.
-  assert.ok(stats.has("Fixable findings"), `the Health fixable stat must be labelled "Fixable findings"; got ${JSON.stringify(healthLabels)}`);
-  assert.equal(stats.get("Fixable findings").textContent.trim(), "2", "the label changed, the counted quantity did not");
+  assert.ok(stats.has("Findings with a suggestion"), `the Health suggestion stat must use the requested label; got ${JSON.stringify(healthLabels)}`);
+  assert.equal(stats.get("Findings with a suggestion").textContent.trim(), "2", "the label changed, the counted quantity did not");
   assert.ok(!stats.has("Fixes available"), '"Fixes available" is the Overview card\'s name for the distinct-fix count, and must not also name this one');
 
   // The other half of the contract: the Overview card is still called
-  // "Fixes available" over `distinctFixes`. If it is ever renamed to match
-  // the Health stat, the collision is back and this test must fail.
+  // "Suggestions available" over `distinctFixes`. If it is ever renamed to
+  // match the Health stat, the collision is back and this test must fail.
   const here = path.dirname(fileURLToPath(import.meta.url));
   const overviewSrc = readFileSync(path.join(here, "..", "public", "js", "pages", "overview.js"), "utf8");
-  assert.match(overviewSrc, /summaryCard\('Fixes available',\s*'fixes'/, "the Overview card must keep its own distinct-fix label");
+  assert.match(overviewSrc, /summaryCard\('Suggestions available',\s*'fixes'/, "the Overview card must keep its own distinct-fix label");
   assert.ok(!overviewSrc.includes("'Fixable findings'"), "the findings label belongs to the Health summary alone");
 
   // No Health summary label may collide with an Overview card label unless the
   // two genuinely count the same thing.
   const overviewLabels = [...overviewSrc.matchAll(/summaryCard\('([^']+)'/g)].map((m) => m[1]);
-  assert.ok(overviewLabels.length >= 4, `expected the Overview cards to be readable from source; got ${JSON.stringify(overviewLabels)}`);
+  assert.equal(overviewLabels.length, 3, `expected exactly three Overview cards; got ${JSON.stringify(overviewLabels)}`);
   const sameQuantity = new Set(["Sessions analyzed", "Problems found"]);
   for (const label of healthLabels) {
     if (!overviewLabels.includes(label)) continue;
@@ -372,7 +443,7 @@ test("a genuinely unavailable count renders an em dash, never 0 — and a real z
   // shown, so it renders the number, not a dash.
   assert.equal(stats.get("Sessions analyzed").textContent.trim(), "2");
 
-  for (const label of ["Problems found", "Fixable findings", "Checks not measured"]) {
+  for (const label of ["Problems found", "Findings with a suggestion"]) {
     const node = stats.get(label);
     assert.ok(node, `${label} must render`);
     assert.match(node.textContent, /—/, `${label} must render an em dash when nothing was evaluated`);
@@ -450,7 +521,7 @@ test("a not-observed or unknown rule never leads with a plain 'problem' sentence
     id: "context-pressure", plain: observedPlain, magnitude: 3,
     evidence: { status: "unknown", reason: "no data", values: [], sources: [], derivation: null, parserVersion: "t" },
   });
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [notObserved, unknown] })] }));
+  const mount = healthPage.sessionCard(SESSION({ rules: [notObserved, unknown] }), null, null);
   assert.equal(withClass(mount, "verdict-plain").length, 0, "plain text is only for OBSERVED findings");
 });
 
@@ -493,7 +564,7 @@ const UNKNOWN_RULE = (over = {}) => RULE({
 });
 
 test("an unmeasured check leads with the plain sentence for its OWN cause, not with the engineering prose", () => {
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [UNKNOWN_RULE()] })] }));
+  const mount = healthPage.sessionCard(SESSION({ rules: [UNKNOWN_RULE()] }), null, null);
   const plain = withClass(mount, "verdict-plain")[0];
   assert.ok(plain, "an unmeasured check must render a .verdict-plain lead sentence");
   assert.match(plain.textContent, /Codex's logs don't record which turns belonged to a sub-agent/);
@@ -510,10 +581,8 @@ test("an unmeasured check leads with the plain sentence for its OWN cause, not w
 });
 
 test("the plain sentence never softens an unmeasured check into a pass", () => {
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [UNKNOWN_RULE()] })] }));
-  const reason = withClass(mount, "verdict-reason")[0];
-  assert.ok(reason, "the honesty line must still render");
-  assert.match(reason.textContent, /Not measured\. This is NOT a pass — the check could not run here\./);
+  const mount = healthPage.sessionCard(SESSION({ rules: [UNKNOWN_RULE()] }), null, null);
+  assert.equal(withClass(mount, "verdict-reason").length, 0, "the per-check honesty row is replaced by the page note");
   assert.match(mount.textContent, /COULD NOT BE MEASURED/, "the three states must stay named apart");
 
   const row = withClass(mount, "verdict")[0];
@@ -521,12 +590,10 @@ test("the plain sentence never softens an unmeasured check into a pass", () => {
   assert.ok(row.classList.contains("verdict-unknown"));
   // Nothing is offered to fix: there is no finding.
   assert.equal(withClass(row, "verdict-offer").length, 0);
-  // The honesty line is NOT behind the fold either.
-  assert.ok(!isInside(reason, withTag(row, "details")[0]), "the not-a-pass line must never be one click away");
 });
 
 test("the verbatim engineering reason is kept in full, inside the fold rather than on the card face", () => {
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [UNKNOWN_RULE()] })] }));
+  const mount = healthPage.sessionCard(SESSION({ rules: [UNKNOWN_RULE()] }), null, null);
   const row = withClass(mount, "verdict")[0];
   const details = withTag(row, "details")[0];
 
@@ -535,9 +602,8 @@ test("the verbatim engineering reason is kept in full, inside the fold rather th
   assert.ok(carrier, "it must be a paragraph inside the fold, not a stray text node");
   assert.ok(isInside(carrier, details));
 
-  // It is no longer what a reader hits first.
-  const reason = withClass(row, "verdict-reason")[0];
-  assert.ok(!reason.textContent.includes("rollout records"), "the engineering prose must no longer lead the row");
+  // It is no longer rendered as a separate inline row.
+  assert.equal(withClass(row, "verdict-reason").length, 0);
   const plain = withClass(row, "verdict-plain")[0];
   assert.ok(!plain.textContent.includes("DIS-004"), "no internal id may reach the lead sentence");
   assert.ok(!plain.textContent.includes("sidechain"));
@@ -550,14 +616,14 @@ test("an unmeasured check whose cause has no sentence falls back to the default 
       values: [], sources: [], derivation: null, parserVersion: "t",
     },
   });
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [rule] })] }));
+  const mount = healthPage.sessionCard(SESSION({ rules: [rule] }), null, null);
   const plain = withClass(mount, "verdict-plain")[0];
   assert.ok(plain, "an unrecognised cause must still read as English, not as nothing");
   assert.match(plain.textContent, /could not be worked out from what was recorded/);
-  assert.match(mount.textContent, /This is NOT a pass/);
+  assert.equal(withClass(mount, "verdict-reason").length, 0);
 });
 
-test("a rule with NO plain.unmeasured renders without throwing, and keeps the engineering reason on the face", () => {
+test("a rule with NO plain.unmeasured renders without throwing, and keeps the engineering reason in the fold", () => {
   // Every fixture in tests/frontend-contract.test.js is this shape. Dropping
   // the reason for such a rule would leave an unknown with no stated cause at
   // all — a worse honesty failure than a jargon-heavy one — so it stays put.
@@ -566,20 +632,18 @@ test("a rule with NO plain.unmeasured renders without throwing, and keeps the en
     evidence: { status: "unknown", reason: ENGINEERING_REASON, values: [], sources: [], derivation: null, parserVersion: "t" },
   });
   delete rule.plain;
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [rule] })] }));
+  const mount = healthPage.sessionCard(SESSION({ rules: [rule] }), null, null);
 
   assert.equal(withClass(mount, "verdict-plain").length, 0, "no catalogue means no plain paragraph, not an empty one");
-  const reason = withClass(mount, "verdict-reason")[0];
-  assert.match(reason.textContent, /This is NOT a pass — the check could not run here/);
-  assert.ok(reason.textContent.includes(ENGINEERING_REASON), "with nothing to replace it, the reason must stay where a reader sees it");
+  assert.equal(withClass(mount, "verdict-reason").length, 0, "the engineering reason is not an inline row");
+  assert.ok(withTag(withClass(mount, "verdict")[0], "details")[0].textContent.includes(ENGINEERING_REASON));
 });
 
 test("an unmeasured check with a catalogue but no recorded reason still says it is not a pass", () => {
   const rule = UNKNOWN_RULE({
     evidence: { status: "unknown", reason: null, reasonCode: "codex-records-no-subagents", values: [], sources: [], derivation: null, parserVersion: "t" },
   });
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [rule] })] }));
-  assert.match(withClass(mount, "verdict-reason")[0].textContent, /This is NOT a pass/);
+  const mount = healthPage.sessionCard(SESSION({ rules: [rule] }), null, null);
   assert.match(withClass(mount, "verdict-plain")[0].textContent, /Codex's logs don't record/);
   // The absence of a reason is itself reported, inside the fold.
   const details = withTag(withClass(mount, "verdict")[0], "details")[0];
@@ -595,7 +659,7 @@ test("all three verdict states remain visually distinguishable after the compact
   const notObserved = RULE({ id: "cache-hit", evidence: { status: "not-observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" } });
   const unknown = RULE({ id: "context-pressure", evidence: { status: "unknown", reason: "could not be measured", values: [], sources: [], derivation: null, parserVersion: "t" } });
 
-  const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [observed, notObserved, unknown] })] }));
+  const mount = healthPage.sessionCard(SESSION({ rules: [observed, notObserved, unknown] }), null, null);
   const rows = withClass(mount, "verdict");
   assert.equal(rows.length, 3);
 
@@ -612,7 +676,7 @@ test("all three verdict states remain visually distinguishable after the compact
   assert.match(mount.textContent, /COULD NOT BE MEASURED/);
 });
 
-test("every rule still offers exactly [Preview] [Apply] [Skip] when observed, and nothing when it is not", () => {
+test("every rule still offers exactly [View suggestion] when observed, and nothing when it is not", () => {
   const buttonText = (root) => nodes(root).filter((n) => n.tagName === "BUTTON").map((n) => n.textContent.trim());
 
   const observed = RULE({
@@ -620,37 +684,29 @@ test("every rule still offers exactly [Preview] [Apply] [Skip] when observed, an
     evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
   });
   const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [observed] })] }), { api: {} });
-  const actionButtons = buttonText(mount).filter((t) => !["Review fixes"].includes(t));
-  assert.deepEqual([...actionButtons].sort(), ["Apply", "Preview", "Skip"]);
+  const actionButtons = buttonText(mount).filter((t) => !["Review fixes", "Review suggestions"].includes(t));
+  assert.deepEqual([...actionButtons].sort(), ["View suggestion"]);
 
   const passOnly = render(PAYLOAD({ sessions: [SESSION({ rules: [RULE({})] })] }));
-  const passButtons = buttonText(passOnly).filter((t) => t !== "Review fixes");
-  assert.deepEqual(passButtons, [], "an unmeasured/passing check must offer no fix action");
+  const passButtons = buttonText(passOnly).filter((t) => !["Review fixes", "Review suggestions"].includes(t));
+  assert.deepEqual(passButtons, [], "an unmeasured/passing check must offer no suggestion action");
 });
 
-test("a fix states its registry display names only when both names differ", () => {
+test("a finding whose CLI SessionRx does not suggest for says so, and offers a disabled action", () => {
   const observed = RULE({
     evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
   });
-  const codex = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [observed] })] }), { api: {} });
-  const note = withClass(codex, "verdict-fix-scope")[0];
-  assert.ok(note);
-  assert.equal(note.textContent, "Changes Claude Code's config, not Codex's. Affects future Claude Code sessions only.");
-  assert.ok(!/DIS-\d|BP-\d|\bF-\d|\bsidechain|\blinkage|\bdenominator|\bcorpus|\bmagnitude/i.test(note.textContent));
-
   const claude = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [observed] })] }), { api: {} });
-  assert.equal(withClass(claude, "verdict-fix-scope").length, 0);
+  assert.equal(withClass(claude, "verdict-fix-scope").length, 0, "a supported CLI carries no scope caveat");
 
-  const openCode = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [RULE({ fixCli: "opencode", fixCliName: "OpenCode", evidence: observed.evidence })] })] }), { api: {} });
-  const openCodeNote = withClass(openCode, "verdict-fix-scope")[0];
-  assert.ok(openCodeNote);
-  assert.equal(openCodeNote.textContent, "Changes OpenCode's config, not Claude Code's. Affects future OpenCode sessions only.");
-
-  const missingTarget = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [RULE({ fixCli: null, fixCliName: null, evidence: observed.evidence })] })] }), { api: {} });
-  assert.equal(withClass(missingTarget, "verdict-fix-scope").length, 0);
-
-  const missingSource = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: null, rules: [observed] })] }), { api: {} });
-  assert.equal(withClass(missingSource, "verdict-fix-scope").length, 0);
+  const unsupported = RULE({
+    suggestionAvailable: false, suggestionTool: null, suggestionToolName: null,
+    evidence: observed.evidence,
+  });
+  const missingTarget = render(PAYLOAD({ sessions: [SESSION({ cli: "gemini", cliName: "Gemini CLI", rules: [unsupported] })] }), { api: {} });
+  const note = withClass(missingTarget, "verdict-fix-scope")[0];
+  assert.ok(note, "an unsupported CLI must say plainly that no suggestion exists for it");
+  assert.match(note.textContent, /no suggested change for this CLI/i);
 });
 
 test("the scan-limit disclosure and the sub-agent set-aside note both survive in the rendered output", () => {
@@ -779,7 +835,7 @@ function jargonPayload() {
     collectors: [
       { cli: "codex", sessions: 1, support: "supported", note: SET_ASIDE_NOTE },
       { cli: "claude", sessions: 1, support: "supported", note: null },
-      { cli: "opencode", sessions: 0, support: "detection-only", note: null },
+      { cli: "antigravity", sessions: 0, support: "detection-only", note: null },
     ],
     scan: { limitPerCollector: 250, defaulted: true, atLimit: true, note: SCAN_NOTE },
   });
@@ -807,7 +863,7 @@ test("no title and no aria-label anywhere in the rendered health page carries en
   // title/aria-label attributes today; the floor is set below that so ordinary
   // UI change does not trip it, but a walker that stops seeing the tree does.
   assert.ok(
-    carriers.length >= 40,
+    carriers.length >= 30,
     `the walk must actually reach the page's hover text: only ${carriers.length} title/aria-label attributes were inspected`,
   );
 
@@ -830,8 +886,8 @@ test("no title and no aria-label anywhere in the rendered health page carries en
   );
 });
 
-test("moving the engineering reason out of the tooltip did not delete it: it is still inside a <details>", () => {
-  const mount = render(jargonPayload());
+test("the low-level card renderer still keeps an engineering reason inside a <details>", () => {
+  const mount = healthPage.sessionCard(jargonPayload().sessions[0], null, null);
   const subagent = codexRuleResults().find((rule) => rule.id === "subagent-concurrency");
   const reason = subagent.evidence.reason;
 

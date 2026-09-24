@@ -135,13 +135,13 @@ export const measuredZeroInput = [
 // --------------------------------------------------------------------------
 
 /**
- * OpenCode-shaped: the window IS the session's observed peak, so every
+ * Cursor-shaped: the window IS the session's observed peak, so every
  * fraction it could produce is 1.0 by construction (F-014).  Four turns, no
  * honest fraction among them.
  */
 export const observedFloorInput = [
   session({
-    cli: "opencode",
+    cli: "cursor",
     sessionId: "floor",
     windowTokens: 41_344,
     windowSource: "observed-floor",
@@ -169,7 +169,7 @@ export const mixedFractionInput = [
     ],
   }),
   session({
-    cli: "opencode",
+    cli: "cursor",
     sessionId: "mixed-floor",
     windowTokens: 5_000,
     windowSource: "observed-floor",
@@ -197,13 +197,13 @@ export const impossibleFractionInput = [
 ];
 
 // --------------------------------------------------------------------------
-// Kimi: a native fraction with no absolute window (DIS-005)
+// A native-fraction-reporting CLI: a fraction with no absolute window (DIS-005)
 // --------------------------------------------------------------------------
 
-export const kimiInput = [
+export const nativeFractionInput = [
   session({
-    cli: "kimi",
-    sessionId: "kimi-1",
+    cli: "cursor",
+    sessionId: "native-fraction-1",
     windowTokens: null,
     windowSource: "unknown",
     turns: [
@@ -323,13 +323,13 @@ export const conflictingInput = [
 
 /**
  * Cache figures for eight days and no computable context fraction anywhere —
- * the real shape of an OpenCode-heavy window (F-014).  Nothing moves, so the
+ * the real shape of an observed-floor-heavy window (F-014).  Nothing moves, so the
  * only tempting verdict is the one that must not be issued: "stable".
  */
 export const cacheOnlyFlatInput = [
   cacheSession(flatCachePlan(EIGHT_DAYS, 98)),
   session({
-    cli: "opencode",
+    cli: "cursor",
     sessionId: "floor-only",
     windowTokens: 41_344,
     windowSource: "observed-floor",
@@ -344,7 +344,7 @@ export const cacheOnlyDecliningInput = [
     ...flatCachePlan([-3, -2, -1, 0], 80),
   ]),
   session({
-    cli: "opencode",
+    cli: "cursor",
     sessionId: "floor-only",
     windowTokens: 41_344,
     windowSource: "observed-floor",

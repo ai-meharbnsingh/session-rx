@@ -28,7 +28,7 @@ import {
   gapInput,
   impossibleFractionInput,
   improvingInput,
-  kimiInput,
+  nativeFractionInput,
   localTs,
   measuredZeroInput,
   midnightInput,
@@ -234,16 +234,16 @@ test("turnFraction prefers the CLI's native fraction and honours the observed-fl
 });
 
 // --------------------------------------------------------------------------
-// Kimi — a native fraction with no absolute window (DIS-005)
+// a native-fraction-reporting CLI — a fraction with no absolute window (DIS-005)
 // --------------------------------------------------------------------------
 
-test("a Kimi session with a native fraction and a null window feeds G1 but no token series", () => {
-  const t = trends(kimiInput);
+test("a native-fraction session with a null window feeds G1 but no token series", () => {
+  const t = trends(nativeFractionInput);
   const context = byDate(t.charts.context).get(dayKey(0));
   const spend = byDate(t.charts.spend).get(dayKey(0));
   const cache = byDate(t.charts.cache).get(dayKey(0));
 
-  assert.deepEqual(t.clis, ["kimi"]);
+  assert.deepEqual(t.clis, ["cursor"]);
   assert.equal(context.turnsWithFraction, 2, "both native fractions count");
   assert.equal(context.turnsAboveThreshold, 1);
   assert.equal(context.highContextPct, 50);
@@ -541,7 +541,7 @@ test("trend.metrics matches the report generator's TrendMetric contract exactly"
   }
   assert.equal(t.trend.metrics[0].windowSource, "model-table", "one contributing source may be named");
   assert.equal(t.trend.metrics[1].windowSource, null, "a hit rate does not depend on a window");
-  const mixedSources = trends([...improvingInput, ...kimiInput]);
+  const mixedSources = trends([...improvingInput, ...nativeFractionInput]);
   assert.equal(mixedSources.trend.metrics[0].windowSource, null, "a mixed measurement names no source");
 });
 
@@ -633,10 +633,10 @@ test("sessionsFrom is total: junk in yields no sessions rather than a throw", ()
 
 test("the cli option restricts the window to one CLI's sessions", () => {
   const all = trends(mixedFractionInput);
-  assert.deepEqual(all.clis, ["claude", "opencode"]);
-  const onlyOpenCode = trends(mixedFractionInput, { to: ANCHOR, cli: "opencode" });
-  assert.deepEqual(onlyOpenCode.clis, ["opencode"]);
-  assert.equal(byDate(onlyOpenCode.charts.context).get(dayKey(0)).turnsWithFraction, 0);
+  assert.deepEqual(all.clis, ["claude", "cursor"]);
+  const onlyCursor = trends(mixedFractionInput, { to: ANCHOR, cli: "cursor" });
+  assert.deepEqual(onlyCursor.clis, ["cursor"]);
+  assert.equal(byDate(onlyCursor.charts.context).get(dayKey(0)).turnsWithFraction, 0);
   const onlyClaude = trends(mixedFractionInput, { to: ANCHOR, cli: ["claude"] });
   assert.deepEqual(onlyClaude.clis, ["claude"]);
   assert.equal(byDate(onlyClaude.charts.context).get(dayKey(0)).highContextPct, 66.67);

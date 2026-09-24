@@ -24,7 +24,8 @@
  * R2  A CONTEXT FRACTION THAT DOES NOT EXIST IS NOT 0% AND NOT 100%.  Where
  *     `window.source === "observed-floor"` the window IS the session's own
  *     observed peak, so floor/floor = 1.0 by construction (ruling F-014;
- *     measured: every real OpenCode session on this machine lands there).
+ *     measured: every real session running on an unrecognised model on this
+ *     machine lands there).
  *     `contextFraction` in src/collectors/base.js already returns null for that
  *     case and is the single authority here.  Such turns leave G1's numerator
  *     AND its denominator, and are counted in `excluded` so the denominator
@@ -48,10 +49,10 @@
  *     `getMonth` / `getDate` / `getHours`, and `window.timezoneOffsetMinutes`
  *     records the offset the numbers were computed under.
  *
- * Kimi (BLUEPRINT DIS-005) reports a NATIVE context fraction with
- * `window.tokens === null`.  It therefore contributes to G1's fraction series
- * and to nothing token-denominated.  Its fraction is never multiplied back
- * into invented tokens.
+ * A CLI that reports a NATIVE context fraction (BLUEPRINT DIS-005) does so
+ * with `window.tokens === null`.  It therefore contributes to G1's fraction
+ * series and to nothing token-denominated.  Its fraction is never multiplied
+ * back into invented tokens.
  */
 
 import { contextFraction } from "../collectors/base.js";
@@ -216,7 +217,7 @@ function cliFilter(cli) {
  * The turn's honest context fraction, or null when none exists.
  *
  * A collector-supplied fraction wins, because only the collector knows whether
- * the CLI stated one natively (Kimi does; DIS-005).  Otherwise it is derived
+ * the CLI stated one natively (DIS-005).  Otherwise it is derived
  * through `contextFraction`, which is where the `observed-floor` rule (F-014)
  * lives — so this module cannot accidentally route around it.
  */

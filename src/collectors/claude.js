@@ -129,9 +129,10 @@ function draftTurn(entry, resultBytes) {
   // Only bytes we actually matched to a recorded result are counted; an
   // unmatched call leaves the total null rather than pretending it was empty.
   let bytes = null;
+  const bytesByCall = [];
   for (const call of toolCalls) {
-    if (call.id === null) continue;
-    const observed = resultBytes.get(call.id);
+    const observed = call.id === null ? undefined : resultBytes.get(call.id);
+    bytesByCall.push(observed === undefined ? null : observed);
     if (observed === undefined) continue;
     bytes = (bytes ?? 0) + observed;
   }
@@ -144,6 +145,7 @@ function draftTurn(entry, resultBytes) {
     output: numberOrNull(usage?.output_tokens),
     toolCalls,
     toolResultBytes: bytes,
+    toolResultBytesByCall: bytesByCall,
     isSidechain: entry.isSidechain,
   };
 }
@@ -162,6 +164,7 @@ function finalizeTurn(draft, window) {
     output: draft.output,
     toolCalls: draft.toolCalls,
     toolResultBytes: draft.toolResultBytes,
+    toolResultBytesByCall: draft.toolResultBytesByCall,
     isSidechain: draft.isSidechain,
   });
 }
@@ -373,9 +376,10 @@ export class ClaudeCollector extends Collector {
       }
       sessions.push(parent);
 
-      const children = readSubagents
+      const childRead = readSubagents
         ? await this.#collectSubagents(entry, parent, diagnostic)
-        : [];
+        : { children: [], error: null };
+      const children = childRead.children;
       for (const child of children) sessions.push(child.session);
 
       this.sessionMeta.set(parent.sessionId, {
@@ -386,6 +390,7 @@ export class ClaudeCollector extends Collector {
         // sub-agent reading was off for this run, which is not the same claim
         // as an empty list: the difference is "not looked for" vs "none found".
         subagentSessionIds: readSubagents ? children.map((child) => child.session.sessionId) : null,
+        ...(childRead.error ? { subagentReadError: childRead.error } : {}),
       });
       for (const child of children) {
         this.sessionMeta.set(child.session.sessionId, {
@@ -406,45 +411,64 @@ export class ClaudeCollector extends Collector {
    * tool calls are its own gauge; adding them to the session that dispatched it
    * inflates that session's figures, which is the exact error class that once
    * cost this codebase a 1.97x context inflation.  So a sub-agent becomes a
-   * sibling session and the link is published on `sessionMeta`, the same shape
-   * OpenCode already uses for its child sessions.  The parent object returned by
-   * `parseSession` is not touched here.
+   * sibling session and the link is published on `sessionMeta`, the general
+   * shape a collector uses to link a child session to its parent.  The parent
+   * object returned by `parseSession` is not touched here.
    */
   async #collectSubagents(entry, parent, diagnostic) {
     const dir = path.join(path.dirname(entry.file), path.basename(entry.file, ".jsonl"), SUBAGENT_DIR);
     let found;
     try {
       found = await readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
       // No sub-agent directory is the normal case and is a MEASURED zero, not a
       // failure: this session dispatched none. It is not counted as a skipped
       // file, which would read as data we could not parse.
-      return [];
+      if (error?.code === "ENOENT") return { children: [], error: null };
+      const reason = error instanceof Error ? error.message : String(error);
+      return { children: [], error: `could not read sub-agent directory ${dir}: ${reason}` };
     }
 
     const children = [];
+    let readError = null;
     for (const file of found) {
       if (!file.isFile()) continue;
       const matched = SUBAGENT_FILE.exec(file.name);
       if (!matched) continue;
       const agentId = matched[1];
       const child = path.join(dir, file.name);
+      const skippedBefore = diagnostic.linesSkipped;
+      const truncatedBefore = diagnostic.truncated.length;
+      const errorsBefore = diagnostic.errors.length;
       try {
+        const session = await parseSession(child, {
+          project: entry.project,
+          diagnostic,
+          maxBytes: this.maxBytes,
+          sessionId: subagentSessionId(parent.sessionId, agentId),
+        });
+        const incomplete = diagnostic.truncated.length > truncatedBefore
+          || diagnostic.linesSkipped > skippedBefore
+          || diagnostic.errors.length > errorsBefore;
+        if (incomplete) {
+          const details = [];
+          if (diagnostic.truncated.length > truncatedBefore) details.push("truncated");
+          if (diagnostic.linesSkipped > skippedBefore) details.push("malformed or skipped lines");
+          if (diagnostic.errors.length > errorsBefore) details.push("read errors");
+          readError = readError || `sub-agent file ${child} was incomplete (${details.join(", ")})`;
+        }
         children.push({
           agentId,
-          session: await parseSession(child, {
-            project: entry.project,
-            diagnostic,
-            maxBytes: this.maxBytes,
-            sessionId: subagentSessionId(parent.sessionId, agentId),
-          }),
+          session,
         });
       } catch (error) {
         diagnostic.filesSkipped += 1;
-        diagnostic.errors.push(error instanceof Error ? error.message : String(error));
+        const reason = error instanceof Error ? error.message : String(error);
+        diagnostic.errors.push(reason);
+        readError = readError || `could not read sub-agent file ${child}: ${reason}`;
       }
     }
-    return children;
+    return { children, error: readError };
   }
 
   /** `<root>/<cwd-slug>/<session-uuid>.jsonl`, newest first. */

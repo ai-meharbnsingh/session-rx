@@ -207,9 +207,9 @@ test("no import points at a retired module", () => {
     assert.match(chart, new RegExp(`export function ${kept}\\b`), `${kept} is called from pages/trends.js`);
   }
   assert.match(
-    read(path.join(PUBLIC, "js", "components", "fix-modal.js")),
-    /export function openFixModal\b/,
-    "openFixModal is called from pages/health.js",
+    read(path.join(PUBLIC, "js", "components", "suggestion-panel.js")),
+    /export function openSuggestionPanel\b/,
+    "openSuggestionPanel is called from pages/health.js",
   );
   assert.ok(!/renderHeatmap|health-card/.test(INDEX_HTML), "index.html must not reference a retired module");
 });
@@ -233,8 +233,18 @@ class ShimText {
   get textContent() { return this.data; }
 }
 
+// Browser NodeLists are array-like and iterable, but do not provide Array's
+// `.find()` method. Keeping that distinction here makes the boot test catch a
+// page that only works because a test shim uses plain arrays for childNodes.
+class ShimNodeList extends Array {
+  constructor(...items) {
+    super(...items);
+    this.find = undefined;
+  }
+}
+
 class ShimFragment {
-  constructor() { this.childNodes = []; this.isFragment = true; }
+  constructor() { this.childNodes = new ShimNodeList(); this.isFragment = true; }
   get textContent() { return this.childNodes.map((node) => node.textContent).join(""); }
   append(...nodes) { ShimElement.prototype.append.call(this, ...nodes); }
 }
@@ -242,7 +252,7 @@ class ShimFragment {
 class ShimElement {
   constructor(tag) {
     this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this.parent = null;
     this.id = "";
     this.hidden = false;
@@ -305,7 +315,7 @@ class ShimElement {
     });
   }
 
-  replaceChildren(...nodes) { this.childNodes = []; this._text = ""; this.append(...nodes); }
+  replaceChildren(...nodes) { this.childNodes = new ShimNodeList(); this._text = ""; this.append(...nodes); }
 
   remove() {
     if (!this.parent) return;
@@ -429,7 +439,7 @@ const FIXTURES = {
   "/api/collectors": {
     collectors: [
       { id: "claude", displayName: "Claude Code", installed: true, status: "supported", paths: ["~/.claude/projects"] },
-      { id: "kimi", displayName: "Kimi CLI", installed: false, status: "not detected", paths: [] },
+      { id: "antigravity", displayName: "Antigravity CLI", installed: false, status: "not detected", paths: [] },
     ],
     diagnostics: [],
   },
@@ -580,23 +590,23 @@ test("the app boots in process, registers all four routes, and renders real DOM"
         /\d+\/\d+ checks passed · \d+ problems? observed · \d+ could not be measured/,
         "the score headline must state passed, observed AND unmeasured",
       );
-      // An unknown verdict, with its reason, is visible on a real boot.
+      // Unknown checks are summarized exactly once at page level; their
+      // per-check reason is no longer an inline row.
       assert.match(rendered, /This is NOT a pass — the check could not run here/);
-      assert.match(rendered, /no sub-agent marker/);
-      // And the observed finding offers the three per-fix actions, plus
-      // "Review fixes" — a prominent summary action the product owner asked
-      // for at the top of the Health page (UX wave); it is additive, not a
-      // replacement for Apply/Preview/Skip below.
+      assert.match(rendered, /1 check could not be measured from the session logs; they were not treated as passes/);
+      assert.equal((rendered.match(/1 check could not be measured from the session logs/g) || []).length, 1);
+      assert.doesNotMatch(rendered, /no sub-agent marker/);
+      assert.doesNotMatch(rendered, /Not measured\. This is NOT a pass/);
+      assert.equal(nodesOf(mount).filter((node) => node.classList?.contains("verdict-reason")).length, 0);
+      // And the observed finding offers its one suggestion action, plus
+      // "Review suggestions" — a prominent summary action at the top of the Health
+      // page. SessionRx never applies or undoes anything, so there is no
+      // Preview/Apply/Skip trio any more — a single "View suggestion" opens
+      // the Suggested change panel.
       const buttons = nodesOf(mount)
         .filter((node) => node.tagName === "BUTTON")
         .map((node) => node.textContent.trim());
-      assert.deepEqual([...buttons].sort(), ["Apply", "Preview", "Review fixes", "Skip"]);
-      // Each per-fix action asserted independently: a future removal of any
-      // ONE of these must fail loudly here even if the overall label set
-      // changes again (e.g. another summary action joins it later).
-      assert.ok(buttons.includes("Preview"), "the Preview action survives");
-      assert.ok(buttons.includes("Apply"), "the Apply action survives");
-      assert.ok(buttons.includes("Skip"), "the Skip action survives");
+      assert.deepEqual([...buttons].sort(), ["Review suggestions", "View suggestion"]);
 
       // The shell's own regions were filled by app.js, not left on their
       // placeholder text.

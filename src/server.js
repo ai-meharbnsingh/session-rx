@@ -1,35 +1,22 @@
 /**
  * SessionRx local HTTP surface — BP-005.
  *
- * This process can rewrite a developer's `~/.claude/CLAUDE.md` and
- * `~/.claude/settings.json`. Loopback is NOT a security boundary: any page the
- * developer has open in any tab can `fetch('http://127.0.0.1:<port>/…')`. So
- * every mutating route is defended by three independent checks (BP-005.12..14,
- * DIS-002) and the socket itself is checked for loopback origin:
+ * This process never writes a user's files (THE SUGGESTION CONTRACT). Every
+ * route is GET: it reads local session logs and, read-only, whether a
+ * suggestion's marker is already present in a target file it could resolve.
+ * Nothing here has a request body to parse and nothing here mutates state, so
+ * there is no CSRF surface — the per-process nonce and `X-CSRF-Token` machinery
+ * earlier versions carried existed solely to protect the apply/undo routes
+ * that no longer exist.
  *
- *   1. `X-CSRF-Token` equal to a per-process nonce that only the HTML this
- *      server served can know (compared in constant time),
- *   2. a `Host` header inside an exact loopback host:port allowlist built from
- *      the address we actually bound to,
- *   3. an `Origin` header exactly equal to `http://<that Host>` — so `null`,
- *      absent, and any foreign origin are all refused.
- *
- * There are deliberately NO CORS headers. A cross-origin caller is refused, not
- * negotiated with. Cookies are never read or set; there is no ambient
- * credential for an attacker to ride.
- *
- * ── DNS rebinding (the Host check is NOT only a CSRF check) ─────────────────
- * The three-part check above only runs on mutating methods — GET/HEAD/OPTIONS
- * carry no CSRF requirement, because they cannot change state through a
- * cross-site *form* or *fetch*. But DNS rebinding lets an attacker's page,
- * after first resolving its own hostname to this loopback port, read a GET
- * response too: `isLoopbackPeer` still passes (the browser really is talking
- * to 127.0.0.1 at the socket layer), and with no CORS headers set the browser
- * falls back to treating the response as same-origin with the page that
- * requested it — which is exactly the attacker's page. So the Host header is
- * ALSO checked as its own middleware, on every method, before the request
- * reaches anything else. `isAllowedHost` is the one function both that
- * middleware and the CSRF check below call, so the two can never drift apart.
+ * Loopback is still NOT a security boundary on its own: any page the developer
+ * has open in any tab can `fetch('http://127.0.0.1:<port>/…')` and DNS
+ * rebinding can point an attacker's hostname at this same port, so the Host
+ * header is checked on EVERY method (not only a CSRF concern — a GET response
+ * is worth protecting too) against an exact loopback host:port allowlist built
+ * from the address this process actually bound. There are deliberately NO CORS
+ * headers: a cross-origin caller is refused, not negotiated with. Cookies are
+ * never read or set; there is no ambient credential for an attacker to ride.
  *
  * ── Honest degradation ──────────────────────────────────────────────────────
  * Analysis modules are imported LAZILY inside try/catch. A route whose
@@ -41,8 +28,6 @@
  * Every JSON body is passed through the report generator's `redactSecrets`
  * before it leaves the process. No second pattern set is defined here; see
  * `redactJson` for how the same exported redactor is applied to a JSON tree.
- * The nonce is never logged, never written to disk, and never echoed back in a
- * rejection message.
  */
 
 import crypto from "node:crypto";
@@ -52,7 +37,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
+import { classifyRule } from "./analyzer/health.js";
+import { RULES } from "./analyzer/rules.js";
 import { dayKeysEndingAt, localDayKey } from "./analyzer/trends.js";
+import { buildSuggestions, listSuggestionIds, suggestionTitleFor, TOOL_IDS, toolLabel } from "./suggestions/index.js";
+import { SUGGESTION_DEFS } from "./suggestions/sections.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -65,61 +54,55 @@ export const LOOPBACK_HOST = "127.0.0.1";
 /** Loopback peer addresses, in the forms Node reports them. */
 const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
-/** Methods that cannot change state, and so carry no CSRF requirement. */
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-
 /** Lazily imported dependencies. Overridable per-app for tests. */
 export const DEFAULT_MODULES = Object.freeze({
   registry: "./collectors/registry.js",
   health: "./analyzer/health.js",
   trends: "./analyzer/trends.js",
   report: "./report/generator.js",
-  fixBase: "./fixes/base.js",
 });
 
 /**
- * BP-004.01..05. `specifier` is resolved lazily: waves 4B/4C may not have
- * landed yet, and a fix whose module is absent is reported as `unavailable`
- * with a reason rather than silently dropped from the list.
- */
-export const FIX_CATALOG = Object.freeze([
-  { id: "claude-auto-compact", title: "Enable auto-compaction", cli: "claude", kind: "json-merge", blueprint: "BP-004.01", specifier: "./fixes/claude/auto-compact.js" },
-  { id: "claude-output-hygiene", title: "Output hygiene instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.02", specifier: "./fixes/claude/output-hygiene.js" },
-  { id: "claude-batch-commands", title: "Batch commands instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.03", specifier: "./fixes/claude/batch-commands.js" },
-  { id: "claude-worker-cap", title: "Worker cap instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.04", specifier: "./fixes/claude/worker-cap.js" },
-  { id: "claude-compact-contract", title: "Compact contract instruction", cli: "claude", kind: "append-section", blueprint: "BP-004.05", specifier: "./fixes/claude/compact-contract.js" },
-]);
-
-/**
- * Publish each rule's fix title and target CLI next to its id, and each session's
- * display name, so no client keeps a second copy of either catalogue.
+ * Publish each rule's suggestion title and target tool next to its id, and
+ * each session's display name, so no client keeps a second copy of either
+ * catalogue.
  *
- * The offer line needs a human name; `rule.fix` is an id. The page used to hold
- * its own id -> title map with a drift test reading THIS file to keep the two
- * honest — which is two catalogues and a test standing between them, exactly
- * the shape F-021 recorded. The title is a server fact, so the server states
- * it. An id absent from the catalogue publishes `fixTitle: null` and
- * `fixCliName: null` rather than guessed values. An unknown session CLI gets
- * `cliName: null`; the client renders no cross-CLI note without both names.
+ * PRODUCT DECISION: a suggestion targets the SAME tool whose session showed
+ * the problem — a Codex problem gets a Codex-targeted suggestion — so the
+ * target tool here is simply `session.cli`, not a fixed CLI a catalogue
+ * entry names. `rule.fix` is still the id `src/analyzer/rules.js` names
+ * (unchanged); it now looks up `src/suggestions/sections.js` instead of a
+ * fix class. A session whose CLI is not one of the four SessionRx knows how
+ * to suggest a change for (`TOOL_IDS`) publishes `suggestionAvailable: false`
+ * rather than a guessed target.
  *
  * Mutates in place: these objects are built fresh by `analyzeAll` per request.
  *
  * @param {Array<object>|undefined} sessions
- * @param {Map<string, {title?: string, cli?: string}>} fixes
  * @param {Map<string, string>} displayNames
  */
-export function annotateFixTitles(sessions, fixes, displayNames = new Map()) {
+export function annotateSuggestions(sessions, displayNames = new Map()) {
   for (const session of Array.isArray(sessions) ? sessions : []) {
     session.cliName = typeof session?.cli === "string" ? displayNames.get(session.cli) ?? null : null;
+    const toolId = typeof session?.cli === "string" && TOOL_IDS.includes(session.cli) ? session.cli : null;
     for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
       if (!rule || typeof rule !== "object") continue;
-      const fix = typeof rule.fix === "string" ? fixes.get(rule.fix) : undefined;
-      rule.fixTitle = typeof fix?.title === "string" ? fix.title : null;
-      rule.fixCli = typeof fix?.cli === "string" ? fix.cli : null;
-      rule.fixCliName = typeof fix?.cli === "string" ? displayNames.get(fix.cli) ?? null : null;
+      const hasFix = typeof rule.fix === "string" && rule.fix.length > 0;
+      const title = hasFix && toolId ? suggestionTitleFor(rule.fix, toolId) : null;
+      rule.suggestionAvailable = Boolean(title);
+      rule.suggestionTitle = title;
+      rule.suggestionTool = rule.suggestionAvailable ? toolId : null;
+      rule.suggestionToolName = rule.suggestionAvailable ? (displayNames.get(toolId) ?? toolLabel(toolId)) : null;
+      rule.suggestionUnavailableReason = !hasFix
+        ? null
+        : rule.suggestionAvailable
+          ? null
+          : toolId
+            ? "sessionrx has no suggestion definition for this id"
+            : "sessionrx does not offer a suggested change for this CLI";
     }
     // A sub-agent session carries the same six verdicts and the same offers.
-    annotateFixTitles(session?.subagentSessions, fixes, displayNames);
+    annotateSuggestions(session?.subagentSessions, displayNames);
   }
 }
 
@@ -283,48 +266,13 @@ function isLoopbackPeer(address) {
  * The ONE Host-header check. Exact match only (never a suffix/substring
  * match — `localhost.evil.com` must fail this) against the loopback
  * host:port allowlist built from the address this server actually bound.
- * Called by the standalone Host middleware (every method) and by
- * `csrfFailure` (mutating methods only) so there is exactly one place that
- * knows what a legitimate Host header looks like.
+ * Runs on every method, including a bare GET, because DNS rebinding can make
+ * even a read leak once the browser treats the response as same-origin with
+ * an attacker's page.
  */
 function isAllowedHost(state, req) {
   const host = req.headers.host;
   return typeof host === "string" && state.hostAllowlist.has(host.toLowerCase());
-}
-
-function constantTimeEquals(a, b) {
-  if (typeof a !== "string" || typeof b !== "string") return false;
-  const left = Buffer.from(a, "utf8");
-  const right = Buffer.from(b, "utf8");
-  if (left.length !== right.length) return false;
-  return crypto.timingSafeEqual(left, right);
-}
-
-/**
- * The three-part mutating-route check. Returns `null` when the request may
- * proceed, otherwise `{status, error, reason}`. No rejection message contains
- * the nonce or echoes the attacker-supplied header value back.
- */
-export function csrfFailure(state, req) {
-  const supplied = req.headers["x-csrf-token"];
-  if (typeof supplied !== "string" || supplied.length === 0) {
-    return { reason: "csrf_token_missing", error: "X-CSRF-Token header is required on every mutating request" };
-  }
-  if (!constantTimeEquals(supplied, state.nonce)) {
-    return { reason: "csrf_token_mismatch", error: "X-CSRF-Token does not match this server's startup nonce" };
-  }
-  if (!isAllowedHost(state, req)) {
-    return { reason: "host_rejected", error: "Host header is not the loopback address this server is bound to" };
-  }
-  const host = req.headers.host;
-  const origin = req.headers.origin;
-  if (typeof origin !== "string" || origin.length === 0) {
-    return { reason: "origin_missing", error: "Origin header is required on every mutating request" };
-  }
-  if (origin !== `http://${host.toLowerCase()}`) {
-    return { reason: "origin_rejected", error: "Origin header is not this server's own origin" };
-  }
-  return null;
 }
 
 function parseIsoDate(raw, label) {
@@ -442,7 +390,23 @@ function sessionWindow(sessions, { cli, project, from, to } = {}) {
   };
 }
 
-function calculateWindowTotals(sessions) {
+function ruleCatalog(sessions, analysis) {
+  const catalog = new Map(
+    Array.isArray(analysis?.ruleApplicability)
+      ? RULES.map((rule) => [rule.id, { id: rule.id, name: rule.name, fix: rule.fix ?? null }])
+      : [],
+  );
+  for (const session of sessions) {
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      if (!rule || typeof rule.id !== "string" || catalog.has(rule.id)) continue;
+      catalog.set(rule.id, { id: rule.id, name: rule.name ?? null, fix: rule.fix ?? null });
+    }
+  }
+  return catalog;
+}
+
+function calculateWindowTotals(sessions, analysis) {
+  const catalog = ruleCatalog(sessions, analysis);
   const totals = {
     sessions: sessions.length,
     observedFindings: 0,
@@ -452,14 +416,15 @@ function calculateWindowTotals(sessions) {
     measuredChecks: 0,
   };
   for (const session of sessions) {
-    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
-      const status = rule?.evidence?.status;
+    for (const [ruleId, ruleMeta] of catalog) {
+      const status = classifyRule(session, ruleId, analysis?.ruleApplicability);
       if (status === "observed") {
         totals.observedFindings += 1;
-        if (rule.fix) totals.fixableFindings += 1;
+        const rule = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+        if (rule?.fix ?? ruleMeta.fix) totals.fixableFindings += 1;
       } else if (status === "not-observed") {
         totals.notObservedChecks += 1;
-      } else {
+      } else if (status === "unknown") {
         totals.unknownChecks += 1;
       }
     }
@@ -493,28 +458,24 @@ function calculateTopFixes(sessions) {
 }
 
 /**
- * "Fixes available" is a promise the product has to be able to keep, so it is
- * counted against the fix catalogue this build actually carries — the same
- * `state.fixCatalog` every other route resolves its fix facts from, never a
- * second list of ids kept here. A rule is free to name any id; an id with no
- * descriptor behind it has no `preview()`/`apply()`, so offering it would send
- * the user to a remedy that does not exist.
+ * "Suggestions available" is a promise the product has to be able to keep, so
+ * it is counted against the suggestion catalogue this build actually carries
+ * (`listSuggestionIds()`), never a second list of ids kept here. A rule is
+ * free to name any id; an id with no suggestion definition behind it has
+ * nothing `/api/suggestions` can generate, so offering it would send the
+ * user to a remedy that does not exist.
  *
  * A finding whose fix id is unknown does NOT disappear: it stays an observed
  * finding in `windowTotals.observedFindings`, and is published here as
  * `unknownFixFindings` / `unknownFixIds` so the gap between "a problem was
- * found" and "a fix exists for it" is visible instead of silent. Only the
- * availability claim is withdrawn.
+ * found" and "a suggestion exists for it" is visible instead of silent. Only
+ * the availability claim is withdrawn.
  *
  * `windowTotals.fixableFindings` is a different measurement on purpose — it
- * counts findings that NAME a fix, catalogue or not — and is left alone.
+ * counts findings that NAME a fix id, catalogue or not — and is left alone.
  */
-export function calculateDistinctFixes(sessions, fixCatalog = FIX_CATALOG) {
-  const catalogIds = new Set(
-    (Array.isArray(fixCatalog) ? fixCatalog : [])
-      .map((descriptor) => descriptor?.id)
-      .filter((id) => typeof id === "string" && id),
-  );
+export function calculateDistinctFixes(sessions, suggestionIds = listSuggestionIds()) {
+  const catalogIds = new Set(suggestionIds);
   const fixIds = new Set();
   const clis = new Set();
   const unknownFixIds = new Set();
@@ -533,12 +494,10 @@ export function calculateDistinctFixes(sessions, fixCatalog = FIX_CATALOG) {
       if (typeof session?.cli === "string" && session.cli) clis.add(session.cli);
     }
   }
-  const fixClis = new Set(
-    (Array.isArray(fixCatalog) ? fixCatalog : [])
-      .filter((descriptor) => fixIds.has(descriptor?.id))
-      .map((descriptor) => descriptor?.cli)
-      .filter((cli) => typeof cli === "string" && cli),
-  );
+  // The tools a suggestion could actually target: every SUPPORTED session CLI
+  // among the findings counted above, not a fixed "Claude Code only" list —
+  // a suggestion now targets whichever tool the finding came from.
+  const fixClis = new Set([...clis].filter((cli) => TOOL_IDS.includes(cli)));
   return {
     count: fixIds.size,
     findings,
@@ -560,7 +519,8 @@ function localCalendarDayCount(from, to) {
   return count;
 }
 
-function calculateWindowSeries(sessions, query) {
+function calculateWindowSeries(sessions, query, analysis) {
+  const catalog = ruleCatalog(sessions, analysis);
   const dated = sessions
     .map((session) => {
       const started = Date.parse(session?.startedAt ?? "");
@@ -594,12 +554,13 @@ function calculateWindowSeries(sessions, query) {
     const day = index.get(localDayKey(new Date(started)));
     if (day === undefined) continue;
     series.sessions[day] += 1;
-    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
-      const status = rule?.evidence?.status;
+    for (const [ruleId, ruleMeta] of catalog) {
+      const status = classifyRule(session, ruleId, analysis?.ruleApplicability);
       if (status === "observed") {
         series.observedFindings[day] += 1;
-        if (rule.fix) series.fixableFindings[day] += 1;
-      } else if (status !== "not-observed") {
+        const rule = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+        if (rule?.fix ?? ruleMeta.fix) series.fixableFindings[day] += 1;
+      } else if (status === "unknown") {
         series.unknownChecks[day] += 1;
       }
     }
@@ -740,69 +701,8 @@ export function sortSessions(sessions, field = "startedAt", order = "desc") {
 }
 
 // ---------------------------------------------------------------------------
-// Fix resolution
+// HTML
 // ---------------------------------------------------------------------------
-
-function looksLikeFix(value) {
-  return Boolean(value)
-    && typeof value === "object"
-    && typeof value.preview === "function"
-    && typeof value.check === "function";
-}
-
-/**
- * Instantiate a catalog entry. Waves 4B/4C own the fix modules and their export
- * names are not fixed by the blueprint, so every exported binding is tried:
- * a fix instance, a factory returning one, or a class.
- */
-async function instantiateFix(descriptor, env, load) {
-  if (typeof descriptor.factory === "function") {
-    const made = await descriptor.factory({ env, descriptor });
-    if (!looksLikeFix(made)) {
-      throw new HttpError(500, `fix "${descriptor.id}" factory did not return a fix`);
-    }
-    return made;
-  }
-
-  const loaded = await load(`fix:${descriptor.id}`);
-  if (!loaded.ok) {
-    return { unavailable: `fix module is not installed in this build (${descriptor.specifier})` };
-  }
-
-  const module = loaded.module;
-  const ordered = ["createFix", "default", ...Object.keys(module)];
-  const tried = new Set();
-  for (const name of ordered) {
-    if (tried.has(name)) continue;
-    tried.add(name);
-    const candidate = module[name];
-    if (looksLikeFix(candidate)) return candidate;
-    if (typeof candidate !== "function") continue;
-    for (const build of [() => candidate({ env }), () => new candidate({ env })]) {
-      try {
-        const made = build();
-        if (looksLikeFix(made)) return made;
-      } catch {
-        // Wrong calling convention for this binding; try the next one.
-      }
-    }
-  }
-  return { unavailable: `fix module exports no usable fix (${descriptor.specifier})` };
-}
-
-// ---------------------------------------------------------------------------
-// HTML with the injected nonce (BP-005.13)
-// ---------------------------------------------------------------------------
-
-const CSRF_META = /<meta\s[^>]*name=(["'])csrf-token\1[^>]*>/i;
-const HEAD_OPEN = /<head(\s[^>]*)?>/i;
-
-export function injectNonce(html, nonce) {
-  const tag = `<meta name="csrf-token" content="${nonce}">`;
-  if (CSRF_META.test(html)) return html.replace(CSRF_META, tag);
-  if (HEAD_OPEN.test(html)) return html.replace(HEAD_OPEN, (match) => `${match}\n    ${tag}`);
-  return `${tag}\n${html}`;
-}
 
 const CSP = [
   "default-src 'self'",
@@ -1016,7 +916,7 @@ export function scanCacheKey({ since, limit }) {
  * The files on disk remain the only record; this only avoids reading them again
  * while they demonstrably have not changed.
  *
- * THE HAZARD IT IS BUILT AROUND: `annotateFixTitles` mutates its input in
+ * THE HAZARD IT IS BUILT AROUND: `annotateSuggestions` mutates its input in
  * place, and it is not alone in being allowed to — every consumer of a collect
  * has until now been handed a private object that no one else would ever see
  * again. Sharing one changes that contract silently, and the damage would not
@@ -1154,11 +1054,9 @@ function createScanCache({ maxEntries = SCAN_CACHE_MAX_ENTRIES, enabled = true, 
 
 /**
  * @param {object} [options]
- * @param {string} [options.nonce] per-process CSRF nonce (generated when absent)
  * @param {string} [options.publicDir] static root; nothing outside it is served
- * @param {string} [options.home] home used to resolve fix targets and undo state
+ * @param {string} [options.home] home used to resolve suggestion targets, read-only
  * @param {object} [options.modules] specifier or module-object overrides
- * @param {Array}  [options.fixCatalog] fix descriptors (`factory` allowed)
  * @param {() => Date} [options.now]
  * @param {false|object} [options.scanCache] `false` turns the scan cache off
  *   entirely, so every request re-reads the corpus; an object overrides
@@ -1169,13 +1067,11 @@ function createScanCache({ maxEntries = SCAN_CACHE_MAX_ENTRIES, enabled = true, 
  */
 export function createApp(options = {}) {
   const state = {
-    nonce: typeof options.nonce === "string" && options.nonce ? options.nonce : crypto.randomBytes(32).toString("hex"),
     publicDir: path.resolve(options.publicDir ?? DEFAULT_PUBLIC_DIR),
     home: path.resolve(options.home ?? process.env.SESSION_RX_HOME ?? os.homedir()),
     host: LOOPBACK_HOST,
     port: null,
     hostAllowlist: new Set(),
-    fixCatalog: Array.isArray(options.fixCatalog) ? options.fixCatalog : FIX_CATALOG,
     scanLimit: Number.isInteger(options.scanLimit) && options.scanLimit > 0 ? options.scanLimit : DEFAULT_SCAN_LIMIT,
     scanCache: createScanCache(
       options.scanCache === false
@@ -1199,9 +1095,6 @@ export function createApp(options = {}) {
   };
 
   const specifiers = { ...DEFAULT_MODULES, ...(options.modules ?? {}) };
-  for (const descriptor of state.fixCatalog) {
-    if (descriptor.specifier) specifiers[`fix:${descriptor.id}`] = descriptor.specifier;
-  }
   const load = createLoader(specifiers);
   state.load = load;
 
@@ -1232,12 +1125,11 @@ export function createApp(options = {}) {
 
   // ---- 3. Host allowlist, on EVERY method (defeats DNS rebinding) --------
   //
-  // §5 below only runs for mutating methods, so without this a bare GET —
+  // Every route here is a GET, so this is the whole defense: a bare GET —
   // including one served after DNS rebinding pointed the victim's browser at
-  // this loopback port under an attacker-controlled hostname — was never
-  // Host-checked. `isAllowedHost` is the SAME function §5's `csrfFailure`
-  // calls; there is exactly one place that knows what a legitimate Host
-  // header looks like.
+  // this loopback port under an attacker-controlled hostname — is refused
+  // unless the Host header names the loopback address this server actually
+  // bound.
   app.use((req, res, next) => {
     if (!isAllowedHost(state, req)) {
       res.status(403).type("application/json").send(JSON.stringify({
@@ -1269,24 +1161,9 @@ export function createApp(options = {}) {
     next();
   });
 
-  // ---- 5. CSRF on every mutating route, BEFORE the body is parsed ---------
-  app.use((req, res, next) => {
-    if (SAFE_METHODS.has(req.method)) {
-      next();
-      return;
-    }
-    const failure = csrfFailure(state, req);
-    if (failure) {
-      res.status(403).type("application/json").send(JSON.stringify({
-        error: failure.error,
-        reason: failure.reason,
-      }));
-      return;
-    }
-    next();
-  });
-
-  app.use(express.json({ limit: BODY_LIMIT, strict: true }));
+  // Every route below is GET: SessionRx never writes a user's files (THE
+  // SUGGESTION CONTRACT), so there is no mutating route left to defend and no
+  // request body to parse.
 
   // ---- helpers bound to this app ------------------------------------------
 
@@ -1340,7 +1217,7 @@ export function createApp(options = {}) {
    * goes through `state.scanCache`, which re-reads the files only when the
    * files themselves have changed. What comes back is always this request's own
    * copy — the cache never hands out the object it holds — so `analyzeAll`,
-   * `annotateFixTitles` and everything downstream keep the private object they
+   * `annotateSuggestions` and everything downstream keep the private object they
    * have always had. Nothing else in this function changed: the scan bound, the
    * `atLimit` derivation and the note are computed from the returned corpus
    * exactly as before, so `corpusComplete` and every verdict that depends on it
@@ -1384,7 +1261,7 @@ export function createApp(options = {}) {
    * most of the 599ms and buy two hazards for it: `analyzeAll` publishes the
    * `generatedAt` it is handed (`src/analyzer/health.js`), which is THIS
    * request's clock and would be served stale to the next one; and
-   * `annotateFixTitles` below mutates the analysis in place, so a shared
+   * `annotateSuggestions` below mutates the analysis in place, so a shared
    * analysis would need its own defensive copy — the cost the caching was
    * meant to avoid, on the tree where a wrong verdict would actually show.
    * Not worth it for 12% of a request that is already fixed.
@@ -1405,17 +1282,12 @@ export function createApp(options = {}) {
         .filter((spec) => Array.isArray(spec) && typeof spec[0] === "string" && typeof spec[1] === "string")
         .map(([id, displayName]) => [id, displayName]),
     );
-    const fixes = new Map(
-      state.fixCatalog
-        .filter((fix) => typeof fix?.id === "string")
-        .map((fix) => [fix.id, { title: fix.title, cli: fix.cli }]),
-    );
-    annotateFixTitles(analysis.sessions, fixes, displayNames);
-    annotateFixTitles(analysis.subagentSessions, fixes, displayNames);
+    annotateSuggestions(analysis.sessions, displayNames);
+    annotateSuggestions(analysis.subagentSessions, displayNames);
     return { ...collectedFor, analysis };
   }
 
-  // ---- 6. `/` and `/index.html` with the nonce injected -------------------
+  // ---- 6. `/` and `/index.html` ------------------------------------------
 
   const serveIndex = route(async (req, res) => {
     const indexPath = path.join(state.publicDir, "index.html");
@@ -1429,10 +1301,9 @@ export function createApp(options = {}) {
     }
     res.status(200);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    // The nonce must never be cached, in this process or a later one.
-    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Content-Security-Policy", CSP);
-    res.send(injectNonce(html, state.nonce));
+    res.send(html);
   });
 
   app.get("/", serveIndex);
@@ -1478,28 +1349,29 @@ export function createApp(options = {}) {
     const sessionWindowValue = sessionWindow(allSessions, query);
     const windowedSessions = filterSessions(allSessions, { from: query.from, to: query.to });
     const cardSessions = sortSessions(windowedSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
-    const windowTotals = calculateWindowTotals(windowedSessions);
-    const windowSeries = calculateWindowSeries(windowedSessions, query);
+    const windowTotals = calculateWindowTotals(windowedSessions, result.analysis);
+    const windowSeries = calculateWindowSeries(windowedSessions, query, result.analysis);
     const coverage = calculateCoverage(result);
     const comparison = calculateComparison(query, coverage, result.scan, allSessions, windowTotals);
-    const ruleTotalsById = new Map();
+    const ruleTotals = [...ruleCatalog(windowedSessions, result.analysis).values()].map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      observed: 0,
+      notObserved: 0,
+      unknown: 0,
+      notApplicable: 0,
+    }));
+    const ruleTotalsById = new Map(ruleTotals.map((rule) => [rule.id, rule]));
     for (const session of windowedSessions) {
-      const rules = Array.isArray(session?.rules) ? session.rules : [];
-      const rulesById = new Map(rules.filter((rule) => typeof rule?.id === "string").map((rule) => [rule.id, rule]));
-      for (const rule of rules) {
-        if (!rule || typeof rule.id !== "string") continue;
-        if (!ruleTotalsById.has(rule.id)) {
-          ruleTotalsById.set(rule.id, { id: rule.id, name: rule.name ?? null, observed: 0, notObserved: 0, unknown: 0 });
-        }
-      }
-      for (const [id, total] of ruleTotalsById) {
-        const status = rulesById.get(id)?.evidence?.status;
-        if (status === "observed") total.observed += 1;
+      for (const ruleId of ruleTotalsById.keys()) {
+        const total = ruleTotalsById.get(ruleId);
+        const status = classifyRule(session, ruleId, result.analysis.ruleApplicability);
+        if (status === "notApplicable") total.notApplicable += 1;
+        else if (status === "observed") total.observed += 1;
         else if (status === "not-observed") total.notObserved += 1;
         else total.unknown += 1;
       }
     }
-    const ruleTotals = [...ruleTotalsById.values()];
     await sendJson(res, 200, {
       sessions: cardSessions,
       // The true count over the FULL analysis, so the health page's "N of
@@ -1512,7 +1384,7 @@ export function createApp(options = {}) {
       windowTotals,
       windowSeries,
       topFixes: calculateTopFixes(windowedSessions),
-      distinctFixes: calculateDistinctFixes(windowedSessions, state.fixCatalog),
+      distinctFixes: calculateDistinctFixes(windowedSessions),
       coverage,
       comparison,
       collectors: result.analysis.collectors,
@@ -1734,104 +1606,6 @@ export function createApp(options = {}) {
     }
   }
 
-  /**
-   * The applied-fix history section 5 renders, read from the ONE record the fix
-   * engine keeps: the FVA-007 transaction journal, through the engine's own
-   * `readJournal()`.  No second parser, no second format.
-   *
-   * Every way of NOT reading it returns `{status: "unknown", reason}`.  "No fix
-   * was applied in this period" is a claim about the user's own history, and an
-   * unread journal is no evidence for it — that sentence printed under five
-   * freshly applied fixes was the one outright falsehood in this product.
-   */
-  async function appliedFixHistory({ from, to }) {
-    const unknown = (reason) => ({ status: "unknown", reason });
-    const detail = (error) => (error?.code ? error.code : error instanceof Error ? error.message : String(error));
-
-    const loaded = await load("fixBase");
-    if (!loaded.ok) {
-      return unknown(`the fix engine is unavailable in this build (${loaded.specifier ?? "no module registered"}), so the transaction journal could not be read`);
-    }
-    const base = loaded.module;
-    let env;
-    try {
-      env = await fixEnvFor(base);
-    } catch (error) {
-      return unknown(`the fix environment could not be created (${detail(error)}), so the transaction journal could not be read`);
-    }
-    // `display()` keeps the journal and undo records in `~/...` form: the report
-    // is a file the user is expected to paste in public.
-    const shown = (value) => (typeof value === "string" && value !== "" ? env.display(value) : null);
-    const journal = shown(env.journalPath) ?? "the transaction journal";
-
-    let size;
-    try {
-      size = (await fs.stat(env.journalPath)).size;
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        return unknown(`${journal} does not exist, so no applied-fix history could be read: either no fix has ever been applied here or the record was removed, and SessionRx cannot tell those two apart`);
-      }
-      return unknown(`${journal} could not be opened (${detail(error)}), so no applied-fix history could be read`);
-    }
-
-    let rows;
-    try {
-      rows = await base.readJournal(env);
-    } catch (error) {
-      return unknown(`${journal} could not be read (${detail(error)})`);
-    }
-    // `readJournal` drops a line it cannot parse, so a file with bytes and no
-    // record is a malformed journal, not an empty one.
-    if (size > 0 && rows.length === 0) {
-      return unknown(`${journal} holds ${size} byte(s) but not one parseable record, so the applied-fix history could not be reconstructed`);
-    }
-    const events = rows.filter((row) => typeof row?.event === "string" && typeof row?.fixId === "string" && row.fixId !== "");
-    if (rows.length > 0 && events.length === 0) {
-      return unknown(`${journal} holds ${rows.length} record(s), not one of which names both a fix and an event, so the applied-fix history could not be reconstructed`);
-    }
-    const applies = events.filter((row) => row.event === "apply");
-    if (events.length > 0 && applies.length === 0) {
-      return unknown(`${journal} holds ${events.length} record(s) but not one apply, so what was applied could not be reconstructed from it`);
-    }
-
-    const reverted = new Set(events.filter((row) => row.event === "undo").map((row) => row.undoPath));
-    const titles = new Map(
-      state.fixCatalog
-        .filter((fix) => typeof fix?.id === "string" && typeof fix?.title === "string")
-        .map((fix) => [fix.id, fix.title]),
-    );
-    const fromMs = from ? from.getTime() : null;
-    const toMs = to ? to.getTime() : null;
-    const inWindow = (ts) => {
-      if (fromMs === null && toMs === null) return true;
-      const at = Date.parse(typeof ts === "string" ? ts : "");
-      // An apply with no usable timestamp is EXCLUDED from a bounded window
-      // rather than assumed to be inside it, exactly as `filterSessions` does.
-      if (!Number.isFinite(at)) return false;
-      if (fromMs !== null && at < fromMs) return false;
-      if (toMs !== null && at > toMs) return false;
-      return true;
-    };
-
-    return applies.filter((row) => inWindow(row.ts)).map((row) => {
-      const targets = (Array.isArray(row.targets) ? row.targets : [])
-        .map((target) => shown(target?.path))
-        .filter(Boolean);
-      return {
-        id: row.fixId,
-        name: titles.get(row.fixId) ?? null,
-        target: targets.length > 0 ? targets.join(", ") : null,
-        appliedAt: typeof row.ts === "string" ? row.ts : null,
-        status: reverted.has(row.undoPath) ? "reverted" : "applied",
-        // The journal records each target's content HASH, never its bytes, so
-        // the BEFORE text genuinely is not in it. The generator says it was not
-        // recorded rather than implying the fix went unaudited.
-        before: null,
-        undoPath: shown(row.undoPath),
-      };
-    });
-  }
-
   // BP-005.05
   app.get("/api/report", route(async (req, res) => {
     const from = parseIsoDate(singleValue(req.query.from, "from"), "from");
@@ -1874,11 +1648,11 @@ export function createApp(options = {}) {
       contextMeasurement: { totalContextReadTokens, contextSessionsMeasured, contextSessionsExcluded },
       trend: await reportTrend(result.collected, { from, to, cli }),
     });
-    // `buildReportInput` coerces a non-array `fixes` to `[]`, and `[]` is what
-    // the generator renders as "No fix was applied in this period" — so an
-    // unreadable journal passed through it would come out as that same
-    // falsehood. The history is attached here instead, where `unknown` survives.
-    reportInput.fixes = await appliedFixHistory({ from, to });
+    // SessionRx never applies a fix itself any more (THE SUGGESTION CONTRACT),
+    // so there is no applied-fix journal to read. `[]` is what the generator
+    // renders as "No fix was applied in this period" — which is now simply
+    // true, always, rather than a claim this route has to go verify.
+    reportInput.fixes = [];
     const document = reportModule.generateReportDocument(reportInput);
     await sendJson(res, 200, {
       markdown: document.markdown,
@@ -1889,210 +1663,51 @@ export function createApp(options = {}) {
       // Not in BP-005.05, and required anyway: a report assembled from a corpus
       // where a collector failed must say so, or it reads as a complete picture.
       diagnostics: result.analysis.diagnostics ?? [],
+      // A plain-language rollup of the SAME verdicts the markdown above was
+      // built from (reportInput.summary, health.buildManagerSummary) — never
+      // parsed back out of the assembled Markdown text, which is free to
+      // change under it. public/js/pages/report.js renders this as cards.
+      summary: reportInput.summary ?? null,
     });
   }));
 
-  // Fix lifecycle -----------------------------------------------------------
+  // Suggestions --------------------------------------------------------------
+  //
+  // Read-only. `id` narrows to one `rule.fix`/suggestion id, `tool` to one of
+  // `TOOL_IDS`, `scope` to "global" or "project"; any of the three may be
+  // omitted, in which case every matching combination is returned. A marker
+  // (or, for the settings suggestion, a key) already present in a resolvable
+  // GLOBAL target is reported as `status: "already-added"`; a project target
+  // is never resolvable from this process, so it is always `"unknown"`
+  // (never claimed either way) — see `src/suggestions/targets.js`.
 
-  /** One fix env per app: all targets resolve under `state.home` and nowhere else. */
-  let fixEnvPromise = null;
-  function fixEnvFor(base) {
-    fixEnvPromise ??= Promise.resolve(base.createFixEnvironment({ home: state.home, now: state.now }));
-    return fixEnvPromise;
-  }
-  async function fixEnv(res) {
-    const base = await require$(res, "fixBase", "the fix engine");
-    if (!base) return null;
-    return { base, env: await fixEnvFor(base) };
-  }
-
-  function findDescriptor(fixId) {
-    const descriptor = state.fixCatalog.find((candidate) => candidate.id === fixId);
-    if (!descriptor) {
-      throw new HttpError(404, `no fix with id ${fixId} exists`, { reason: "fix_not_found" });
+  function parseScope(raw) {
+    if (raw === undefined || raw === null || raw === "") return null;
+    if (raw !== "global" && raw !== "project") {
+      throw new HttpError(400, `scope must be "global" or "project": ${raw}`);
     }
-    return descriptor;
-  }
-
-  /** Resolve a fix, or answer with the honest reason it is not available. */
-  async function resolveFix(res, fixId) {
-    const descriptor = findDescriptor(fixId);
-    const loadedEnv = await fixEnv(res);
-    if (!loadedEnv) return null;
-    const fix = await instantiateFix(descriptor, loadedEnv.env, load);
-    if (fix.unavailable) {
-      await sendError(res, 503, fix.unavailable, {
-        reason: "fix_unavailable",
-        fixId: descriptor.id,
-        blueprint: descriptor.blueprint ?? null,
-      });
-      return null;
-    }
-    return { descriptor, fix, base: loadedEnv.base, env: loadedEnv.env };
+    return raw;
   }
 
-  /** Not in BP-005; documented addition so the UI can list fixes before previewing one. */
-  app.get("/api/fixes", route(async (req, res) => {
-    const loadedEnv = await fixEnv(res);
-    if (!loadedEnv) return;
-    const loadedRegistry = await load("registry");
-    const registry = loadedRegistry.ok ? loadedRegistry.module : null;
-    const displayNames = new Map(
-      (Array.isArray(registry?.COLLECTOR_SPECS) ? registry.COLLECTOR_SPECS : [])
-        .filter((spec) => Array.isArray(spec) && typeof spec[0] === "string" && typeof spec[1] === "string")
-        .map(([id, displayName]) => [id, displayName]),
-    );
-    const fixes = [];
-    for (const descriptor of state.fixCatalog) {
-      const fix = await instantiateFix(descriptor, loadedEnv.env, load);
-      const cli = typeof descriptor?.cli === "string" ? descriptor.cli : null;
-      const cliName = cli ? displayNames.get(cli) ?? null : null;
-      if (fix.unavailable) {
-        fixes.push({
-          id: descriptor.id,
-          title: descriptor.title ?? descriptor.id,
-          cli,
-          cliName,
-          kind: descriptor.kind ?? null,
-          blueprint: descriptor.blueprint ?? null,
-          available: false,
-          reason: fix.unavailable,
-        });
-        continue;
-      }
-      fixes.push({
-        id: fix.id ?? descriptor.id,
-        title: fix.title ?? descriptor.title ?? descriptor.id,
-        cli,
-        cliName,
-        kind: fix.kind ?? descriptor.kind ?? null,
-        blueprint: descriptor.blueprint ?? null,
-        available: true,
-        applyable: fix.applyable !== false,
-        ruleId: fix.ruleId ?? null,
-        rationale: fix.rationale ?? null,
-      });
+  function parseTool(raw) {
+    if (raw === undefined || raw === null || raw === "") return null;
+    if (!TOOL_IDS.includes(raw)) {
+      throw new HttpError(400, `tool must be one of: ${TOOL_IDS.join(", ")}`);
     }
-    await sendJson(res, 200, { fixes, home: state.home });
-  }));
-
-  // BP-005.09 — GET, because `check` reads and changes nothing.
-  app.get("/api/fixes/:fixId/check", route(async (req, res) => {
-    const resolved = await resolveFix(res, String(req.params.fixId ?? ""));
-    if (!resolved) return;
-    const checked = await resolved.fix.check();
-    // Spread FIRST: the documented keys are a guarantee, so they win over
-    // whatever the fix returned under the same name.
-    await sendJson(res, 200, {
-      ...checked,
-      applied: checked?.applied === true,
-      marker: checked?.marker ?? null,
-    });
-  }));
-
-  // BP-005.06
-  app.post("/api/fixes/:fixId/preview", route(async (req, res) => {
-    const resolved = await resolveFix(res, String(req.params.fixId ?? ""));
-    if (!resolved) return;
-    let preview;
-    try {
-      preview = await resolved.fix.preview();
-    } catch (error) {
-      await sendFixError(res, resolved.descriptor, error, "preview");
-      return;
-    }
-    await sendJson(res, 200, {
-      ...preview,
-      description: preview?.description ?? null,
-      diff: preview?.diff ?? "",
-      files_affected: Array.isArray(preview?.files_affected) ? preview.files_affected : [],
-      reversible: preview?.reversible === true,
-      check: preview?.check ?? null,
-    });
-  }));
-
-  // BP-005.07
-  app.post("/api/fixes/:fixId/apply", route(async (req, res) => {
-    const resolved = await resolveFix(res, String(req.params.fixId ?? ""));
-    if (!resolved) return;
-    if (typeof resolved.fix.apply !== "function") {
-      await sendError(res, 409, `fix ${resolved.descriptor.id} is a recommendation and writes nothing`, {
-        reason: "fix_not_applyable",
-        fixId: resolved.descriptor.id,
-      });
-      return;
-    }
-    let applied;
-    try {
-      applied = await resolved.fix.apply();
-    } catch (error) {
-      await sendFixError(res, resolved.descriptor, error, "apply");
-      return;
-    }
-    await sendJson(res, 200, {
-      ...applied,
-      applied: applied?.applied === true,
-      undoPath: applied?.undoPath ?? null,
-      files_affected: Array.isArray(applied?.files_affected) ? applied.files_affected : [],
-      diff: applied?.diff ?? "",
-    });
-  }));
-
-  // BP-005.08
-  app.post("/api/fixes/:fixId/undo", route(async (req, res) => {
-    const resolved = await resolveFix(res, String(req.params.fixId ?? ""));
-    if (!resolved) return;
-    const undoPath = typeof req.body?.undoPath === "string" && req.body.undoPath ? req.body.undoPath : null;
-    if (typeof resolved.fix.undo !== "function") {
-      await sendError(res, 409, `fix ${resolved.descriptor.id} writes nothing, so there is nothing to undo`, {
-        reason: "fix_not_applyable",
-        fixId: resolved.descriptor.id,
-      });
-      return;
-    }
-    let restored;
-    try {
-      restored = await resolved.fix.undo(undoPath ?? undefined);
-    } catch (error) {
-      await sendFixError(res, resolved.descriptor, error, "undo");
-      return;
-    }
-    await sendJson(res, 200, {
-      ...restored,
-      restored: restored?.restored === true,
-      byteIdentical: restored?.byteIdentical === true,
-    });
-  }));
-
-  /**
-   * Codes that mean the fix ENGINE broke a guarantee of its own rather than the
-   * file on disk being in a state the fix refuses to touch. Those are a 500;
-   * every other code in the engine's table is a precondition the user can act
-   * on, so it is a 409 with the code attached. Classifying against the engine's
-   * exported table rather than a list written here means a code added later is
-   * mapped, not silently treated as an internal error.
-   */
-  const ENGINE_FAILURE_CODES = new Set([
-    "SPEC_INVALID",
-    "WRITE_NOT_VERIFIED",
-    "WRITE_OUT_OF_BOUNDS",
-    "RESTORE_NOT_BYTE_IDENTICAL",
-  ]);
-
-  /** A fix refusal is a real answer, not a crash. */
-  async function sendFixError(res, descriptor, error, phase) {
-    const code = error?.code ?? null;
-    const base = (await load("fixBase")).module ?? null;
-    const known = base?.FIX_ERROR_CODES ?? {};
-    const isKnown = Boolean(code) && Object.hasOwn(known, code);
-    const status = isKnown && !ENGINE_FAILURE_CODES.has(code) ? 409 : 500;
-    await sendError(res, status, error instanceof Error ? error.message : String(error), {
-      reason: code ? `fix_${String(code).toLowerCase()}` : "fix_failed",
-      fixId: descriptor.id,
-      phase,
-      code,
-    });
+    return raw;
   }
+
+  app.get("/api/suggestions", route(async (req, res) => {
+    const id = singleValue(req.query.id, "id");
+    const tool = parseTool(singleValue(req.query.tool, "tool"));
+    const scope = parseScope(singleValue(req.query.scope, "scope"));
+    if (id && !Object.hasOwn(SUGGESTION_DEFS, id)) {
+      await sendError(res, 404, `no suggestion with id ${id} exists`, { reason: "suggestion_not_found" });
+      return;
+    }
+    const suggestions = await buildSuggestions({ id: id || null, toolId: tool, scope, home: state.home });
+    await sendJson(res, 200, { suggestions, tools: TOOL_IDS.map((t) => ({ id: t, label: toolLabel(t) })) });
+  }));
 
   // ---- 8. static assets, then honest 404s --------------------------------
 
@@ -2151,7 +1766,7 @@ export function createApp(options = {}) {
  * @param {object} [options] everything `createApp` takes, plus:
  * @param {number} [options.port] `0` (the default) asks the OS for a free port
  * @returns {Promise<{server: import('node:http').Server, app: object, state: object,
- *   url: string, host: string, port: number, nonce: string, close: () => Promise<void>}>}
+ *   url: string, host: string, port: number, close: () => Promise<void>}>}
  */
 export async function startServer(options = {}) {
   const { app, state } = options.app && options.state ? options : createApp(options);
@@ -2173,8 +1788,6 @@ export async function startServer(options = {}) {
     host: LOOPBACK_HOST,
     port: address.port,
     url: `http://${LOOPBACK_HOST}:${address.port}/`,
-    // Returned for the caller that must inject it; never logged by this module.
-    nonce: state.nonce,
     close: () => new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     }),

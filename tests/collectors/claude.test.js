@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { windowPromotions } from "../../src/collectors/base.js";
 import { ClaudeCollector } from "../../src/collectors/claude.js";
+import { analyzeAll } from "../../src/analyzer/health.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = path.join(here, "..", "fixtures", "claude");
@@ -286,7 +287,7 @@ test("every collected session matches the normalized contract", async () => {
     for (const turn of session.turns) {
       assert.deepEqual(Object.keys(turn).sort(), [
         "cacheCreate", "cacheRead", "context", "isSidechain",
-        "output", "toolCalls", "toolResultBytes", "ts",
+        "output", "toolCalls", "toolResultBytes", "toolResultBytesByCall", "ts",
       ]);
       assert.ok(["native", "derived", "unknown"].includes(turn.context.source));
     }
@@ -528,4 +529,65 @@ test("the analyzer receives real sub-agent intervals, so BP-003.06 can be measur
   // showed 3 concurrent of 18 dispatched.
   const spans = children.map((child) => [Date.parse(child.startedAt), Date.parse(child.endedAt)]);
   assert.ok(spans[0][0] < spans[1][1] && spans[1][0] < spans[0][1], "the two intervals overlap");
+});
+
+async function partialChildCorpus(childText, options = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "session-rx-claude-child-read-"));
+  const project = path.join(root, "project");
+  const parent = path.join(project, "parent.jsonl");
+  const subagents = path.join(project, "parent", "subagents");
+  await mkdir(subagents, { recursive: true });
+  const parentRecord = JSON.stringify({
+    type: "assistant",
+    sessionId: "parent",
+    timestamp: "2026-09-20T10:00:00Z",
+    message: { id: "parent-turn", model: "claude-opus-5", usage: { input_tokens: 10 }, content: [] },
+  });
+  const childRecord = JSON.stringify({
+    type: "assistant",
+    sessionId: "parent",
+    timestamp: "2026-09-20T10:01:00Z",
+    message: { id: "child-turn", model: "claude-opus-5", usage: { input_tokens: 10 }, content: [] },
+  });
+  await mkdir(project, { recursive: true });
+  await writeFile(parent, `${parentRecord}\n`);
+  await writeFile(path.join(subagents, "agent-broken.jsonl"), childText(childRecord));
+  const collected = await collectFrom(root, {}, { maxBytes: options.maxBytes });
+  const analyzed = analyzeAll({
+    supported: [{ id: "claude", sessions: collected.sessions, sessionMeta: Object.fromEntries(collected.meta) }],
+    diagnostics: [collected.diagnostic],
+  });
+  return { collected, analyzed };
+}
+
+test("a truncated child file marks the parent's concurrency result unknown", async () => {
+  const { collected, analyzed } = await partialChildCorpus(
+    (record) => `${record}\n${JSON.stringify({ padding: "x".repeat(2000) })}\n`,
+    { maxBytes: 300 },
+  );
+  assert.match(collected.meta.get("parent").subagentReadError, /incomplete|truncated/i);
+  const rule = analyzed.sessions[0].rules.find((item) => item.id === "subagent-concurrency");
+  assert.equal(rule.evidence.status, "unknown");
+  assert.match(rule.evidence.reason, /incomplete|truncated/i);
+});
+
+test("a malformed child line marks the parent's concurrency result unknown", async () => {
+  const { collected, analyzed } = await partialChildCorpus((record) => `${record}\nnot-json\n`);
+  assert.match(collected.meta.get("parent").subagentReadError, /malformed|skipped/i);
+  const rule = analyzed.sessions[0].rules.find((item) => item.id === "subagent-concurrency");
+  assert.equal(rule.evidence.status, "unknown");
+  assert.match(rule.evidence.reason, /incomplete|malformed|skipped/i);
+});
+
+test("a clean complete read with no children remains a measured not-observed result", async () => {
+  const collected = await collectFrom(ROBUST);
+  const analyzed = analyzeAll({
+    supported: [{ id: "claude", sessions: collected.sessions, sessionMeta: Object.fromEntries(collected.meta) }],
+    diagnostics: [collected.diagnostic],
+  });
+  assert.ok(analyzed.sessions.length > 0, "the clean fixture has a readable parent session");
+  for (const parent of analyzed.sessions) {
+    const rule = parent.rules.find((item) => item.id === "subagent-concurrency");
+    assert.equal(rule.evidence.status, "not-observed", parent.sessionId);
+  }
 });

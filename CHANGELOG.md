@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-24
+
+### Breaking
+
+- **Apply and Undo are removed.** SessionRx no longer writes user files. The Preview/Apply/Undo workflow is gone. Each observed problem now gets a suggestion: a preview of the exact text to add and a ready-made request to paste into the user's own AI tool. Suggestions target the tool whose session showed the problem.
+
+### Removed
+
+- **Gemini CLI, Kimi, OpenCode, GitHub Copilot CLI, Grok, Amp and Antigravity CLI are no longer read.** SessionRx now reads only Claude Code, Codex, and Cursor CLI. Antigravity CLI (the Gemini CLI successor) has been removed from the collector registry.
+
+### Changed
+
+- **The dashboard now explains unmeasured checks once per page.** A single note at the foot replaces the same explanation repeated on every check of every session. The Report keeps its explicit "not a pass" summary card.
+- **Clean session counts are easier to read.** The count clause appears only when it is non-zero, so a clean session reads "5/5 checks passed". A non-zero unmeasured count is always shown.
+- **Suggestion language now matches what SessionRx does.** "Review fixes" and "Fixable findings" are now "Review suggestions" and "Findings with a suggestion", because this release only ever suggests.
+
+### Fixed
+
+- **Checks a CLI's log format cannot support are now excluded and explained.** They are no longer reported as "could not be measured" on every session of that CLI; the limitation is disclosed as not applicable to that CLI's log format.
+- **Trends no longer count sessions outside the selected date window as unmeasurable.** Only sessions inside the reader's selected window contribute to its measured and unmeasured trend counts.
+- **Sub-agent concurrency can now be answered by a bounded scan.** Claude records each parent's sub-agents under the parent, so a complete corpus scan is no longer required.
+- **Sessions with no transcript turns are no longer reported as five failed checks.**
+- **The Health page no longer crashes on load in a real browser.** It was calling `.find` on a NodeList.
+- **Context-window findings no longer rely on an unsupported assumption.** Anthropic ships both a 200,000 and a 1,000,000 window for the same model ids, while the log records neither. A breach measured against the smaller window is now reported as unmeasurable rather than as a finding.
+- **Cursor's actual availability is now explained.** It is no longer labelled "support coming soon" when Cursor is supported but no cursor-agent store is present.
+
 ## [0.2.2] - 2026-09-23
 
 ### Fixed

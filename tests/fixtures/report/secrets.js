@@ -54,7 +54,7 @@ export const secretsInput = {
   range: { from: "2026-09-19T08:00:00Z", to: "2026-09-20T16:55:00Z", sessions: 4 },
   clis: [
     {
-      cli: "opencode",
+      cli: "cursor",
       sessions: 4,
       support: "supported",
       note: `provider row carried an inline key ${SEEDED.vendorKey} that must not reach the report`,
@@ -75,7 +75,7 @@ export const secretsInput = {
           { label: "second excerpt", value: `bearer handoff -> ${SEEDED.jwt}`, unit: null, sessionId: "9c1d4e77-2a58-4d31-b0f6-31ab92c4e708" },
         ],
         sources: [
-          `~/.local/share/opencode/opencode.db#part/${SEEDED.hexRun}`,
+          `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb#part/${SEEDED.hexRun}`,
           `ci runner identity ${SEEDED.awsKeyId}`,
         ],
         derivation: "byte length of each part row",

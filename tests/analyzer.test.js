@@ -5,7 +5,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { RULES, evaluateRule, EVIDENCE_STATUSES } from "../src/analyzer/rules.js";
 import { analyzeSession, analyzeAll, buildReportInput } from "../src/analyzer/health.js";
 import { generateReport, generateReportDocument } from "../src/report/generator.js";
-import { FIX_CATALOG, annotateFixTitles } from "../src/server.js";
+import { annotateSuggestions } from "../src/server.js";
+import { listSuggestionIds, TOOL_IDS } from "../src/suggestions/index.js";
 import {
   at,
   makeSession,
@@ -14,9 +15,9 @@ import {
   contextCalm,
   contextObservedFloor,
   contextObservedFloorTiny,
-  kimiNativeHigh,
-  kimiNativeLow,
-  kimiFractionAboveOne,
+  nativeFractionHigh,
+  nativeFractionLow,
+  fractionAboveOne,
   contextNoWindowNoFraction,
   contextPromotedNoLadder,
   cacheLow,
@@ -27,7 +28,7 @@ import {
   repeatFive,
   repeatFour,
   repeatPartialCoverage,
-  geminiToolCallsNoBytes,
+  toolCallsNoResultBytes,
   bigResults,
   smallResults,
   bigResultsPartialCoverage,
@@ -48,32 +49,34 @@ import {
 
 const RULE_IDS = ["context-pressure", "cache-hit", "repeat-tool", "large-tool-result", "long-rising-context", "subagent-concurrency"];
 
-test("the server catalogue publishes each fix target CLI name and null for unknown data", () => {
-  assert.equal(FIX_CATALOG.length, 5);
-  assert.ok(FIX_CATALOG.every((fix) => fix.cli === "claude"));
+test("annotateSuggestions targets the session's own CLI and null for a session whose CLI SessionRx does not suggest for", () => {
+  const suggestionIds = listSuggestionIds();
+  assert.equal(suggestionIds.length, 5);
+  assert.ok(TOOL_IDS.includes("claude"));
 
-  const rules = FIX_CATALOG.map((fix) => ({ fix: fix.id }));
+  const rules = suggestionIds.map((id) => ({ fix: id }));
   rules.push({ fix: "not-a-real-fix" }, { fix: null });
   const sessions = [{ cli: "claude", rules }];
-  annotateFixTitles(
-    sessions,
-    new Map(FIX_CATALOG.map((fix) => [fix.id, fix])),
-    new Map([["claude", "Claude Code"]]),
-  );
+  annotateSuggestions(sessions, new Map([["claude", "Claude Code"]]));
 
-  for (let index = 0; index < FIX_CATALOG.length; index += 1) {
-    assert.equal(sessions[0].rules[index].fixCli, "claude");
-    assert.equal(sessions[0].rules[index].fixCliName, "Claude Code");
+  for (let index = 0; index < suggestionIds.length; index += 1) {
+    assert.equal(sessions[0].rules[index].suggestionAvailable, true);
+    assert.equal(sessions[0].rules[index].suggestionTool, "claude");
+    assert.equal(sessions[0].rules[index].suggestionToolName, "Claude Code");
   }
-  assert.equal(sessions[0].rules[5].fixCli, null);
-  assert.equal(sessions[0].rules[5].fixCliName, null);
-  assert.equal(sessions[0].rules[6].fixCli, null);
-  assert.equal(sessions[0].rules[6].fixCliName, null);
+  // "not-a-real-fix" names no suggestion definition, so it is announced as
+  // unavailable rather than pointed at a made-up remedy.
+  assert.equal(sessions[0].rules[5].suggestionAvailable, false);
+  // A rule with no `fix` id at all carries no suggestion facts either way.
+  assert.equal(sessions[0].rules[6].suggestionAvailable, false);
+  assert.equal(sessions[0].rules[6].suggestionUnavailableReason, null);
   assert.equal(sessions[0].cliName, "Claude Code");
 
-  const unknownSession = [{ cli: "not-a-cli", rules: [] }];
-  annotateFixTitles(unknownSession, new Map(), new Map());
-  assert.equal(unknownSession[0].cliName, null);
+  const unsupportedSession = [{ cli: "gemini", rules: [{ fix: suggestionIds[0] }] }];
+  annotateSuggestions(unsupportedSession, new Map());
+  assert.equal(unsupportedSession[0].cliName, null);
+  assert.equal(unsupportedSession[0].rules[0].suggestionAvailable, false);
+  assert.equal(unsupportedSession[0].rules[0].suggestionTool, null);
 });
 
 function ruleById(id) {
@@ -208,7 +211,7 @@ test("evaluateRule carries `plain` through to the RuleResult, unfilled — the t
 const UNMEASURED_BRANCHES = [
   ["context-pressure", "no-turns", makeSession({ turns: [] }), {}],
   ["context-pressure", "no-context-readings", makeSession({ turns: [{ ts: at(1) }] }), {}],
-  ["context-pressure", "native-fraction-out-of-range", kimiFractionAboveOne, {}],
+  ["context-pressure", "native-fraction-out-of-range", fractionAboveOne, {}],
   ["context-pressure", "window-is-observed-peak", contextObservedFloor, {}],
   ["context-pressure", "window-above-known-tiers", contextPromotedNoLadder, { promotion: { ladder: "none" } }],
   ["context-pressure", "window-size-unknown", contextNoWindowNoFraction, {}],
@@ -222,12 +225,12 @@ const UNMEASURED_BRANCHES = [
 
   ["repeat-tool", "no-turns", makeSession({ turns: [] }), {}],
   ["repeat-tool", "no-tool-calls-anywhere", noToolCalls, {}],
-  ["repeat-tool", "no-attributable-results", geminiToolCallsNoBytes, {}],
+  ["repeat-tool", "no-attributable-results", toolCallsNoResultBytes, {}],
   ["repeat-tool", "partial-result-coverage", repeatPartialCoverage, {}],
 
   ["large-tool-result", "no-turns", makeSession({ turns: [] }), {}],
   ["large-tool-result", "no-tool-calls-anywhere", noToolCalls, {}],
-  ["large-tool-result", "no-result-sizes", geminiToolCallsNoBytes, {}],
+  ["large-tool-result", "no-result-sizes", toolCallsNoResultBytes, {}],
   ["large-tool-result", "partial-result-sizes", bigResultsPartialCoverage, {}],
 
   ["long-rising-context", "no-turns", makeSession({ turns: [] }), {}],
@@ -246,12 +249,11 @@ const UNMEASURED_BRANCHES = [
   }), {}],
 
   ["subagent-concurrency", "codex-records-no-subagents", makeSession({ cli: "codex" }), {}],
-  ["subagent-concurrency", "gemini-records-no-subagents", makeSession({ cli: "gemini" }), {}],
   ["subagent-concurrency", "cli-records-no-subagents", makeSession({ cli: "droid" }), {}],
   ["subagent-concurrency", "subagent-reading-off", makeSession({}), { sessionMeta: { subagentSessionIds: null } }],
+  ["subagent-concurrency", "subagent-reading-partial", makeSession({}), { childLinkageAvailable: true, sessionMeta: { subagentSessionIds: [], subagentReadError: "permission denied" } }],
   ["subagent-concurrency", "scan-bounded", makeSession({}), { sessionMeta: { subagentSessionIds: [] }, corpusComplete: false }],
   ["subagent-concurrency", "no-subagent-collected", makeSession({}), { sessionMeta: { subagentSessionIds: [] }, corpusComplete: true }],
-  ["subagent-concurrency", "no-subagent-collected", makeSession({ cli: "opencode" }), { corpusComplete: true }],
   ["subagent-concurrency", "no-subagent-times", makeSession({}), { children: childrenWithoutIntervals }],
   ["subagent-concurrency", "partial-subagent-times", makeSession({}), { children: childrenPartialIntervals }],
 ];
@@ -379,12 +381,12 @@ test("evaluateRule carries plain.unmeasured through to the RuleResult untouched"
   assert.equal(measured.evidence.reasonCode, null);
 });
 
-test("the Codex and Gemini sub-agent reasons still make the whole claim, in words a stranger can read", () => {
+test("the Codex sub-agent reason still makes the whole claim, in words a stranger can read", () => {
   // RE-AIMED, not relaxed. This pin was written to stop plain-language work
-  // SWAPPING the evidence of record out, and it still does that: both strings
-  // are asserted whole. What moved is the wording it pins. `sidechain` and
-  // `linkage` are the analyzer's vocabulary for its own internals, and these
-  // reasons reach the shared Markdown report — which has no collapsed
+  // SWAPPING the evidence of record out, and it still does that: the string
+  // is asserted whole. What moved is the wording it pins. `sidechain` and
+  // `linkage` are the analyzer's vocabulary for its own internals, and this
+  // reason reaches the shared Markdown report — which has no collapsed
   // <details> to keep them out of sight and no glossary to look them up in.
   // The claim is unchanged: no per-turn marker, no parent/child record, so no
   // interval to overlap, so unknown rather than a zero.
@@ -392,18 +394,12 @@ test("the Codex and Gemini sub-agent reasons still make the whole claim, in word
     "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
   const result = verdict("subagent-concurrency", makeSession({ cli: "codex" }), {});
   assert.equal(result.evidence.reason, CODEX_REASON);
-  const GEMINI_REASON =
-    "Nothing in Gemini's history records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
-  const gemini = verdict("subagent-concurrency", makeSession({ cli: "gemini" }), {});
-  assert.equal(gemini.evidence.reason, GEMINI_REASON);
   // Both halves of the claim, asserted as MEANING rather than as bytes, so the
-  // next rewording has to keep saying both of them — and neither result may
+  // next rewording has to keep saying both of them — and the result may not
   // quietly become a pass.
-  for (const emitted of [result, gemini]) {
-    assert.equal(emitted.evidence.status, "unknown");
-    assert.match(emitted.evidence.reason, /no turn is marked as belonging to a sub-agent/);
-    assert.match(emitted.evidence.reason, /nothing ties a child session to the session that dispatched it/);
-  }
+  assert.equal(result.evidence.status, "unknown");
+  assert.match(result.evidence.reason, /no turn is marked as belonging to a sub-agent/);
+  assert.match(result.evidence.reason, /nothing ties a child session to the session that dispatched it/);
 });
 
 test("the five BP-004 fix ids are the only ones any rule points at", () => {
@@ -438,6 +434,36 @@ test("context-pressure: average above 0.70 of a real window is observed", () => 
   assert.equal(result.evidence.values.find((v) => v.label.includes("share of the window")).windowSource, "model-table");
 });
 
+test("context-pressure: an ambiguous Claude-family tier is unknown at the smaller-tier threshold", () => {
+  const session = makeSession({
+    window: { tokens: 200000, source: "model-table", ambiguous: true, candidateTiers: [200000, 1000000] },
+    turns: [{ ts: at(1), inputTokens: 150000 }, { ts: at(2), inputTokens: 150000 }],
+  });
+  const result = verdict("context-pressure", session);
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(result.evidence.reasonCode, "window-tier-ambiguous");
+  assert.match(result.evidence.reason, /200,000.*1,000,000/);
+  assert.match(result.evidence.reason, /150,000/);
+});
+
+test("context-pressure: an ambiguous Claude-family tier below both thresholds remains not-observed", () => {
+  const session = makeSession({
+    window: { tokens: 200000, source: "model-table", ambiguous: true, candidateTiers: [200000, 1000000] },
+    turns: [{ ts: at(1), inputTokens: 100000 }, { ts: at(2), inputTokens: 100000 }],
+  });
+  assert.equal(verdict("context-pressure", session).evidence.status, "not-observed");
+});
+
+test("context-pressure: a single-tier GPT-5 breach remains observed", () => {
+  const session = makeSession({
+    cli: "codex",
+    model: "gpt-5",
+    window: { tokens: 400000, source: "model-table" },
+    turns: [{ ts: at(1), inputTokens: 300000 }, { ts: at(2), inputTokens: 300000 }],
+  });
+  assert.equal(verdict("context-pressure", session).evidence.status, "observed");
+});
+
 test("context-pressure: average below 0.70 is not-observed, and the numbers are still reported", () => {
   const result = verdict("context-pressure", contextCalm);
   assert.equal(result.evidence.status, "not-observed");
@@ -461,14 +487,14 @@ test("context-pressure: a trivial observed-floor session is unknown too, not 100
   assert.ok(result.evidence.reason.includes("BP-002.18") || result.evidence.reason.includes("F-014"));
 });
 
-test("context-pressure: a Kimi-shaped session with a native fraction and a null window still evaluates (DIS-005)", () => {
-  const high = verdict("context-pressure", kimiNativeHigh);
+test("context-pressure: a native-fraction-shaped session with a null window still evaluates (DIS-005)", () => {
+  const high = verdict("context-pressure", nativeFractionHigh);
   assert.equal(high.evidence.status, "observed");
   assert.equal(valueOf(high, "average native context fraction"), 0.9);
   assert.equal(high.evidence.values.find((v) => v.label.includes("average native")).windowSource, "native");
   assert.ok(high.evidence.derivation.includes("DIS-005"));
 
-  const low = verdict("context-pressure", kimiNativeLow);
+  const low = verdict("context-pressure", nativeFractionLow);
   assert.equal(low.evidence.status, "not-observed");
   assert.equal(valueOf(low, "average native context fraction"), 0.15);
 
@@ -479,7 +505,7 @@ test("context-pressure: a Kimi-shaped session with a native fraction and a null 
 });
 
 test("context-pressure: a native fraction above 1.0 is unknown, neither rescaled nor clamped", () => {
-  const result = verdict("context-pressure", kimiFractionAboveOne);
+  const result = verdict("context-pressure", fractionAboveOne);
   assertUnknownWithReason(result, "above 1.0");
   assert.ok(!result.evidence.values.some((value) => value.value === 0.42 || value.value === 1));
 });
@@ -503,7 +529,7 @@ test("context-pressure: a known window with no context reading anywhere is unkno
 });
 
 test("context-pressure: no fraction this rule can emit ever exceeds 1.0", () => {
-  for (const session of [contextHeavy, contextCalm, kimiNativeHigh, contextPromotedNoLadder]) {
+  for (const session of [contextHeavy, contextCalm, nativeFractionHigh, contextPromotedNoLadder]) {
     for (const value of verdict("context-pressure", session, { promotion: { ladder: "vendor" } }).evidence.values) {
       if (value.unit === "fraction") assert.ok(value.value <= 1, `${value.label} = ${value.value}`);
     }
@@ -573,8 +599,8 @@ test("repeat-tool: a same INPUT run whose results differ is not a repeat", () =>
   assert.equal(valueOf(result, "highest number of identical"), 1);
 });
 
-test("repeat-tool: a Gemini-shaped session with tool calls but no result bytes is unknown (DIS-003/DIS-006)", () => {
-  const result = verdict("repeat-tool", geminiToolCallsNoBytes);
+test("repeat-tool: a session with tool calls but no result bytes is unknown (DIS-003/DIS-006)", () => {
+  const result = verdict("repeat-tool", toolCallsNoResultBytes);
   assertUnknownWithReason(result, "DIS-003");
   assert.equal(valueOf(result, "calls with an attributable result signature"), 0);
   // The trap: three identical INPUTS are present. Input-only matching is refused.
@@ -667,8 +693,8 @@ test("large-tool-result: small results with full coverage is not-observed", () =
   assert.equal(valueOf(result, "totalled more than"), 0);
 });
 
-test("large-tool-result: a Gemini-shaped session yields unknown, never a zero (DIS-006)", () => {
-  const result = verdict("large-tool-result", geminiToolCallsNoBytes);
+test("large-tool-result: a session with no result byte lengths yields unknown, never a zero (DIS-006)", () => {
+  const result = verdict("large-tool-result", toolCallsNoResultBytes);
   assertUnknownWithReason(result, "DIS-006");
   assert.equal(valueOf(result, "turns with a recorded result byte length"), 0);
   assert.ok(!result.evidence.values.some((value) => value.label.includes("totalled more than")), "no oversized count may be reported when nothing was measured");
@@ -952,19 +978,10 @@ test("subagent-concurrency: Claude is unknown on scan width, not on an unread su
   assert.equal(valueOf(result, "marked as belonging to a sub-agent"), 2);
 });
 
-test("subagent-concurrency: Kimi is unknown on scan width, and says F-006's parser gap is closed", () => {
-  const result = verdict("subagent-concurrency", kimiNativeHigh);
-  assertUnknownWithReason(result, "SubagentEvent");
-  assert.ok(result.evidence.reason.includes("F-006"), `Kimi reason does not mention F-006: ${result.evidence.reason}`);
-  assert.ok(result.evidence.reason.includes("closed"), `Kimi reason does not say the gap is closed: ${result.evidence.reason}`);
-  assert.ok(result.evidence.reason.includes("F-026"), `Kimi reason does not name F-026: ${result.evidence.reason}`);
-  assertNoClosedParserGapClaim(result.evidence.reason, "Kimi");
-  assertDoesNotClaimZeroDispatched(result.evidence.reason, "Kimi");
-});
-
 test("subagent-concurrency: an unknown from a CLI whose sub-agent evidence IS read names the scan, never a parser gap", () => {
-  // Claude, Kimi and OpenCode all read sub-agent evidence (BP-003.07 - BP-003.09).
-  for (const cli of ["claude", "kimi", "opencode"]) {
+  // Claude reads sub-agent evidence (BP-003.07); any other CLI falls to the
+  // generic structural reason instead.
+  for (const cli of ["claude"]) {
     const session = makeSession({ cli, turns: [{ ts: at(1) }] });
     // Every shape of "nothing collected" this rule can be handed: no linkage
     // row at all, a bounded scan, a complete scan, and sub-agent reading off.
@@ -977,16 +994,21 @@ test("subagent-concurrency: an unknown from a CLI whose sub-agent evidence IS re
     for (const ctx of contexts) {
       const result = verdict("subagent-concurrency", session, ctx);
       const label = `${cli} with ctx ${JSON.stringify(ctx)}`;
-      assert.equal(result.evidence.status, "unknown", label);
-      assert.ok(result.evidence.reason.length > 40, `${label} reason too thin: ${result.evidence.reason}`);
-      assertNoClosedParserGapClaim(result.evidence.reason, label);
-      assertDoesNotClaimZeroDispatched(result.evidence.reason, label);
+      const expected = ctx.childLinkageAvailable === true && Array.isArray(ctx.sessionMeta?.subagentSessionIds)
+        ? "not-observed"
+        : "unknown";
+      assert.equal(result.evidence.status, expected, label);
+      if (expected === "unknown") {
+        assert.ok(result.evidence.reason.length > 40, `${label} reason too thin: ${result.evidence.reason}`);
+        assertNoClosedParserGapClaim(result.evidence.reason, label);
+        assertDoesNotClaimZeroDispatched(result.evidence.reason, label);
+      }
     }
   }
 });
 
-test("subagent-concurrency: Codex and Gemini reasons are untouched — their gap is structural, not a parser gap (DIS-004)", () => {
-  for (const cli of ["codex", "gemini"]) {
+test("subagent-concurrency: the Codex reason is untouched — its gap is structural, not a parser gap (DIS-004)", () => {
+  for (const cli of ["codex"]) {
     const result = verdict("subagent-concurrency", makeSession({ cli, turns: [{ ts: at(1) }] }));
     assertUnknownWithReason(result, "DIS-004");
     assert.ok(result.evidence.reason.includes("establishes a sub-agent interval"), `${cli}: ${result.evidence.reason}`);
@@ -995,12 +1017,30 @@ test("subagent-concurrency: Codex and Gemini reasons are untouched — their gap
   }
 });
 
-test("subagent-concurrency: OpenCode with no children is unknown while a limit could have cut them off, and not-observed once the whole corpus was scanned", () => {
-  const session = makeSession({ cli: "opencode", turns: [{ ts: at(1) }] });
-  assertUnknownWithReason(verdict("subagent-concurrency", session, { childLinkageAvailable: true, corpusComplete: false }), "bounded by the collection limit");
+test("subagent-concurrency: Claude with no children is unknown while a limit could have cut them off, and not-observed once the whole corpus was scanned", () => {
+  const session = makeSession({ cli: "claude", turns: [{ ts: at(1) }] });
+  assertUnknownWithReason(verdict("subagent-concurrency", session, { childLinkageAvailable: true, corpusComplete: false }), "bounded rather than complete");
   const complete = verdict("subagent-concurrency", session, { childLinkageAvailable: true, corpusComplete: true });
   assert.equal(complete.evidence.status, "not-observed");
   assert.equal(valueOf(complete, "linked to this session"), 0);
+});
+
+test("a Claude scan-bounded sub-agent check remains unknown, not not-applicable", () => {
+  const result = verdict("subagent-concurrency", makeSession({ cli: "claude" }), { corpusComplete: false });
+  assert.equal(result.evidence.status, "unknown");
+  assert.equal(result.evidence.reasonCode, "scan-bounded");
+});
+
+test("analyzeSession excludes structurally inapplicable Codex sub-agent concurrency", () => {
+  const health = analyzeSession(makeSession({ cli: "codex", model: "gpt-5" }));
+  assert.equal(health.rules.some((rule) => rule.id === "subagent-concurrency"), false);
+  assert.equal(health.score.total, 5);
+  assert.deepEqual(health.notApplicable, [{
+    ruleId: "subagent-concurrency",
+    name: "Too many helper agents at once",
+    reasonCode: "codex-records-no-subagents",
+    reason: "codex's log format has no sub-agent identity or parent-link field, so sub-agent concurrency can never be measured from its sessions.",
+  }]);
 });
 
 // ===========================================================================
@@ -1008,7 +1048,7 @@ test("subagent-concurrency: OpenCode with no children is unknown while a limit c
 // ===========================================================================
 
 test("every rule returns a status from the triad and nothing else", () => {
-  const sessions = [contextHeavy, contextObservedFloor, kimiNativeHigh, geminiToolCallsNoBytes, cacheReadsOnly, longRising, noToolCalls, makeSession({ turns: [] })];
+  const sessions = [contextHeavy, contextObservedFloor, nativeFractionHigh, toolCallsNoResultBytes, cacheReadsOnly, longRising, noToolCalls, makeSession({ turns: [] })];
   for (const session of sessions) {
     for (const rule of RULES) {
       const result = evaluateRule(rule, session);
@@ -1018,7 +1058,7 @@ test("every rule returns a status from the triad and nothing else", () => {
 });
 
 test("every unknown carries a reason, in every rule, on every fixture", () => {
-  const sessions = [contextHeavy, contextObservedFloor, contextObservedFloorTiny, kimiNativeHigh, kimiFractionAboveOne, geminiToolCallsNoBytes, cacheReadsOnly, cacheAllZero, longRising, twoObservations, noTimestamps, noToolCalls, repeatPartialCoverage, bigResultsPartialCoverage, makeSession({ turns: [] })];
+  const sessions = [contextHeavy, contextObservedFloor, contextObservedFloorTiny, nativeFractionHigh, fractionAboveOne, toolCallsNoResultBytes, cacheReadsOnly, cacheAllZero, longRising, twoObservations, noTimestamps, noToolCalls, repeatPartialCoverage, bigResultsPartialCoverage, makeSession({ turns: [] })];
   let unknowns = 0;
   for (const session of sessions) {
     for (const rule of RULES) {
@@ -1054,8 +1094,8 @@ test("a rule returning unknown with no reason still gets an explicit reason", ()
 test("no rule ever emits a zero as the evidence for an unmeasurable check", () => {
   // The specific failure: a count of 0 that a reader takes for "none happened".
   const unmeasurable = [
-    verdict("large-tool-result", geminiToolCallsNoBytes),
-    verdict("repeat-tool", geminiToolCallsNoBytes),
+    verdict("large-tool-result", toolCallsNoResultBytes),
+    verdict("repeat-tool", toolCallsNoResultBytes),
     verdict("cache-hit", cacheReadsOnly),
     verdict("context-pressure", contextObservedFloor),
   ];
@@ -1073,11 +1113,13 @@ test("no rule ever emits a zero as the evidence for an unmeasurable check", () =
 // analyzeSession: all six rules, always, and a score that cannot hide unknowns
 // ===========================================================================
 
-test("analyzeSession emits all six rules for every session, whatever the verdicts", () => {
-  for (const session of [contextHeavy, contextObservedFloor, kimiNativeHigh, geminiToolCallsNoBytes, makeSession({ turns: [] })]) {
+test("analyzeSession emits all applicable rules and records structural exclusions", () => {
+  for (const session of [contextHeavy, contextObservedFloor, nativeFractionHigh, toolCallsNoResultBytes, makeSession({ turns: [] })]) {
     const health = analyzeSession(session);
-    assert.equal(health.rules.length, 6);
-    assert.deepEqual([...health.rules.map((rule) => rule.id)].sort(), [...RULE_IDS].sort());
+    const expectedCount = session.cli === "claude" ? 6 : 5;
+    assert.equal(health.rules.length, expectedCount);
+    assert.deepEqual([...health.rules.map((rule) => rule.id)].sort(), [...RULE_IDS.filter((id) => session.cli === "claude" || id !== "subagent-concurrency")].sort());
+    assert.equal(health.notApplicable.length, session.cli === "claude" ? 0 : 1);
   }
 });
 
@@ -1091,10 +1133,10 @@ test("analyzeSession ranks observed rules first, then unmeasurable, then passes"
 });
 
 test("an unknown never counts toward the score, and the score always states how many there were", () => {
-  const health = analyzeSession(geminiToolCallsNoBytes);
+  const health = analyzeSession(toolCallsNoResultBytes);
   const { score } = health;
-  assert.equal(score.total, 6);
-  assert.equal(score.passed + score.observed + score.unknown, 6);
+  assert.equal(score.total, 5);
+  assert.equal(score.passed + score.observed + score.unknown, 5);
   const unknownRules = health.rules.filter((rule) => rule.evidence.status === "unknown").length;
   assert.equal(score.unknown, unknownRules);
   assert.ok(score.unknown > 0, "this fixture exists to produce unknowns");
@@ -1121,26 +1163,26 @@ test("analyzeSession carries the window promotion through, so a stale table entr
 
 function corpus() {
   const claudeSessions = [contextHeavy, longRising, bigResults];
-  const geminiSessions = [geminiToolCallsNoBytes];
-  const openCodeSessions = [contextObservedFloor];
+  const codexSessions = [toolCallsNoResultBytes];
+  const cursorSessions = [contextObservedFloor];
   return makeCollected({
     supported: [
       { id: "claude", displayName: "Claude Code", sessions: claudeSessions, installed: true, paths: [], status: "supported" },
-      { id: "gemini", displayName: "Gemini CLI", sessions: geminiSessions, installed: true, paths: [], status: "supported" },
+      { id: "codex", displayName: "Codex", sessions: codexSessions, installed: true, paths: [], status: "supported" },
       {
-        id: "opencode",
-        displayName: "OpenCode",
-        sessions: openCodeSessions,
+        id: "cursor",
+        displayName: "Cursor CLI",
+        sessions: cursorSessions,
         installed: true,
         paths: [],
         status: "supported",
         sessionMeta: {
-          [openCodeSessions[0].sessionId]: { sessionId: openCodeSessions[0].sessionId, parentSessionId: null },
+          [cursorSessions[0].sessionId]: { sessionId: cursorSessions[0].sessionId, parentSessionId: null },
         },
       },
     ],
-    detectionOnly: [{ id: "copilot", displayName: "Copilot CLI", installed: true, paths: [], status: "detection-only" }],
-    absent: [{ id: "grok-amp", displayName: "Grok/Amp", installed: false, paths: [], status: "absent" }],
+    detectionOnly: [{ id: "antigravity", displayName: "Antigravity CLI", installed: true, paths: [], status: "detection-only" }],
+    absent: [{ id: "widget", displayName: "Widget", installed: false, paths: [], status: "absent" }],
     diagnostics: [promotionDiagnostic("claude", contextHeavy.sessionId)],
   });
 }
@@ -1148,10 +1190,10 @@ function corpus() {
 test("analyzeAll analyzes every supported session and reports every collector", () => {
   const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
   assert.equal(out.sessions.length, 5);
-  assert.deepEqual(out.collectors.map((entry) => entry.cli), ["claude", "gemini", "opencode", "copilot", "grok-amp"]);
-  assert.equal(out.collectors.find((entry) => entry.cli === "copilot").sessions, null, "a detection-only CLI has no session count, and null is not zero");
-  assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").support, "detection-only");
-  assert.equal(out.collectors.find((entry) => entry.cli === "grok-amp").installed, false);
+  assert.deepEqual(out.collectors.map((entry) => entry.cli), ["claude", "codex", "cursor", "antigravity", "widget"]);
+  assert.equal(out.collectors.find((entry) => entry.cli === "antigravity").sessions, null, "a detection-only CLI has no session count, and null is not zero");
+  assert.equal(out.collectors.find((entry) => entry.cli === "widget").support, "detection-only");
+  assert.equal(out.collectors.find((entry) => entry.cli === "widget").installed, false);
 });
 
 test("a detection-only collector reason reaches the health note unchanged", () => {
@@ -1161,11 +1203,11 @@ test("a detection-only collector reason reaches the health note unchanged", () =
 });
 
 test("collector support is identical whether the CLI is installed or absent", () => {
-  const cliSet = ["claude", "codex", "copilot", "gemini", "grok-amp"];
+  const cliSet = ["claude", "codex", "antigravity", "cursor", "widget"];
   const installed = analyzeAll({
     supported: [{ id: "claude", sessions: [contextHeavy] }],
-    detectionOnly: [{ id: "copilot" }],
-    absent: [{ id: "codex" }, { id: "gemini" }, { id: "grok-amp" }],
+    detectionOnly: [{ id: "antigravity" }],
+    absent: [{ id: "codex" }, { id: "cursor" }, { id: "widget" }],
   });
 
   const absent = analyzeAll({
@@ -1180,10 +1222,12 @@ test("collector support is identical whether the CLI is installed or absent", ()
     assert.equal(absentByCli.get(cli).support, installedByCli.get(cli).support, `${cli} support changed with installation state`);
   }
   assert.equal(installedByCli.get("claude").installed, true);
-  assert.equal(installedByCli.get("copilot").installed, true);
+  assert.equal(installedByCli.get("antigravity").installed, true);
   for (const cli of cliSet) assert.equal(absentByCli.get(cli).installed, false, `${cli} absent state changed`);
-  assert.equal(absentByCli.get("copilot").support, "detection-only");
+  assert.equal(absentByCli.get("antigravity").support, "detection-only");
   assert.equal(absentByCli.get("codex").support, "supported");
+  assert.equal(absentByCli.get("cursor").support, "supported");
+  assert.equal(absentByCli.get("widget").support, "detection-only");
 });
 
 test("an absent installation never carries a session count", () => {
@@ -1212,11 +1256,12 @@ test("analyzeAll surfaces windowPromotions in the per-CLI note, rather than sile
 test("analyzeAll only claims a measured zero for sub-agents when the corpus was not cut off by a limit", () => {
   const withLimit = analyzeAll(corpus(), { limit: 1 });
   const withoutLimit = analyzeAll(corpus());
-  const openCodeOf = (out) => out.sessions.find((session) => session.cli === "opencode")
-    .rules.find((rule) => rule.id === "subagent-concurrency").evidence.status;
+  const cursorHasConcurrency = (out) => out.sessions.find((session) => session.cli === "cursor")
+    .rules.some((rule) => rule.id === "subagent-concurrency");
   assert.equal(withLimit.sessions.length, 5);
-  assert.equal(openCodeOf(withLimit), "unknown");
-  assert.equal(openCodeOf(withoutLimit), "not-observed");
+  assert.equal(cursorHasConcurrency(withLimit), false);
+  assert.equal(cursorHasConcurrency(withoutLimit), false);
+  assert.ok(withLimit.ruleApplicability.find((row) => row.cli === "codex").notApplicable.some((rule) => rule.ruleId === "subagent-concurrency"));
 });
 
 test("analyzeAll counts a limited collection in the note, so a partial corpus is visible", () => {
@@ -1464,7 +1509,7 @@ test("F-023: the set-aside count reaches the rendered report, next to the count 
 // the report contract (R_3C)
 // ===========================================================================
 
-const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "rules", "fixes", "trend"];
+const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "notApplicable", "rules", "summary", "fixes", "trend"];
 const RULE_RESULT_KEYS = ["id", "name", "severity", "fix", "threshold", "evidence"];
 const EVIDENCE_KEYS = ["status", "reason", "values", "sources", "derivation", "parserVersion"];
 const VALUE_KEYS = ["label", "value", "unit", "windowSource", "sessionId"];

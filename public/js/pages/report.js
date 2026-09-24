@@ -75,6 +75,73 @@ function notMeasured(why = 'this value was not recorded') {
   return node;
 }
 
+/**
+ * A single "Summary for managers" stat card. `value === null` renders "not
+ * available" — never a 0 that was never measured. `unknown` is deliberately
+ * a visually separate tone from `observed`/`notObserved`, and always carries
+ * the "not a pass" caption, so it cannot be skimmed as a third kind of pass.
+ */
+function summaryCard(label, value, tone, caption) {
+  const card = el('div', `card card-pad summary-metric-card summary-metric-${tone}`);
+  const valueNode = el('div', 'summary-metric-value');
+  if (value === null || value === undefined) valueNode.append(notMeasured('this count was not supplied by the server'));
+  else valueNode.append(text(groupInt(value) ?? String(value)));
+  card.append(valueNode, el('div', 'summary-metric-label', label));
+  if (caption) card.append(el('div', 'summary-metric-caption', caption));
+  return card;
+}
+
+/**
+ * The "Summary for managers" cards: problems found / passed / could not be
+ * measured, built ONLY from the structured `report.summary` the API returns
+ * (health.buildManagerSummary) — never by parsing the assembled Markdown
+ * text, which is free to change under it.
+ *
+ * @param {object|null} summary `report.summary`
+ * @returns {HTMLElement|null} `null` when no structured summary was supplied
+ */
+function summaryCardsNode(summary) {
+  if (!summary || typeof summary !== 'object') return null;
+  const verdicts = summary.verdicts && typeof summary.verdicts === 'object' ? summary.verdicts : {};
+  const sessionsAnalyzed = Number.isFinite(summary.sessionsAnalyzed) ? summary.sessionsAnalyzed : null;
+  const observed = Number.isFinite(verdicts.observed) ? verdicts.observed : null;
+  const notObserved = Number.isFinite(verdicts.notObserved) ? verdicts.notObserved : null;
+  const unknown = Number.isFinite(verdicts.unknown) ? verdicts.unknown : null;
+
+  const wrap = el('section', 'report-summary');
+  wrap.append(el('h2', null, 'Summary for managers'));
+  const stats = el('div', 'summary-stats report-summary-stats');
+  stats.append(summaryCard('Sessions checked', sessionsAnalyzed, 'accent', null));
+  stats.append(summaryCard('Problems found', observed, 'warn', null));
+  stats.append(summaryCard('Passed', notObserved, 'pass', null));
+  // Kept visibly separate from "Passed": an unmeasured check is not a clean
+  // result, and this caption says so in plain text, not only by colour.
+  stats.append(summaryCard('Could not be measured', unknown, 'unknown', 'not a pass'));
+  wrap.append(stats);
+
+  const perTool = Array.isArray(summary.perTool) ? summary.perTool : [];
+  if (perTool.length) {
+    const list = el('ul', 'report-summary-tools');
+    for (const row of perTool) {
+      const item = el('li');
+      const cli = typeof row?.cli === 'string' && row.cli ? row.cli : 'unknown';
+      item.append(el('span', 'cli-name', cli));
+      if (row?.status === 'detected-not-read') {
+        item.append(el('span', 'badge badge-sm badge-unknown', 'detected, not read yet'));
+      } else if (Number.isFinite(row?.sessions)) {
+        const problems = Number.isFinite(row?.problems) ? `${groupInt(row.problems)} problem${row.problems === 1 ? '' : 's'}` : 'not available';
+        item.append(el('span', 'chart-sub', `${groupInt(row.sessions)} session${row.sessions === 1 ? '' : 's'} · ${problems}`));
+      } else {
+        item.append(el('span', 'chart-sub', 'not installed, or nothing was read'));
+      }
+      list.append(item);
+    }
+    wrap.append(list);
+  }
+
+  return wrap;
+}
+
 function callout(kind, title, body, detail) {
   const box = el('div', `callout callout-${kind}`);
   if (title) box.append(el('p', 'callout-title', title));
@@ -131,6 +198,22 @@ function download(markdown, filename) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Open the browser's own print dialog. No PDF library, no server round trip:
+ * `window.print()` is the same "Save as PDF" flow a reader would reach through
+ * the browser's own menu, wired to a button so they do not have to know it is
+ * there. `public/css/print.css` (`media="print"`) is what actually reshapes the
+ * page for it — this function only opens the dialog.
+ *
+ * `globalThis.print`, not `window.print`, so this file makes the same
+ * assumption about its runtime as the rest of the module (`globalThis.location`
+ * in filenameFor's caller, `globalThis` throughout app.js) and so a test can
+ * stub it without constructing a `window` global the DOM shim does not provide.
+ */
+function printReport() {
+  if (typeof globalThis.print === 'function') globalThis.print();
 }
 
 /** Copy to the clipboard, and say plainly when the browser refused. */
@@ -233,6 +316,16 @@ function draw() {
   copyButton.addEventListener('click', () => { copy(markdown ?? ''); });
   bar.append(copyButton);
 
+  const printButton = el('button', 'button', 'Print / Save as PDF');
+  printButton.type = 'button';
+  printButton.disabled = markdown === null || state.busy;
+  printButton.setAttribute(
+    'title',
+    'Opens this browser\'s own print dialog — choose "Save as PDF" there for a PDF file. Nothing is generated or sent anywhere.',
+  );
+  printButton.addEventListener('click', () => { printReport(); });
+  bar.append(printButton);
+
   bar.append(el('span', 'toolbar-spacer'));
   if (markdown !== null) bar.append(el('span', 'chart-sub', filenameFor(report)));
   head.append(bar);
@@ -253,6 +346,8 @@ function draw() {
       ),
     );
   } else {
+    const summary = summaryCardsNode(report?.summary ?? null);
+    if (summary) body.append(summary);
     body.append(factsNode(report));
     if (report?.scan?.note) body.append(el('p', 'note', `Scan: ${report.scan.note}`));
     if (Number.isFinite(report?.redactions) && report.redactions > 0) {

@@ -28,7 +28,7 @@
  *
  * A SUB-AGENT IS EVIDENCE ABOUT ITS PARENT, NOT A PEER OF IT (F-023)
  * -----------------------------------------------------------------
- * Claude and Kimi sub-agent transcripts are collected as sibling sessions —
+ * Claude's sub-agent transcripts are collected as sibling sessions —
  * that is what lets BP-003.06 measure concurrency at all.  They are NOT
  * sessions the user started: on the real corpus a 10-per-CLI scan surfaces 50
  * of the user's own sessions and 106 sub-agent transcripts, so counting them as
@@ -53,20 +53,42 @@ import { RULES, evaluateRule } from "./rules.js";
 const SEVERITY_RANK = Object.freeze({ critical: 0, warn: 1, info: 2 });
 const STATUS_RANK = Object.freeze({ observed: 0, unknown: 1, "not-observed": 2 });
 const RULE_ORDER = new Map(RULES.map((rule, index) => [rule.id, index]));
-// The registry is the authority for collector capabilities.  Copilot's
-// registered reader is deliberately detection-only; keep that distinction
-// attached to the registry entry rather than treating every registered ID as
-// a parser merely because its reader module exists.
-const DETECTION_ONLY_READER_PATHS = new Set(
-  COLLECTOR_SPECS
-    .filter(([, , modulePath]) => modulePath === "./copilot.js")
-    .map(([, , modulePath]) => modulePath),
-);
-const PARSER_CLI_IDS = new Set(
-  COLLECTOR_SPECS
-    .filter(([, , modulePath]) => !DETECTION_ONLY_READER_PATHS.has(modulePath))
-    .map(([id]) => id),
-);
+const PARSER_CLI_IDS = new Set(COLLECTOR_SPECS.map(([id]) => id));
+
+const STRUCTURALLY_NOT_APPLICABLE = Object.freeze({
+  "subagent-concurrency": Object.freeze({
+    reasonCode: "cli-records-no-subagents",
+    reason: "This CLI's log format has no sub-agent identity or parent-link field, so sub-agent concurrency can never be measured from its sessions.",
+  }),
+});
+
+function notApplicableFor(cli, rule) {
+  if (rule.id !== "subagent-concurrency" || cli === "claude") return null;
+  return {
+    ruleId: rule.id,
+    name: rule.name,
+    reasonCode: cli === "codex" ? "codex-records-no-subagents" : STRUCTURALLY_NOT_APPLICABLE[rule.id].reasonCode,
+    reason: `${cli || "This CLI"}'s log format has no sub-agent identity or parent-link field, so sub-agent concurrency can never be measured from its sessions.`,
+  };
+}
+
+/**
+ * Classify one rule for one analyzed session. Applicability belongs to the
+ * analyzer; server consumers must use this rather than re-deriving it.
+ */
+export function classifyRule(session, ruleId, ruleApplicability = []) {
+  const cli = typeof session?.cli === "string" ? session.cli : "unknown";
+  const sessionNotApplicable = Array.isArray(session?.notApplicable)
+    && session.notApplicable.some((entry) => entry?.ruleId === ruleId);
+  const publishedNotApplicable = Array.isArray(ruleApplicability)
+    && ruleApplicability.some((entry) => entry?.cli === cli
+      && Array.isArray(entry?.notApplicable)
+      && entry.notApplicable.some((entry) => entry?.ruleId === ruleId));
+  if (sessionNotApplicable || publishedNotApplicable) return "notApplicable";
+  const result = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+  const status = result?.evidence?.status;
+  return status === "observed" || status === "not-observed" ? status : "unknown";
+}
 
 /** Keys a collector may use for the parent-session linkage (BP-002.19). */
 const PARENT_KEYS = Object.freeze(["parentSessionId", "parentId", "parentID", "parent_id"]);
@@ -78,13 +100,14 @@ const MAX_SOURCES_PER_RULE = 6;
 /**
  * At or above this share of turn-less sessions, the per-CLI note says so.
  *
- * A chat that was started and never used still parses as a session — for Gemini
- * a header line and a clock bump are the whole file — so a scan can return a
- * full window of empty shells: 250 of 250 on the machine this was measured on,
- * against 14 of 656 for Claude, 3 of 250 for Codex and 7 of 250 for OpenCode.
- * The gap between those is what the threshold is set to catch: at 0.9 the real
- * Gemini reading is disclosed and no other CLI's healthy mix raises a false
- * alarm.
+ * A chat that was started and never used still parses as a session — a header
+ * line and a clock bump can be the whole file for a CLI that writes one on
+ * open — so a scan can return a run of empty shells for one CLI while another
+ * CLI's real usage stays healthy: 14 of 656 for Claude and 3 of 250 for Codex
+ * on the machine this was measured on. The gap between a CLI genuinely mostly
+ * abandoned and one with ordinary noise is what the threshold is set to catch:
+ * at 0.9 a real all-empty reading is disclosed and no CLI's healthy mix raises
+ * a false alarm.
  */
 const EMPTY_SESSION_NOTE_SHARE = 0.9;
 
@@ -201,7 +224,12 @@ export function analyzeSession(session, ctx = {}) {
     toolCallsRecorded: ctx?.toolCallsRecorded === true || ownToolCalls > 0,
   };
 
-  const results = RULES.map((rule) => evaluateRule(rule, session, ruleCtx)).sort(compareRuleResults);
+  const cli = str(session?.cli);
+  const notApplicable = RULES.map((rule) => notApplicableFor(cli, rule)).filter(Boolean);
+  const results = RULES
+    .filter((rule) => !notApplicableFor(cli, rule))
+    .map((rule) => evaluateRule(rule, session, ruleCtx))
+    .sort(compareRuleResults);
   const parentSessionId = parentOf(ruleCtx.sessionMeta);
 
   return {
@@ -221,6 +249,7 @@ export function analyzeSession(session, ctx = {}) {
     subagentTurns: sidechainTurns,
     score: scoreRules(results),
     rules: results,
+    notApplicable,
   };
 }
 
@@ -356,6 +385,112 @@ function setAsideCount(sessions, explicit) {
   return channelSeen ? derived : null;
 }
 
+/** Registry order is the one source of truth for manager-facing tools. */
+function summaryTools(clis) {
+  const registered = COLLECTOR_SPECS.map(([id]) => id);
+  const supplied = clis.map((row) => str(row?.cli)).filter(Boolean);
+  return [...new Set([...registered, ...supplied])];
+}
+
+/**
+ * A plain-language, manager-readable rollup of the same verdicts the report
+ * renders — sessions analysed, how many checks came back observed /
+ * not-observed / unknown, a per-check breakdown, and a per-tool breakdown.
+ *
+ * @param {{sessions?: Array<object>, clis?: Array<object>}} input
+ *   `sessions` are analyzed session-health objects (`analyzeSession` output,
+ *   each carrying `.rules`); `clis` is `analyzeAll().collectors`.
+ * @returns {{sessionsAnalyzed: number, verdicts: {observed: number,
+ *   notObserved: number, unknown: number}, perCheck: Array<{id: string,
+ *   name: string, observed: number, notObserved: number, unknown: number}>,
+ *   perTool: Array<{cli: string, status: string, sessions: number|null,
+ *   problems: number|null, note: string|null}>}}
+ */
+export function buildManagerSummary(input = {}) {
+  const sessions = Array.isArray(input?.sessions) ? input.sessions : [];
+  const clis = Array.isArray(input?.clis) ? input.clis : [];
+
+  let observed = 0;
+  let notObserved = 0;
+  let unknown = 0;
+  const perCheck = RULES.map((rule) => ({ id: rule.id, name: rule.name, observed: 0, notObserved: 0, unknown: 0, notApplicable: 0 }));
+  const perCheckById = new Map(perCheck.map((row) => [row.id, row]));
+  const suppliedNotApplicable = new Set();
+  for (const entry of Array.isArray(input?.ruleApplicability) ? input.ruleApplicability : []) {
+    const cli = str(entry?.cli) || "unknown";
+    for (const item of Array.isArray(entry?.notApplicable) ? entry.notApplicable : []) {
+      suppliedNotApplicable.add(`${cli}:${str(item?.ruleId)}`);
+    }
+  }
+
+  for (const session of sessions) {
+    const cli = str(session?.cli) || "unknown";
+    const sessionNotApplicable = new Set(
+      (Array.isArray(session?.notApplicable) ? session.notApplicable : []).map((item) => str(item?.ruleId)),
+    );
+    for (const rule of RULES) {
+      const bucket = perCheckById.get(rule.id);
+      const notApplicable = sessionNotApplicable.has(rule.id) || suppliedNotApplicable.has(`${cli}:${rule.id}`);
+      if (notApplicable) {
+        bucket.notApplicable += 1;
+        continue;
+      }
+      const verdict = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === rule.id);
+      const status = verdict?.evidence?.status;
+      if (status === "observed") {
+        observed += 1;
+        bucket.observed += 1;
+      } else if (status === "not-observed") {
+        notObserved += 1;
+        bucket.notObserved += 1;
+      } else {
+        unknown += 1;
+        bucket.unknown += 1;
+      }
+    }
+  }
+
+  const cliByName = new Map(clis.map((row) => [str(row?.cli), row]));
+  const perTool = summaryTools(clis).map((cli) => {
+    const row = cliByName.get(cli) ?? null;
+    const detectionOnly = row?.support === "detection-only";
+    if (detectionOnly) {
+      return {
+        cli,
+        status: "detected-not-read",
+        sessions: null,
+        problems: null,
+        note: str(row?.note) || "detected on this machine, but SessionRx cannot read its sessions yet, so nothing about its usage is measured here — that is not the same as zero problems.",
+      };
+    }
+    const toolSessions = sessions.filter((session) => str(session?.cli) === cli);
+    let problems = null;
+    if (toolSessions.length) {
+      problems = 0;
+      for (const session of toolSessions) {
+        for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+          if (rule?.evidence?.status === "observed") problems += 1;
+        }
+      }
+    }
+    const sessionCount = num(row?.sessions) ?? (toolSessions.length || null);
+    return {
+      cli,
+      status: row ? "read" : "not-installed",
+      sessions: sessionCount,
+      problems,
+      note: str(row?.note) || null,
+    };
+  });
+
+  return {
+    sessionsAnalyzed: sessions.length,
+    verdicts: { observed, notObserved, unknown },
+    perCheck,
+    perTool,
+  };
+}
+
 /**
  * Build the corpus-level `ReportInput` consumed by `generateReport`.
  *
@@ -372,7 +507,7 @@ function setAsideCount(sessions, explicit) {
  *
  * @param {{sessions: Array<object>, clis?: Array<object>, generatedAt?: string|null,
  *   parserVersion?: string, fixes?: Array<object>, trend?: object,
- *   subagentSessions?: number|null}} input
+ *   subagentSessions?: number|null, ruleApplicability?: Array<object>}} input
  * @returns {object} `ReportInput`
  */
 export function buildReportInput(input = {}) {
@@ -398,12 +533,42 @@ export function buildReportInput(input = {}) {
     Object.assign(range, input.contextMeasurement);
   }
 
+  const clis = Array.isArray(input?.clis) ? input.clis : [];
+  const notApplicable = [];
+  const seenNotApplicable = new Set();
+  for (const session of sessions) {
+    for (const item of Array.isArray(session?.notApplicable) ? session.notApplicable : []) {
+      const cli = str(session?.cli) || "unknown";
+      const key = `${cli}:${str(item?.ruleId)}`;
+      if (seenNotApplicable.has(key)) continue;
+      seenNotApplicable.add(key);
+      notApplicable.push({ cli, ...item });
+    }
+  }
+
+  for (const entry of Array.isArray(input?.ruleApplicability) ? input.ruleApplicability : []) {
+    const cli = str(entry?.cli) || "unknown";
+    for (const item of Array.isArray(entry?.notApplicable) ? entry.notApplicable : []) {
+      const key = `${cli}:${str(item?.ruleId)}`;
+      if (seenNotApplicable.has(key)) continue;
+      seenNotApplicable.add(key);
+      notApplicable.push({ cli, ...item });
+    }
+  }
+
   return {
     generatedAt: str(input?.generatedAt) || null,
     parserVersion,
     range,
-    clis: Array.isArray(input?.clis) ? input.clis : [],
-    rules: aggregateRules(sessions, parserVersion),
+    clis,
+    notApplicable,
+    rules: aggregateRules(sessions, parserVersion, input?.ruleApplicability),
+    // Computed from the SAME session-health objects (and the same verdicts)
+    // the rest of this report renders — never re-derived from the assembled
+    // Markdown prose, which is free to change under it (see generator.js).
+    summary: input?.summary && typeof input.summary === "object"
+      ? input.summary
+      : buildManagerSummary({ sessions, clis, ruleApplicability: input?.ruleApplicability }),
     fixes: Array.isArray(input?.fixes) ? input.fixes : [],
     trend: input?.trend ?? {
       direction: "unknown",
@@ -447,16 +612,47 @@ function summariseUnknownReasons(unknownResults, unknownCount, total) {
  * three evidence rows, including when they are zero, so an observed verdict can
  * never hide how much of the corpus was unmeasurable.
  */
-function aggregateRules(sessions, parserVersion) {
+function aggregateRules(sessions, parserVersion, ruleApplicability = []) {
   const aggregates = [];
+
+  const suppliedNotApplicable = new Map();
+  for (const entry of Array.isArray(ruleApplicability) ? ruleApplicability : []) {
+    const cli = str(entry?.cli) || "unknown";
+    for (const item of Array.isArray(entry?.notApplicable) ? entry.notApplicable : []) {
+      const key = `${cli}:${str(item?.ruleId)}`;
+      suppliedNotApplicable.set(key, item);
+    }
+  }
 
   for (const rule of RULES) {
     const results = [];
+    let notApplicableCount = 0;
     for (const session of sessions) {
+      const cli = str(session?.cli) || "unknown";
+      const sessionNotApplicable = Array.isArray(session?.notApplicable) ? session.notApplicable : [];
+      const explicitlyNotApplicable = sessionNotApplicable.some((item) => item?.ruleId === rule.id)
+        || suppliedNotApplicable.has(`${cli}:${rule.id}`);
+      if (explicitlyNotApplicable) {
+        notApplicableCount += 1;
+        continue;
+      }
       const match = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry.id === rule.id);
-      if (match) results.push(match);
+      results.push(match ?? {
+        id: rule.id,
+        name: rule.name,
+        evidence: {
+          status: "unknown",
+          reason: "this rule is applicable to the session, but no verdict was recorded for it, so the check cannot be treated as measured",
+          values: [],
+          sources: [],
+          derivation: "the session was applicable to this rule, but its verdict entry was missing",
+        },
+      });
     }
     const total = results.length;
+    // A rule with no applicable sessions has no verdict to aggregate. It is
+    // listed by `notApplicable`, but must not become unknown, zero, or pass.
+    if (total === 0 && notApplicableCount > 0) continue;
     const observedResults = results.filter((result) => result.evidence.status === "observed");
     const unknownResults = results.filter((result) => result.evidence.status === "unknown");
     const notObservedCount = total - observedResults.length - unknownResults.length;
@@ -481,6 +677,7 @@ function aggregateRules(sessions, parserVersion) {
       { label: "sessions where this could NOT be measured (not counted as passing)", value: unknownResults.length, unit: "count" },
       { label: "sessions checked", value: total, unit: "count" },
     ];
+    values.push({ label: "sessions where this was not applicable", value: notApplicableCount, unit: "count" });
 
     const representatives = (status === "observed" ? observedResults : status === "unknown" ? unknownResults : results)
       .slice()
@@ -612,12 +809,22 @@ export function analyzeAll(collected = {}, options = {}) {
       if (toolCallsRecorded) break;
     }
 
-    // EVERY collected session is analyzed, sub-agents included — the rules run
-    // over exactly the set they ran over before (F-023).  Only where the result
-    // is FILED changes: a session that names a parent goes under that parent.
+    // A transcript with no turns is an empty shell, not a session for which five
+    // health checks failed to find evidence. Keep it in the collector coverage
+    // note, but exclude it from rule analysis and the analyzed-session count.
+    // Non-empty sub-agents continue to be analyzed and attached as before.
     const ownHealth = [];
     const subagentHealth = [];
+    let emptyOwnSessions = 0;
+    let emptySubagentSessions = 0;
     for (const session of sessions) {
+      const hasTurns = Array.isArray(session?.turns) && session.turns.length > 0;
+      const metadata = sessionMeta?.[str(session?.sessionId)] ?? null;
+      if (!hasTurns) {
+        if (parentOf(metadata)) emptySubagentSessions += 1;
+        else emptyOwnSessions += 1;
+        continue;
+      }
       const health = analyzeSession(session, {
         parserVersion,
         promotion: promotions.bySession.get(str(session?.sessionId)) ?? null,
@@ -625,7 +832,7 @@ export function analyzeAll(collected = {}, options = {}) {
         childLinkageAvailable,
         corpusComplete,
         toolCallsRecorded,
-        sessionMeta: sessionMeta?.[str(session?.sessionId)] ?? null,
+        sessionMeta: metadata,
       });
       (health.isSubagentSession ? subagentHealth : ownHealth).push(health);
     }
@@ -685,6 +892,12 @@ export function analyzeAll(collected = {}, options = {}) {
         `Every turn, token and verdict of ${subagentHealth.length === 1 ? "it" : "theirs"} is unchanged and still reachable under that parent, and ${subagentHealth.length === 1 ? "its interval" : "their intervals"} still feed the sub-agent concurrency rule.` +
         (orphansHere ? ` ${orphansHere} of them name${orphansHere === 1 ? "s" : ""} a parent that this scan did not read, so ${orphansHere === 1 ? "it has" : "they have"} no parent card to sit under and ${orphansHere === 1 ? "is" : "are"} set aside without one.` : ""),
       );
+    }
+    if (emptyOwnSessions || emptySubagentSessions) {
+      const parts = [];
+      if (emptyOwnSessions) parts.push(`${emptyOwnSessions} user session${emptyOwnSessions === 1 ? "" : "s"}`);
+      if (emptySubagentSessions) parts.push(`${emptySubagentSessions} sub-agent session${emptySubagentSessions === 1 ? "" : "s"}`);
+      notes.push(`${parts.join(" and ")} contained no turns and were excluded from health checks; they are not counted as analyzed sessions rather than being reported as five unknown checks.`);
     }
     if (!corpusComplete) {
       notes.push(`the collection limit of ${limit} was reached for this CLI, so this is the newest ${ownHealth.length} session${ownHealth.length === 1 ? "" : "s"}, not all of them.`);
@@ -760,6 +973,15 @@ export function analyzeAll(collected = {}, options = {}) {
       byCli: setAsideByCli,
     },
     collectors: clis,
+    ruleApplicability: clis.map((entry) => {
+      const cli = str(entry?.cli) || "unknown";
+      const excluded = RULES.map((rule) => notApplicableFor(cli, rule)).filter(Boolean);
+      return {
+        cli,
+        applicable: RULES.filter((rule) => !notApplicableFor(cli, rule)).map((rule) => rule.id),
+        notApplicable: excluded,
+      };
+    }),
     promotions: promotions.all,
     diagnostics,
     reportInput: buildReportInput({
@@ -770,6 +992,14 @@ export function analyzeAll(collected = {}, options = {}) {
       parserVersion,
       fixes: options?.fixes,
       trend: options?.trend,
+      ruleApplicability: clis.map((entry) => {
+        const cli = str(entry?.cli) || "unknown";
+        return {
+          cli,
+          applicable: RULES.filter((rule) => !notApplicableFor(cli, rule)).map((rule) => rule.id),
+          notApplicable: RULES.map((rule) => notApplicableFor(cli, rule)).filter(Boolean),
+        };
+      }),
     }),
   };
 }

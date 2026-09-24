@@ -464,6 +464,16 @@ test("resolveWindow keeps the table when the session never exceeded it", () => {
   }
 });
 
+test("resolveWindow marks a plain Claude-family table reading ambiguous without changing its token/source", () => {
+  const resolved = resolveWindow("claude-opus-5", { observedFloor: 150000 });
+  assert.equal(resolved.tokens, 200000);
+  assert.equal(resolved.source, "model-table");
+  assert.equal(resolved.ambiguous, true);
+  assert.deepEqual(resolved.candidateTiers, [200000, 1000000]);
+  const singleTier = resolveWindow("gpt-5", { observedFloor: 150000 });
+  assert.equal(singleTier.ambiguous, undefined);
+});
+
 test("an observed peak above the table promotes to the next known tier (F-008)", () => {
   const resolved = resolveWindow(F008_CONTROL.model, {
     observedFloor: F008_CONTROL.peak,

@@ -24,8 +24,8 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { TRANSACTION_NAME, createFixEnvironment } from "../src/fixes/base.js";
-import { formatBytes, runCleanCommand, surveyState } from "../src/fixes/clean.js";
+import { createStateEnvironment as createFixEnvironment, formatBytes, runCleanCommand, surveyState } from "../src/clean.js";
+const TRANSACTION_NAME = "transaction.json";
 
 const homes = [];
 
@@ -162,7 +162,7 @@ describe("session-rx clean — dry run is the default and removes nothing", () =
 
     assert.match(
       flat(io.stdout),
-      /Once the undo history is gone, the fixes SessionRx has already applied can no longer be undone by SessionRx/,
+      /This removes backups an EARLIER version of SessionRx made before writing a file/,
     );
     assert.match(flat(io.stdout), /Your own files are not touched/);
   });
@@ -240,7 +240,7 @@ describe("session-rx clean --yes — performs it", () => {
     const io = capture();
     await runCleanCommand({ home, yes: true, out: io.out, err: io.err });
 
-    const warning = io.stdout.indexOf("can no\nlonger be undone by SessionRx");
+    const warning = io.stdout.indexOf("This removes backups an EARLIER version");
     const report = io.stdout.indexOf("Removed everything inside");
     assert.ok(warning >= 0, "the consequence must be printed");
     assert.ok(report > warning, "the warning must come before the report of what was removed");

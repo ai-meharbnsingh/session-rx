@@ -8,7 +8,7 @@ Diagnose and fix inefficient AI coding sessions. Local, private, one command.
 npx session-rx
 ```
 
-Requires Node.js 22.13 or newer — SessionRx reads OpenCode's database with the
+Requires Node.js 22.13 or newer — SessionRx reads Cursor's database with the
 SQLite support built into Node, which earlier versions do not have. The command
 picks a free loopback port, starts a local server, and opens your browser.
 `--port <n>` binds an exact port, `--limit <n>` and `SESSION_RX_LIMIT` set how
@@ -19,21 +19,21 @@ limit reads further back and takes longer. `--help` lists the rest.
 npx session-rx clean
 ```
 
-Removes SessionRx's own undo history in `~/.session-rx/`. It prints what it
-would remove and stops; `--yes` performs it. Once that history is gone, the
-fixes SessionRx has already applied can no longer be undone by SessionRx —
-your own files are left exactly as they are either way.
+Removes the backups that earlier versions of SessionRx (which could apply
+fixes) left in `~/.session-rx/`. It prints what it would remove and stops;
+`--yes` performs it. Your own files are left exactly as they are.
 
 ## What it does
 
 It reads the session logs your AI coding CLIs already write, runs six health
-checks against each recent session, and offers a local fix for the ones that
-fail. The six checks are context pressure, cache hit rate, repeated tool work,
-large tool results, long rising context, and sub-agent concurrency. A date-range
+checks against each recent session, and offers suggestions for the ones that
+find problems. The six checks diagnose whether your session got too full, whether you re-read the same material instead of reusing it, whether you ran the same command again and again, whether commands returned very long output, whether your session was long and kept growing, and whether you had too many helper agents at once. A date-range
 selector in the header lets you filter results by the last 15 days, 30 days, 3
 months, or all time without changing the verdicts.
 
 ![Overview showing a date-range selector, a line stating how many sessions the window holds and that the scan was not complete, the CLIs detected on this machine, and four summary cards — sessions analyzed marked as a floor because the scan hit its limit, problems found, distinct fixes available noted as Claude Code only, and checks that could not be measured — each with its unit named and its comparison marked not comparable, above a Health summary beside Trends showing the share of measured checks that passed with the unmeasured count kept outside it](https://raw.githubusercontent.com/ai-meharbnsingh/session-rx/main/docs/assets/screenshot-overview.png)
+
+*Screenshots show an earlier version of SessionRx.*
 
 ### Every check returns one of three answers
 
@@ -55,7 +55,7 @@ not be read. A blank check is not a healthy check.
 
 It is also the most common answer. Measured on one developer machine on
 2026-09-20, at the default scan — 1,236 sessions across five CLIs, 7,416
-verdicts:
+verdicts. That measurement was taken before Gemini CLI, Kimi, and OpenCode support were removed.
 
 | | count | share |
 |---|---|---|
@@ -71,7 +71,7 @@ green tick instead is the thing this tool exists not to do.
 
 ### The Health page
 
-One card per session, one line per check, with the fix offer on its own line:
+One card per session, one line per check, with the suggestion on its own line:
 
 ```
 CODEX  01a0bebe-3ce5-79b3-8130-132d288e…                  4m | 26 turns
@@ -80,25 +80,26 @@ CODEX  01a0bebe-3ce5-79b3-8130-132d288e…                  4m | 26 turns
 1 of 6 checks could not be measured on this session. Those are not passes
 — each one says below why it could not run.
 
-  ! Repeated tool work   identical tool call + input + result, most
+  ! Ran the same command again and again
+                         identical tool call + input + result, most
                          repeated 7 times            [! PROBLEM FOUND]
-    → Batch commands instruction     [Preview] [Apply] [Skip]
+    → View suggestion and copy text for Codex
 
-  ? High sub-agent concurrency               [? COULD NOT BE MEASURED]
+  ? Too many helper agents at once               [? COULD NOT BE MEASURED]
     Not measured. This is NOT a pass — the check could not run here.
     Codex's logs don't record which turns belonged to a sub-agent or
     which parent started them, so there is no way to tell whether two
     were running at the same time. Claude Code does record it, so this
     check produces a real result on a Claude session.
 
-  ✓ Long rising context  session elapsed: 0.07 hours       [✓ PASSED]
-  ✓ Context pressure     average per-turn context: 52,612 tokens
-  ✓ Low cache hit        cache hit rate: 100.0%
+  ✓ Long session that kept growing  session elapsed: 0.07 hours       [✓ PASSED]
+  ✓ Conversation got too full     average per-turn context: 52,612 tokens
+  ✓ Re-read the same material instead of reusing it        cache hit rate: 100.0%
 ```
 
 Each line has a `why` and an `evidence` disclosure. `why` gives the threshold
 and how it was derived; `evidence` gives the files and record counts the
-number came from. The score, the unknown sentence and the fix buttons are
+number came from. The score, the unknown sentence and the suggestion button are
 never behind a click.
 
 ## Supported CLIs
@@ -110,13 +111,8 @@ writes down, so each row says what it can and cannot support.
 |---|---|---|
 | Claude Code | `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl`, plus `…/<session-uuid>/subagents/agent-*.jsonl` | All six checks. Sub-agent concurrency is read from the separate sub-agent transcripts, which is the only place that activity is recorded. Context windows come from a model-id table, overridden by observation where a session demonstrably held more than the table allows — see Limitations. |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<uuid>.jsonl` | Five of six. The context window is stated by the CLI itself (`model_context_window`), which is the most reliable source there is. Nothing in its records establishes a sub-agent interval, so that check always reports `unknown`. |
-| Gemini CLI | `~/.gemini/tmp/<project-slug>/chats/session-<ISO>-<id>.jsonl` | Context pressure and long rising context work. Its records prove that a tool was *called* but carry no stable tool-result contract and no result byte length, so on a session that actually calls tools the repeated-work and large-result checks report `unknown`; cache counters are absent too, and nothing in its records ties a sub-agent back to the session that started it. It also writes a session file per invocation, most of which hold no exchange at all — on the machine measured above, 508 of 510 files had no turn to read, and those sessions report `unknown` on every check. |
-| Kimi | `~/.kimi/sessions/<workspace-hash>/<session-uuid>/wire.jsonl` | All six can produce a verdict, with one caveat: Kimi reports a context *fraction* and no absolute window, so the card shows no token window and no token count is invented from the percentage. The context check still works, from the fraction. Sub-agent intervals come from its `SubagentEvent` records. |
-| OpenCode | `~/.local/share/opencode/opencode.db` (SQLite, opened read-only) | Five of six. Its model ids are not in any published window table, so the window shown is a *measured lower bound* from the session's own peak ("at least 64,329 tokens"). Dividing that peak by itself is 1.0 for every session by construction, so no context percentage and no context verdict is derived from it — that check reports `unknown` rather than warning on every session. |
 | Cursor CLI | `~/.cursor/chats/<md5-of-cwd>/<chat-id>/store.db` (SQLite, opened read-only) plus the transcript at `~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl` | Zero of six. Cursor does not persist per-turn token counts anywhere on disk — only in memory — so context pressure, cache hit rate, and long rising context cannot be measured and report `unknown`. It also discards tool results from its transcript, so the large-result check reports `unknown` too. What it does provide: the session list, the project, the model last used, turn count with timestamps (so duration is real), and the names of tools each turn called. Cursor reports its own context window size, which is better than a lookup table. Its chat metadata includes an encryption key, which SessionRx strips before reading the row, so it never reaches the report or UI. |
-| GitHub Copilot CLI | `~/.copilot/` (`config.json`, `logs/process-<epoch>-<pid>.log`) | Detected only. Its logs carry no transcript, so there is nothing to check and no session is invented for it. |
-| Grok Build CLI | `~/.grok`, `~/.config/grok` (candidate paths) | Detected only, if the directory exists. The log format is unconfirmed and no parser was written on a guess. |
-| Amp | `~/.amp`, `~/.config/amp`, `~/.cache/amp` (candidate paths) | Detected only, on the same terms as Grok. |
+| Antigravity CLI | `~/.gemini/antigravity-cli` and `~/.gemini/antigravity` | Detected only. No on-disk format has been confirmed from real files, so no sessions are read yet. When real files are examined and the format confirmed, this can become a full parser. |
 
 ## Platform support
 
@@ -128,28 +124,31 @@ Where a CLI documents an environment variable for relocating its data, SessionRx
 |---|---|
 | Claude Code | `CLAUDE_CONFIG_DIR` |
 | Codex | `CODEX_HOME` |
-| OpenCode | `XDG_DATA_HOME` |
-| Kimi | `KIMI_CODE_HOME` (current CLI), `KIMI_SHARE_DIR` (legacy) |
 | Cursor CLI | `CURSOR_CONFIG_DIR`, `XDG_CONFIG_HOME`, `CURSOR_DATA_DIR` |
-| Gemini CLI, GitHub Copilot CLI | none documented; `~/.gemini`, `~/.copilot` |
 
-## How fixes work
+## How suggestions work
 
-Every fix is Preview, then Apply, then Undo.
+SessionRx never writes your files. When it finds a problem, it shows you a
+suggestion: a preview of the exact text to add and a ready-made request you can
+copy and paste into your own AI tool (Claude Code, Codex, Cursor, or Antigravity).
 
-- **Preview** shows the exact diff, the files it touches, and nothing is
-  written. The diff is generated from the same bytes Apply will write.
-- **Apply** copies each target file byte-for-byte into
-  `~/.session-rx/undo/<timestamp>/` first, then writes.
-- **Undo** restores those bytes. It refuses to run if the undo record is
-  missing or no longer matches the file it came from. Your files are restored
-  exactly; SessionRx keeps its own history under `~/.session-rx/`, which is
-  not removed by an undo. Nothing removes that directory on its own —
-  `session-rx clean` is the only thing that does, and only when you run it.
+- **View suggestion** shows the exact text that would address the problem, which
+  CLI's configuration it would go into (global or project-level), and a toggle
+  between "Global" and "Project" scope.
+- **Copy request** copies a message you can paste directly into your AI tool.
+  Your AI tool then makes the change itself, and you approve it there.
+- SessionRx reads (never writes) the global file to see whether a suggestion
+  is already there, and says "already added" if so. A project file depends on
+  which folder you are in, so for Project it says it cannot tell.
 
-Fixes are idempotent. Each one carries a marker, and `check()` reads that
-marker, so a fix that is already applied is not offered again and cannot be
-applied twice.
+Where each request points:
+
+| Tool | Global (all projects) | Project (this folder) |
+|---|---|---|
+| Claude Code | `~/.claude/CLAUDE.md` (settings: `~/.claude/settings.json`) | `./CLAUDE.md` (settings: `./.claude/settings.json`) |
+| Codex | `~/.codex/AGENTS.md` (or `AGENTS.override.md` if you have one) | `./AGENTS.md` |
+| Cursor | Cursor Settings → Rules → User Rules (paste it yourself; there is no global file) | `./AGENTS.md` |
+| Antigravity | `~/.gemini/GEMINI.md` | `./AGENTS.md` |
 
 ## Privacy
 
@@ -162,11 +161,7 @@ applied twice.
   server running on your own machine at `127.0.0.1`, and nothing is requested
   from, or sent to, anywhere else. Chart.js is vendored into the package, so
   the charts work with the network off.
-- Session logs are read read-only. The only writes are the fixes you
-  explicitly Apply, and each one is backed up first.
-- OpenCode's database is opened read-only and queried against a table
-  allowlist that excludes its `account` and `credential` tables, which hold
-  plaintext tokens.
+- Session logs are read read-only. SessionRx never writes your files.
 - The report includes file paths and project names to make findings traceable,
   so read it before sharing it publicly.
 
@@ -193,10 +188,6 @@ applied twice.
   fits; where no table entry matched at all, the window shown is the session's
   own observed peak, labelled "at least N". Both are marked as inferred in the
   UI, and a lower bound never becomes a percentage.
-- **The five fixes only change Claude Code.** They write to
-  `~/.claude/settings.json` and `~/.claude/CLAUDE.md`. They are offered against
-  findings from any CLI, because the underlying habit is the same, but applying
-  one changes Claude Code's behaviour and nothing else.
 
 ## Built by
 

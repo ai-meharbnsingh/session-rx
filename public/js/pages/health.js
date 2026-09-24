@@ -5,7 +5,7 @@
  * ---------------------------------------------------------
  * The analyzer emits three verdicts, not two: `observed` (a problem was found),
  * `not-observed` (the check ran and found nothing) and `unknown` (the check
- * COULD NOT RUN).  On the real corpus the third is the majority.  A UI that
+ * COULD NOT RUN).  A UI that
  * folds `unknown` into a tick tells the user an unmeasurable check passed,
  * which is the single failure this product exists to prevent.
  *
@@ -13,14 +13,9 @@
  *   1. its own row class `.verdict-unknown` (dashed + hatched, wave 5C)
  *   2. its own glyph `?` where pass is `✓` and a problem is `!`
  *   3. its own words — "COULD NOT BE MEASURED", never "OK"
- *   4. the sentence "This is NOT a pass" in plain text, not a tooltip
- *   5. a plain-English sentence saying WHAT could not be worked out and WHY,
- *      leading the row; the engineering `evidence.reason` that sentence stands
- *      in for keeps its every word, one click away inside the evidence
- *      `<details>`.  Where a rule has no plain sentence for its cause, the
- *      engineering reason stays on the card face — it is then all a reader has,
- *      and an unknown with no stated cause would be a worse honesty failure
- *      than a jargon-heavy one.
+ *   4. a page-level sentence saying that unmeasured checks are not passes
+ *   5. the engineering `evidence.reason` remains one click away inside the
+ *      evidence `<details>`.
  * plus `data-status="unknown"` for any styling or test that wants to assert it.
  *
  * The score bar is three segments — passed, observed, unknown — so the unknown
@@ -38,7 +33,7 @@
  *   ! Your AI repeated the same tool operation 6 times. This may indicate
  *     wasted work — [...] a DETECTED REPETITION, not CONFIRMED WASTE.
  *     Repeated tool work   identical call+input+result: 6   repeat-tool · warn
- *     → Output hygiene instruction        [Preview] [Apply] [Skip]
+ *     → Output hygiene instruction        [View suggestion]
  *   ✓ Low cache hit        cache hit rate: 100.0%           cache-hit · warn
  *
  * The plain sentence is a template declared on the RULE, in
@@ -57,8 +52,8 @@
  * What is NEVER behind that click, because it is the honesty surface: the score
  * headline, the three-segment bar, the sentence that an unknown is not a pass,
  * each unknown rule's cause in plain English, every `— not measured`, the
- * lower-bound rendering and its note, and the [Preview] [Apply] [Skip]
- * buttons.
+ * lower-bound rendering and its note, and the [View suggestion]
+ * button.
  *
  * A `null` number renders as `.not-measured` ("— not measured"), never as 0.
  * A window whose source is `observed-promoted` or `observed-floor` carries an
@@ -81,18 +76,11 @@
  */
 
 import { registerPage, api as appApi } from '../app.js';
-import { openFixModal } from '../components/fix-modal.js';
+import { openSuggestionPanel } from '../components/suggestion-panel.js';
 import { healthNode, icon } from '../components/ui.js';
 
 /** BP-001.24: the ten latest sessions across every detected CLI. */
 const SESSION_LIMIT = 10;
-
-/**
- * `${sessionId}::${ruleId}` for fixes the user chose to skip.  Page-local and
- * deliberately not persisted: skipping means "not now", not a stored
- * preference, and a remembered skip would silently hide a finding next run.
- */
-const skipped = new Set();
 
 function iconBadge(name) {
   const badge = el('span', 'rx-icon');
@@ -124,32 +112,21 @@ export const INFERRED_SOURCES = new Set(['observed-promoted', 'observed-floor'])
 export const FLOOR_SOURCE = 'observed-floor';
 
 /**
- * The human name for a rule's fix.
+ * The human name for a rule's suggested change.
  *
- * The API publishes `fixTitle` alongside `fix` (server.js `annotateFixTitles`),
- * so the catalogue lives in ONE place.  This page used to mirror the five
- * titles locally with a drift test holding the copies together — two
- * catalogues is how the UI and the API drift apart, which is the defect F-021
- * recorded.  Where the server published no title the id is printed verbatim,
- * never a name guessed here.
+ * The API publishes `suggestionTitle` alongside `fix` (server.js
+ * `annotateSuggestions`), so the catalogue lives in ONE place. Where the
+ * server published no title the id is printed verbatim, never a name
+ * guessed here.
  *
- * @param {{fix?: unknown, fixTitle?: unknown}|null|undefined} rule
+ * @param {{fix?: unknown, suggestionTitle?: unknown}|null|undefined} rule
  * @returns {string}
  */
 export function fixTitle(rule) {
-  const title = rule?.fixTitle;
+  const title = rule?.suggestionTitle;
   if (typeof title === 'string' && title.length > 0) return title;
   const id = rule?.fix;
-  return typeof id === 'string' && id.length > 0 ? id : 'this fix';
-}
-
-function fixCliNote(session, rule) {
-  if (session?.cli !== rule?.fixCli) {
-    if (typeof session?.cliName !== 'string' || typeof rule?.fixCliName !== 'string') return null;
-  } else return null;
-  const sourceCli = session.cliName;
-  const targetCli = rule.fixCliName;
-  return `Changes ${targetCli}'s config, not ${sourceCli}'s. Affects future ${targetCli} sessions only.`;
+  return typeof id === 'string' && id.length > 0 ? id : 'this suggestion';
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +423,17 @@ export function ruleById(session, id) {
   return rules.find((rule) => rule?.id === id);
 }
 
+/** Rules listed in notApplicable are absent from the dashboard entirely. */
+function applicableRules(session) {
+  const excluded = new Set(
+    (Array.isArray(session?.notApplicable) ? session.notApplicable : [])
+      .map((entry) => entry?.ruleId)
+      .filter((id) => typeof id === 'string' && id),
+  );
+  return (Array.isArray(session?.rules) ? session.rules : [])
+    .filter((rule) => !excluded.has(rule?.id));
+}
+
 /**
  * The sub-agent turn count, or an honest absence.
  *
@@ -520,56 +508,17 @@ function promotionCallout(promotion) {
 // Verdict rows
 // ---------------------------------------------------------------------------
 
-/** Preview / Apply / Skip for one finding. */
-function verdictActions(session, rule, api, rerender) {
-  const key = `${session?.sessionId ?? ''}::${rule?.id ?? ''}`;
+/** One button that opens the Suggested change panel for one finding. */
+function verdictActions(session, rule, api) {
   const wrap = el('div', 'verdict-actions');
-
-  if (skipped.has(key)) {
-    wrap.append(el('span', 'badge badge-unknown badge-sm', 'skipped for now'));
-    const undo = el('button', 'button button-quiet button-sm', 'Un-skip');
-    undo.type = 'button';
-    undo.addEventListener('click', () => { skipped.delete(key); rerender(); });
-    wrap.append(undo);
-    return wrap;
-  }
-
-  /**
-   * The modal is wave 5C's (BP-001.28): it owns preview, confirm, apply, undo
-   * and the CSRF-carrying POSTs.  This page only names the fix, the finding it
-   * came from, and the mode to open in.
-   *
-   * @param {'preview'|'apply'} mode
-   */
-  const open = (mode) => {
-    openFixModal({
-      mode,
-      fixId: rule.fix,
-      ruleId: rule.id,
-      ruleName: rule.name,
-      sessionId: session?.sessionId ?? null,
-      cli: session?.cli ?? null,
-      api,
-      onSettled: rerender,
-    });
-  };
-
-  const preview = el('button', 'button button-sm', 'Preview');
-  preview.type = 'button';
-  preview.setAttribute('aria-label', `Preview the fix for ${rule.name}`);
-  preview.addEventListener('click', () => open('preview'));
-
-  const apply = el('button', 'button button-primary button-sm', 'Apply');
-  apply.type = 'button';
-  apply.setAttribute('aria-label', `Apply the fix for ${rule.name}`);
-  apply.addEventListener('click', () => open('apply'));
-
-  const skip = el('button', 'button button-quiet button-sm', 'Skip');
-  skip.type = 'button';
-  skip.setAttribute('aria-label', `Skip the fix for ${rule.name}`);
-  skip.addEventListener('click', () => { skipped.add(key); rerender(); });
-
-  wrap.append(preview, apply, skip);
+  const open = el('button', 'button button-sm', 'View suggestion');
+  open.type = 'button';
+  open.setAttribute('aria-label', `View the suggested change for ${rule.name}`);
+  open.disabled = !rule.suggestionAvailable;
+  open.addEventListener('click', () => {
+    openSuggestionPanel({ id: rule.fix, toolId: rule.suggestionTool, title: fixTitle(rule), api });
+  });
+  wrap.append(open);
   return wrap;
 }
 
@@ -621,7 +570,7 @@ export function disclosureLabel(rule) {
  * the keyboard target for the detail below it and costs no extra row.
  *
  * It carries NO button: the fix actions are siblings of the `<details>`, not
- * children of its summary, because a click on Apply must apply the fix rather
+ * children of its summary, because a click on View suggestion must not toggle it
  * than toggle a disclosure.
  *
  * @param {object} rule a `RuleResult`
@@ -728,10 +677,9 @@ export function verdictNode(session, rule, api = null, rerender = null) {
   details.append(verdictSummary(rule, meta, critical));
 
   const more = el('div', 'verdict-more');
-  // The engineering reason, in full and unedited, first behind the disclosure —
-  // it is the most specific thing this rule recorded about why it could not
-  // run. It is only here when a plain sentence is leading the row in its place.
-  if (unmeasuredPlain) more.append(el('p', 'verdict-detail', unknownReasonText(rule)));
+  // The engineering reason, in full and unedited, stays behind the disclosure;
+  // it is the most specific thing this rule recorded about why it could not run.
+  if (status === 'unknown') more.append(el('p', 'verdict-detail', unknownReasonText(rule)));
   const threshold = el('p', 'verdict-detail');
   threshold.append(text(`Threshold ${String(rule?.threshold?.value ?? 'not recorded')}`));
   if (rule?.threshold?.derivation) threshold.append(text(` — ${rule.threshold.derivation}`));
@@ -747,25 +695,17 @@ export function verdictNode(session, rule, api = null, rerender = null) {
   details.append(more);
   body.append(details);
 
-  if (status === 'unknown') {
-    // The line the whole product turns on. Plain text, not a tooltip, and not
-    // behind the disclosure — a reader must see this without clicking.
-    const reason = el('p', 'verdict-reason');
-    reason.append(el('strong', null, 'Not measured. This is NOT a pass — the check could not run here. '));
-    if (!unmeasuredPlain) reason.append(text(unknownReasonText(rule)));
-    body.append(reason);
-  }
-
   // Why a percentage is missing, in visible text (BP-002.18).
   if (values.some(isSuppressedShare)) body.append(el('p', 'note verdict-floor-note', FLOOR_SHARE_NOTE));
 
-  if (status === 'observed' && rule?.fix && api && rerender) {
+  if (status === 'observed' && rule?.fix && api) {
     const offer = el('div', 'verdict-offer');
     offer.append(el('span', 'verdict-arrow', '→'));
     offer.append(el('span', 'verdict-fix', fixTitle(rule)));
-    const scopeNote = fixCliNote(session, rule);
-    if (scopeNote) offer.append(el('span', 'verdict-fix-scope', scopeNote));
-    offer.append(verdictActions(session, rule, api, rerender));
+    if (!rule.suggestionAvailable) {
+      offer.append(el('span', 'verdict-fix-scope', 'SessionRx has no suggested change for this CLI.'));
+    }
+    offer.append(verdictActions(session, rule, api));
     body.append(offer);
   }
 
@@ -780,8 +720,8 @@ export function verdictNode(session, rule, api = null, rerender = null) {
  *
  * @returns {HTMLElement}
  */
-export function verdictList(session, api = null, rerender = null) {
-  const rules = Array.isArray(session?.rules) ? session.rules : [];
+export function verdictList(session, api = null, rerender = null, { includeUnknown = true } = {}) {
+  const rules = applicableRules(session).filter((rule) => includeUnknown || rule?.evidence?.status !== 'unknown');
   if (!rules.length) {
     return el(
       'p',
@@ -810,7 +750,7 @@ export function verdictList(session, api = null, rerender = null) {
  * @param {Array<object>} rules used only to split observed into warn/critical
  * @returns {HTMLElement}
  */
-export function scoreNode(score, rules = []) {
+export function scoreNode(score, rules = [], { showUnknownCallout = true } = {}) {
   const total = Number.isFinite(score?.total) ? score.total : 0;
   const passed = Number.isFinite(score?.passed) ? score.passed : 0;
   const observed = Number.isFinite(score?.observed) ? score.observed : 0;
@@ -846,7 +786,8 @@ export function scoreNode(score, rules = []) {
   // The badge is shared with Sessions so denominator, wording and colour
   // cannot drift between the two views.
   const headline = el('div', 'score-headline');
-  headline.append(healthNode(score, false));
+  const badge = healthNode(score, false);
+  headline.append(badge);
   wrap.append(headline);
 
   const legend = el('div', 'score-legend');
@@ -861,7 +802,7 @@ export function scoreNode(score, rules = []) {
   legend.append(swatch('unknown', `${unknown} unknown`));
   wrap.append(legend);
 
-  if (unknown > 0) {
+  if (unknown > 0 && showUnknownCallout) {
     wrap.append(
       el(
         'p',
@@ -898,7 +839,7 @@ function metaCell(label, value, why) {
  * @param {Function} rerender
  * @returns {HTMLElement}
  */
-export function sessionCard(session, api, rerender) {
+export function sessionCard(session, api, rerender, { compact = false } = {}) {
   const card = el('article', 'card health-card');
   card.dataset.cli = session?.cli ?? 'unknown';
   card.dataset.sessionId = session?.sessionId ?? '';
@@ -922,7 +863,7 @@ export function sessionCard(session, api, rerender) {
   card.append(head);
 
   const body = el('div', 'card-body');
-  body.append(scoreNode(session?.score, session?.rules));
+  body.append(scoreNode(session?.score, applicableRules(session), { showUnknownCallout: !compact }));
 
   const grid = el('div', 'meta-grid');
   grid.append(metaCell('project', session?.project ?? null, 'the collector recorded no project for this session'));
@@ -935,7 +876,7 @@ export function sessionCard(session, api, rerender) {
   const promotion = promotionCallout(session?.windowPromotion);
   if (promotion) body.append(promotion);
 
-  body.append(verdictList(session, api, rerender));
+  body.append(verdictList(session, api, rerender, { includeUnknown: !compact }));
   card.append(body);
   return card;
 }
@@ -969,7 +910,8 @@ export function collectorsPanel(collectors) {
   const supported = rows.filter(
     (row) => row?.support === 'supported' && Number.isFinite(row?.sessions) && row.sessions > 0,
   );
-  const detectionOnly = rows.filter((row) => row?.support === 'detection-only');
+  const detectionOnly = rows.filter((row) => row?.support === 'detection-only'
+    || (row?.support === 'supported' && (!Number.isFinite(row?.sessions) || row.sessions === 0) && row?.note));
 
   /**
    * A collector's note is a CAVEAT on the count beside it — a collection limit
@@ -979,7 +921,7 @@ export function collectorsPanel(collectors) {
    * states how many there are and which CLIs they qualify, and the count chip
    * of a CLI that has one is marked.  Nothing is dropped.
    */
-  const notes = supported.filter((row) => typeof row?.note === 'string' && row.note.length > 0);
+  const notes = rows.filter((row) => typeof row?.note === 'string' && row.note.length > 0);
 
   const list = el('div', 'cli-list cli-list-inline');
   for (const row of supported) {
@@ -998,8 +940,8 @@ export function collectorsPanel(collectors) {
   for (const row of detectionOnly) {
     const item = el('div', 'cli-item');
     item.append(el('span', 'cli-name', row.cli ?? 'unknown'));
-    const status = el('span', 'cli-status badge badge-sm badge-unknown', 'Detected — support coming soon');
-    status.setAttribute('title', row?.note ?? 'this tool is installed, but it keeps no session transcript that can be read, so nothing about its usage is measured here');
+    const status = el('span', 'cli-status badge badge-sm badge-unknown', 'detected, not read yet');
+    if (row?.note) status.setAttribute('title', row.note);
     item.append(status);
     list.append(item);
   }
@@ -1046,7 +988,7 @@ function newestFirst(sessions) {
  * Index into `shown` of the first session carrying an OBSERVED, fixable
  * finding, in the same newest-first order the cards render in — or `-1`
  * when none does.  Drives the summary's "Review fixes" jump: it must point
- * at a card that actually offers `[Preview] [Apply] [Skip]` (BP item 1),
+ * at a card that actually offers `[View suggestion]` (BP item 1),
  * never merely the first problem regardless of whether a fix exists for it.
  *
  * @param {Array<object>} shown
@@ -1056,7 +998,7 @@ export function firstActionableIndex(shown) {
   const sessions = Array.isArray(shown) ? shown : [];
   for (let index = 0; index < sessions.length; index += 1) {
     const rules = Array.isArray(sessions[index]?.rules) ? sessions[index].rules : [];
-    if (rules.some((rule) => rule?.evidence?.status === 'observed' && rule?.fix)) return index;
+    if (applicableRules(sessions[index]).some((rule) => rule?.evidence?.status === 'observed' && rule?.fix)) return index;
   }
   return -1;
 }
@@ -1095,7 +1037,7 @@ export function healthSummaryNode(shown, actionableIndex) {
     const rules = Array.isArray(session?.rules) ? session.rules : null;
     if (!rules) continue;
     sawRules = true;
-    for (const rule of rules) {
+    for (const rule of applicableRules(session)) {
       const st = rule?.evidence?.status;
       if (st === 'observed') {
         problems += 1;
@@ -1124,14 +1066,13 @@ export function healthSummaryNode(shown, actionableIndex) {
   // fixes. Both are true; sharing one label made the smaller Overview number
   // look like a contradiction of the larger one here. The label names the
   // quantity; the count itself is unchanged.
-  stats.append(stat('Fixable findings', sawRules ? fixable : null, noEvidence));
-  stats.append(stat('Checks not measured', sawRules ? unmeasured : null, noEvidence));
+  stats.append(stat('Findings with a suggestion', sawRules ? fixable : null, noEvidence));
   wrap.append(stats);
 
-  const action = el('button', 'button button-primary summary-action', 'Review fixes');
+  const action = el('button', 'button button-primary summary-action', 'Review suggestions');
   action.type = 'button';
   if (actionableIndex >= 0) {
-    action.setAttribute('aria-label', 'Review fixes: jump to the first session with an actionable problem');
+    action.setAttribute('aria-label', 'Review suggestions: jump to the first session with an actionable problem');
     action.addEventListener('click', () => {
       const target = document.getElementById(`health-card-${actionableIndex}`);
       if (!target) return;
@@ -1148,145 +1089,6 @@ export function healthSummaryNode(shown, actionableIndex) {
 }
 
 /** Collector diagnostics, folded away but never dropped (BP-002.08). */
-// ---------------------------------------------------------------------------
-// Fixes already applied
-// ---------------------------------------------------------------------------
-
-/**
- * Whether one catalogue fix is in place, as exactly one of three answers:
- * applied | not-applied | unknown. There is no fourth.
- *
- * WHY THIS PAGE ASKS AT ALL: every fix offer on this page hangs off an
- * *observed* finding, so a fix that worked removes its own offer — and with it
- * the only way back to Undo. The verdicts cannot answer "what have I already
- * applied?"; only `check` can.
- *
- * A check that could not run, a fix that could not be loaded and a request that
- * failed are all `unknown`, carrying the reason they gave. `unknown` is not
- * "not applied", and it is never a pass.
- *
- * @returns {Promise<{id: string, title: string, state: string, detail: ?string}>}
- */
-async function fixApplyState(api, fix) {
-  const id = String(fix?.id ?? '');
-  const title = fix?.title || id;
-  const firstText = (...values) => values.find((value) => typeof value === 'string' && value.length) || null;
-  if (fix?.available === false) {
-    return { id, title, state: 'unknown', detail: firstText(fix?.reason) || 'this fix could not be loaded on this machine' };
-  }
-  let checked;
-  try {
-    checked = await api.get(`/api/fixes/${encodeURIComponent(id)}/check`);
-  } catch (error) {
-    return { id, title, state: 'unknown', detail: firstText(error?.message) || 'the check could not be reached' };
-  }
-  const status = typeof checked?.status === 'string' ? checked.status : null;
-  const said = firstText(checked?.message, checked?.reason);
-  const detail = said && checked?.reason && checked.message ? `${checked.message} (${checked.reason})` : said;
-  if (status === 'unknown') return { id, title, state: 'unknown', detail: detail || 'the check did not say why' };
-  if (status === 'applied' || checked?.applied === true) {
-    return { id, title, state: 'applied', detail: checked?.drifted === true ? detail : null };
-  }
-  if (status === 'not-applied' || checked?.applied === false) return { id, title, state: 'not-applied', detail: null };
-  return { id, title, state: 'unknown', detail: 'the check did not report whether this fix is in place' };
-}
-
-/** One applied fix, under the one action that reverses it. */
-function appliedFixRow(row, api) {
-  const item = el('li', 'applied-fix');
-  item.dataset.fixId = row.id;
-  item.append(el('span', 'applied-fix-title', row.title));
-  if (row.detail) item.append(el('p', 'note', row.detail));
-  const undo = el('button', 'button button-sm', 'Undo');
-  undo.type = 'button';
-  undo.dataset.action = 'undo-fix';
-  undo.dataset.fixId = row.id;
-  undo.setAttribute('aria-label', `Undo ${row.title}`);
-  undo.addEventListener('click', () => { openFixModal({ fixId: row.id, api }); });
-  item.append(undo);
-  return item;
-}
-
-/**
- * The fixes already in place on this machine, and the ones whose state could
- * not be read — the second group named as such, with its reason, never folded
- * into the first and never rendered as a pass.
- *
- * The panel fills itself after the page has painted, because `check` is a
- * request per fix and this render is synchronous. With no client to ask, it
- * stays empty and hidden: no reading was taken, so no claim is made.
- *
- * @returns {HTMLElement} the panel, populated later
- */
-function appliedFixesPanel(api) {
-  // The panel is the container for both groups; `applied-fixes` marks the
-  // applied group ALONE, so a panel holding only unknowns never reads as one.
-  const panel = el('section', 'card card-pad fix-state-panel');
-  panel.hidden = true;
-  if (!api || typeof api.get !== 'function') return panel;
-
-  const show = (...children) => { panel.replaceChildren(...children); panel.hidden = false; };
-
-  /** Neither group could be built: say so as an unknown, not as an empty list. */
-  const couldNotRead = (why) => {
-    const block = el('div', 'unchecked-fixes');
-    block.append(el('h2', null, 'Fixes that could not be checked'));
-    block.append(el('p', 'note', why));
-    return block;
-  };
-
-  (async () => {
-    let catalog = null;
-    try { catalog = await api.get('/api/fixes'); } catch { catalog = null; }
-    const rows = Array.isArray(catalog?.fixes) ? catalog.fixes : null;
-    if (!rows) {
-      show(couldNotRead('The list of fixes could not be read, so what is already applied cannot be listed here. That is not a statement that none are.'));
-      return;
-    }
-    const states = await Promise.all(
-      rows.filter((fix) => fix?.id && fix?.applyable !== false).map((fix) => fixApplyState(api, fix)),
-    );
-    const applied = states.filter((row) => row.state === 'applied');
-    const unknown = states.filter((row) => row.state === 'unknown');
-    if (!applied.length && !unknown.length) return;
-
-    const children = [];
-    if (applied.length) {
-      const block = el('div', 'applied-fixes');
-      block.append(el('h2', null, 'Applied fixes'));
-      block.append(el('p', 'note', 'Already in place on this machine. Undo restores the file each one changed.'));
-      // No cap: a user must be able to reach every fix they applied.
-      const list = el('ul', 'file-list');
-      applied.forEach((row) => list.append(appliedFixRow(row, api)));
-      block.append(list);
-      children.push(block);
-    }
-    if (unknown.length) {
-      const block = el('div', 'unchecked-fixes');
-      block.append(el('h2', null, 'Fixes that could not be checked'));
-      block.append(el('p', 'note', 'Whether these are already in place could not be worked out. That is not the same as "not applied", and it is not a pass.'));
-      const list = el('ul', 'file-list');
-      unknown.forEach((row) => {
-        const item = el('li', 'unchecked-fix');
-        item.dataset.fixId = row.id;
-        item.append(el('span', 'applied-fix-title', row.title));
-        item.append(el('p', 'note', row.detail || 'no reason was recorded'));
-        list.append(item);
-      });
-      block.append(list);
-      const link = el('a', null, 'Open these on the Fixes page');
-      link.href = '#/fixes';
-      block.append(link);
-      children.push(block);
-    }
-    show(...children);
-  })().catch(() => {
-    show(couldNotRead('What is already applied could not be read. That is not a statement that nothing is.'));
-  });
-
-  return panel;
-}
-
 function diagnosticsNode(diagnostics) {
   const rows = Array.isArray(diagnostics) ? diagnostics : [];
   if (!rows.length) return null;
@@ -1343,16 +1145,12 @@ export function renderHealth(mount, data, ctx = {}) {
       'note',
       `The ${shown.length} most recent session${shown.length === 1 ? '' : 's'} of ${groupInt(sessionsTotal) ?? '0'} read from this machine. `
         + 'Every check returns one of three verdicts: a problem was observed, nothing was observed, or it could not be measured. '
-        + 'The third is not a pass, and it is the most common answer on real data.',
+        + 'The third is not a pass.',
     ),
   );
   if (data?.scan?.note) stack.append(el('p', 'note', `Scan: ${data.scan.note}`));
 
   stack.append(collectorsPanel(data?.collectors));
-
-  // Before the early return below, so a fix the user applied stays reachable
-  // even on a scan that read no session at all.
-  stack.append(appliedFixesPanel(api));
 
   if (!shown.length) {
     stack.append(
@@ -1369,13 +1167,19 @@ export function renderHealth(mount, data, ctx = {}) {
   // Indexed so the summary's "Review fixes" button (`firstActionableIndex`)
   // has a stable element to jump to.
   shown.forEach((session, index) => {
-    const card = sessionCard(session, api, rerender);
+    const card = sessionCard(session, api, rerender, { compact: true });
     card.id = `health-card-${index}`;
     stack.append(card);
   });
 
   const diagnostics = diagnosticsNode(data?.diagnostics);
   if (diagnostics) stack.append(diagnostics);
+
+  const unmeasured = shown.reduce((total, session) => total + applicableRules(session)
+    .filter((rule) => rule?.evidence?.status === 'unknown').length, 0);
+  if (unmeasured > 0) {
+    stack.append(el('p', 'note unmeasured-page-note', `${groupInt(unmeasured)} check${unmeasured === 1 ? '' : 's'} could not be measured from the session logs; they were not treated as passes. This is NOT a pass — the check could not run here.`));
+  }
 
   mount.append(stack);
 }

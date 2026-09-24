@@ -179,7 +179,7 @@ a { color: inherit; text-decoration: none; }
 .rx-hero h1 { font-size: clamp(26px, 4vw, 38px); margin-bottom: 6px; }
 .rx-hero p { color: var(--muted); margin: 0; }
 .rx-grid { display: grid; gap: 16px; }
-.rx-grid-four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.rx-grid-four { grid-template-columns: repeat(4, minmax(0, 1fr)); }.rx-grid-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .rx-grid-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .rx-grid-two { grid-template-columns: minmax(220px, .8fr) minmax(0, 2fr); align-items: start; }
 .rx-card { background: linear-gradient(145deg, rgba(18,23,34,.96), rgba(13,20,31,.92)); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 18px; min-width: 0; }
@@ -372,6 +372,25 @@ h4 { margin-bottom: 4px; font-size: 12px; color: var(--muted); text-transform: u
 .summary-stat-value .not-measured { font-size: 18px; }
 .summary-stat-label { color: var(--subtle); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
 .summary-action { flex: 0 0 auto; }
+
+/* ------------------------------------------- Report page: manager summary */
+
+.report-summary { display: flex; flex-direction: column; gap: 10px; margin-bottom: 4px; }
+.report-summary-stats { flex-wrap: wrap; }
+.summary-metric-card {
+  display: flex; flex-direction: column; gap: 4px; min-width: 140px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--border);
+}
+.summary-metric-value { font: 24px var(--mono); font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+.summary-metric-label { color: var(--subtle); font: 12px var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+.summary-metric-caption { color: var(--unknown); font: 11px var(--mono); font-style: italic; }
+.summary-metric-accent { border-left-color: var(--accent); }
+.summary-metric-warn { border-left-color: var(--warn); }
+.summary-metric-pass { border-left-color: var(--pass); }
+.summary-metric-unknown { border-left-color: var(--unknown); background: var(--unknown-bg); }
+.report-summary-tools { list-style: none; display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 0; margin: 0; }
+.report-summary-tools li { display: flex; align-items: center; gap: 8px; }
 
 /* ---------------------------------------- health card header + meta grid */
 

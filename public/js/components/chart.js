@@ -195,7 +195,7 @@ export function buildChartConfig(spec = {}) {
       data: {
         labels,
         datasets: [{
-          label: str(input.label) || "cache hit rate",
+          label: str(input.label) || "reused content rate",
           data: values,
           // BREAK the line at a gap. Never true.
           spanGaps: false,

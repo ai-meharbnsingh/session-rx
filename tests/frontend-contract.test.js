@@ -41,9 +41,9 @@ const VENDOR_FILE = path.join(PUBLIC, "vendor", "chart.umd.min.js");
 // shipping session card is public/js/pages/health.js `sessionCard`, which part B
 // below asserts directly. RETIRED_COMPONENTS is audited too — a retired file
 // that came back would be a second implementation again.
-const COMPONENT_FILES = ["fix-modal.js", "chart.js"]
+const COMPONENT_FILES = ["suggestion-panel.js", "chart.js"]
   .map((name) => path.join(COMPONENTS, name));
-const RETIRED_COMPONENTS = ["health-card.js"].map((name) => path.join(COMPONENTS, name));
+const RETIRED_COMPONENTS = ["health-card.js", "fix-modal.js"].map((name) => path.join(COMPONENTS, name));
 const PAGE_FILES = ["health.js", "trends.js", "sessions.js", "report.js"]
   .map((name) => path.join(PUBLIC, "js", "pages", name));
 
@@ -121,6 +121,24 @@ class ShimText {
   get children() { return []; }
 }
 
+/** A browser-like NodeList: iterable, indexed, and deliberately not an Array. */
+class ShimNodeList {
+  constructor() {
+    this._items = [];
+    return new Proxy(this, {
+      get: (target, property, receiver) => {
+        if (/^\d+$/.test(String(property))) return target._items[Number(property)];
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+  get length() { return this._items.length; }
+  item(index) { return this._items[index] ?? null; }
+  forEach(callback, thisArg) { this._items.forEach(callback, thisArg); }
+  push(...nodes) { this._items.push(...nodes); }
+  [Symbol.iterator]() { return this._items[Symbol.iterator](); }
+}
+
 /**
  * A DocumentFragment: `public/js/pages/health.js` returns one from
  * `windowValueNode` / `evidenceValueNode`, and the real DOM splices its children
@@ -128,8 +146,8 @@ class ShimText {
  * does the same, so a structural assertion sees the same tree a browser builds.
  */
 class ShimFragment {
-  constructor() { this.childNodes = []; this.parent = null; this.isFragment = true; }
-  get textContent() { return this.childNodes.map((node) => node.textContent).join(""); }
+  constructor() { this.childNodes = new ShimNodeList(); this.parent = null; this.isFragment = true; }
+  get textContent() { return Array.from(this.childNodes, (node) => node.textContent).join(""); }
   append(...nodes) {
     nodes.forEach((node) => {
       if (node === null || node === undefined) return;
@@ -144,7 +162,7 @@ class ShimFragment {
 class ShimElement {
   constructor(tag) {
     this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this.parent = null;
     this._text = "";
     this._className = "";
@@ -182,11 +200,11 @@ class ShimElement {
 
   get textContent() {
     if (this.childNodes.length === 0) return this._text;
-    return this.childNodes.map((node) => node.textContent).join("");
+    return Array.from(this.childNodes, (node) => node.textContent).join("");
   }
 
   set textContent(value) {
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this._text = value === null || value === undefined ? "" : String(value);
   }
 
@@ -207,14 +225,16 @@ class ShimElement {
   }
 
   replaceChildren(...nodes) {
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this._text = "";
     this.append(...nodes);
   }
 
   remove() {
     if (!this.parent) return;
-    this.parent.childNodes = this.parent.childNodes.filter((node) => node !== this);
+    const remaining = Array.from(this.parent.childNodes).filter((node) => node !== this);
+    this.parent.childNodes = new ShimNodeList();
+    this.parent.childNodes.push(...remaining);
     this.parent = null;
   }
 
@@ -276,8 +296,8 @@ function metaMap(card) {
   const out = new Map();
   for (const cell of grid?.childNodes ?? []) {
     const kids = cell.childNodes ?? [];
-    const label = kids.find((node) => node.classList?.contains?.("meta-label"));
-    const value = kids.find((node) => node.classList?.contains?.("meta-value"));
+    const label = Array.from(kids).find((node) => node.classList?.contains?.("meta-label"));
+    const value = Array.from(kids).find((node) => node.classList?.contains?.("meta-value"));
     if (label && value) out.set(label.textContent.trim(), value);
   }
   return out;
@@ -291,7 +311,7 @@ function metaMap(card) {
 // rather than a component with no product caller.
 const healthPage = await import("../public/js/pages/health.js");
 const trendsPage = await import("../public/js/pages/trends.js");
-const fixModal = await import("../public/js/components/fix-modal.js");
+const suggestionPanel = await import("../public/js/components/suggestion-panel.js");
   const chart = await import("../public/js/components/chart.js");
 const overviewPage = await import("../public/js/pages/overview.js");
 const app = await import("../public/js/app.js");
@@ -383,13 +403,13 @@ test("Overview hero cards render their metric units in each card", async () => {
   const mount = new ShimElement("main");
   await overviewPage.default(mount, populatedOverviewHealth(), { api: populatedOverviewApi });
   const cards = withClass(mount, "summary-card");
-  assert.equal(cards.length, 4);
+  assert.equal(cards.length, 3);
   // The unit is asserted on the card's own subtitle line (`.rx-label`), not on
   // the whole card: `textContent` joins sibling nodes with no separator, so a
   // card-wide match reads across element boundaries ("...not comparablesessions
   // in the last 4 days") and then succeeds or fails for reasons that have
   // nothing to do with the unit word. The subtitle is where the unit belongs.
-  for (const [card, unit] of cards.map((card, index) => [card, ["sessions", "findings", "findings", "checks"][index]])) {
+  for (const [card, unit] of cards.map((card, index) => [card, ["sessions", "findings", "findings"][index]])) {
     const label = withClass(card, "rx-label")[0];
     assert.ok(label, `card must carry a subtitle line to publish its ${unit} unit on`);
     assert.match(label.textContent, new RegExp(`\\b${unit}\\b`), `card must publish its ${unit} unit`);
@@ -478,14 +498,27 @@ test("Overview counts installed supported and detection-only CLIs, ignoring abse
   const mount = new ShimElement("main");
   await overviewPage.default(mount, overviewHealth({ collectors: [
     { cli: "Claude Code", support: "supported", installed: true },
-    { cli: "Copilot", support: "detection-only", installed: true },
-    { cli: "Gemini", support: "supported", installed: false },
+    { cli: "Cursor", support: "detection-only", installed: true },
+    { cli: "Antigravity", support: "supported", installed: false },
   ] }), { api: overviewApi });
   assert.match(mount.textContent, /2 CLIs detected/);
   assert.match(mount.textContent, /Claude Code/);
-  assert.match(mount.textContent, /Copilot/);
-  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Gemini/);
+  assert.match(mount.textContent, /Cursor/);
+  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Antigravity/);
   assert.equal(withClass(mount, "rx-chip").length, 2);
+});
+
+test("Overview marks an installed detection-only collector as not read yet without a zero", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, populatedOverviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported", installed: true, sessions: 3 },
+    { cli: "Cursor", support: "detection-only", installed: true, sessions: null, note: "no Cursor CLI chat store was found" },
+  ] }), { api: populatedOverviewApi });
+  assert.match(mount.textContent, /2 CLIs detected/);
+  const cursor = withClass(mount, "rx-chip").find((node) => /Cursor/.test(node.textContent));
+  assert.ok(cursor);
+  assert.match(cursor.textContent, /not read yet/);
+  assert.doesNotMatch(cursor.textContent, /\b0\b/);
 });
 
 test("Overview falls back to support when installed data is absent", async () => {
@@ -493,7 +526,7 @@ test("Overview falls back to support when installed data is absent", async () =>
   await overviewPage.default(mount, overviewHealth({ collectors: [
     { cli: "Claude Code", support: "supported" },
     { cli: "Codex", support: "supported" },
-    { cli: "Copilot", support: "detection-only" },
+    { cli: "Cursor", support: "detection-only" },
   ] }), { api: overviewApi });
   assert.match(mount.textContent, /2 CLIs detected/);
   assert.equal(withClass(mount, "rx-chip").length, 2);
@@ -538,7 +571,7 @@ test("Overview keeps populated summary cards and unavailable trend evidence", as
     return overviewApi.get(url);
   }};
   await overviewPage.default(mount, health, { api });
-  assert.equal(withClass(mount, "summary-card").length, 4);
+  assert.equal(withClass(mount, "summary-card").length, 3);
   assert.equal(withClass(mount, "overview-health-row").length, 1);
   assert.match(mount.textContent, /Not enough measured days in this window to compare\./);
   assert.match(mount.textContent, new RegExp(reason));
@@ -681,7 +714,9 @@ test("index.html loads the vendored chart and nothing remote", () => {
   const html = read(path.join(PUBLIC, "index.html"));
   assert.match(html, /src="\/vendor\/chart\.umd\.min\.js"/, "must load the vendored chart");
   assert.match(html, /href="\/css\/style\.css"/, "must load the local stylesheet");
-  assert.match(html, /name="csrf-token"/, "must carry the CSRF meta the server rewrites (BP-005.13)");
+  // No CSRF meta any more: SessionRx has no mutating route left to defend
+  // (THE SUGGESTION CONTRACT), so the server injects no nonce into the page.
+  assert.doesNotMatch(html, /name="csrf-token"/);
   const srcs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]);
   const PNG = "data:image/png;base64,";
   for (const value of srcs) {
@@ -792,7 +827,7 @@ test("no component builds DOM from an HTML string (XSS audit; regex, limits stat
   for (const file of audited) {
     const src = stripJsComments(read(file));
     for (const sink of sinks) {
-      assert.ok(!sink.test(src), `${rel(file)} must not use ${sink} — this origin can POST fix-apply`);
+      assert.ok(!sink.test(src), `${rel(file)} must not use ${sink} — a suggestion's preview and request text render here`);
     }
   }
   assert.ok(audited.length >= COMPONENT_FILES.length);
@@ -839,11 +874,12 @@ const RULE = (over) => ({
   name: "Low cache hit",
   severity: "warn",
   fix: "claude-output-hygiene",
-  // The API publishes the human name next to the id (server.js
-  // `annotateFixTitles`); the page no longer keeps its own copy.
-  fixTitle: "Output hygiene instruction",
-  fixCli: "claude",
-  fixCliName: "Claude Code",
+  // The API publishes the human name and target tool next to the id
+  // (server.js `annotateSuggestions`); the page no longer keeps its own copy.
+  suggestionTitle: "Output hygiene instruction",
+  suggestionAvailable: true,
+  suggestionTool: "claude",
+  suggestionToolName: "Claude Code",
   threshold: { value: 0.85, derivation: "cacheRead / (cacheRead + cacheCreate) < 0.85" },
   magnitude: null,
   evidence: { status: "not-observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
@@ -899,7 +935,7 @@ test("a measured zero still renders as 0, so absent and zero are not the same pi
   assert.ok(!/not measured/.test(value.textContent), "and it is not labelled absent");
 });
 
-test("the score line always states the unknown count, even when it is 0", () => {
+test("the score line states unknowns only when present", () => {
   const withUnknown = renderCard(SESSION({}));
   assert.match(withUnknown.textContent, /4\/6 checks passed/);
   assert.match(withUnknown.textContent, /2 could not be measured/);
@@ -909,12 +945,13 @@ test("the score line always states the unknown count, even when it is 0", () => 
 
   const clean = renderCard(SESSION({ score: { total: 6, passed: 6, observed: 0, unknown: 0, label: "" } }));
   assert.match(clean.textContent, /6\/6 checks passed/);
-  assert.match(clean.textContent, /0 could not be measured/, "the phrase is unconditional");
+  assert.doesNotMatch(clean.textContent, /0 could not be measured/);
+  assert.doesNotMatch(clean.textContent, /0 problems? observed/);
 
   // The bar carries a segment per state, and the unknown one is its own segment.
   const bar = withClass(withUnknown, "score-bar")[0];
   assert.ok(bar, "score bar must render");
-  const segs = bar.childNodes.map((node) => node.className);
+  const segs = Array.from(bar.childNodes, (node) => node.className);
   assert.ok(segs.some((cls) => cls.includes("score-seg-passed")));
   assert.ok(segs.some((cls) => cls.includes("score-seg-unknown")), "unknown is a segment, not empty space");
   assert.ok(!segs.some((cls) => cls.includes("score-seg-observed")), "no observed problems here");
@@ -922,6 +959,19 @@ test("the score line always states the unknown count, even when it is 0", () => 
   // The bar's own description is the headline, so a screen reader hears the
   // unknown count too rather than a bare percentage.
   assert.match(bar.getAttribute("aria-label") ?? "", /could not be measured/);
+});
+
+test("a clean session header omits zero problem and unknown clauses", () => {
+  const card = renderCard(SESSION({ score: { total: 5, passed: 5, observed: 0, unknown: 0, label: "" } }));
+  const headline = withClass(card, "score-headline")[0].textContent;
+  assert.equal(headline, "5/5 checks passed");
+  assert.doesNotMatch(headline, /problems? observed|could not be measured/);
+});
+
+test("a session with two unmeasured checks keeps the unknown header clause", () => {
+  const card = renderCard(SESSION({ score: { total: 5, passed: 3, observed: 0, unknown: 2, label: "" } }));
+  const headline = withClass(card, "score-headline")[0].textContent;
+  assert.equal(headline, "3/5 checks passed · 2 could not be measured");
 });
 
 test("shared health verdict never turns unknown checks into a pass", () => {
@@ -945,6 +995,29 @@ test("shared health verdict keeps the total denominator and unknown signal in co
   assert.doesNotMatch(full.textContent, /4\/5/);
   assert.match(compact.textContent, /1 could not be measured/);
   assert.match(compact.className, /health-warn/);
+});
+
+test("shared health pill omits zero problem and unknown clauses", () => {
+  const pill = ui.healthNode({ total: 5, passed: 5, observed: 0, unknown: 0, label: "5 of 5 checks passed, 0 problems observed, 0 could not be measured" });
+  assert.equal(pill.textContent, "5/5 checks passed");
+  assert.equal(pill.title, "5 of 5 checks passed");
+});
+
+test("shared health pill keeps an observed-problem clause without zero unknown noise", () => {
+  const pill = ui.healthNode({ total: 5, passed: 4, observed: 1, unknown: 0, label: "4 of 5 checks passed, 1 problem observed, 0 could not be measured" });
+  assert.equal(pill.textContent, "4/5 checks passed · 1 problem observed");
+  assert.equal(pill.title, "4 of 5 checks passed, 1 problem observed");
+});
+
+test("shared health pill never omits non-zero unknown checks", () => {
+  const pill = ui.healthNode({ total: 5, passed: 3, observed: 0, unknown: 2, label: "3 of 5 checks passed, 0 problems observed, 2 could not be measured" });
+  assert.equal(pill.textContent, "3/5 checks passed · 2 could not be measured");
+  assert.equal(pill.title, "3 of 5 checks passed, 2 could not be measured");
+});
+
+test("shared health pill keeps the not measured state when no checks were measured", () => {
+  const pill = ui.healthNode({ total: 0, passed: 0, observed: 0, unknown: 0, label: "0 of 0 checks passed" });
+  assert.equal(pill.childNodes[0].textContent, "not measured");
 });
 
 /**
@@ -1060,8 +1133,8 @@ test("the Fixes card's chip and sparkline never describe a different series from
   const mount = new ShimElement("main");
   return overviewPage.default(mount, health, { api: populatedOverviewApi }).then(() => {
     const cards = withClass(mount, "summary-card");
-    const fixesCard = cards.find((card) => /Fixes available/.test(card.textContent));
-    assert.ok(fixesCard, "the Fixes card must render");
+    const fixesCard = cards.find((card) => /Suggestions available/.test(card.textContent));
+    assert.ok(fixesCard, "the Suggestions card must render");
     assert.equal(withClass(fixesCard, "rx-number")[0].textContent, "3", "the value is the distinct-fix count");
 
     const chip = withClass(fixesCard, "rx-delta")[0];
@@ -1123,13 +1196,35 @@ test("one rule, one severity: the Sessions page reads the shared helper in both 
   }
 });
 
-test("Sessions and Health use the same shared verdict component", () => {
+test("Sessions and Health use shared verdict styling with conditional header clauses", () => {
   const sessions = read(path.join(PUBLIC, "js", "pages", "sessions.js"));
   const health = read(path.join(PUBLIC, "js", "pages", "health.js"));
-  assert.match(sessions, /healthNode\(session\?\.score, true\)/);
+  assert.match(sessions, /sessionHealthNode\(session\?\.score, true\)/);
   assert.match(health, /healthNode\(score, false\)/);
   const score = { total: 6, passed: 4, observed: 1, unknown: 1, label: "4 of 6 checks passed, 1 problem observed, 1 could not be measured" };
   assert.equal(ui.healthNode(score, true).textContent, ui.healthNode(score, false).textContent);
+});
+
+test("Overview has no per-rule unknown lines and exactly one bottom disclosure", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, populatedOverviewHealth({
+    windowTotals: { sessions: 1, observedFindings: 2, unknownChecks: 6 },
+    ruleTotals: [
+      { id: "one", name: "One", observed: 2, unknown: 4 },
+      { id: "two", name: "Two", observed: 1, unknown: 2 },
+    ],
+  }), { api: populatedOverviewApi });
+  assert.equal(withClass(mount, "summary-card").length, 3);
+  assert.equal(withClass(mount, "unmeasured-page-note").length, 1);
+  assert.match(mount.textContent, /6 checks could not be measured from the session logs/);
+  assert.doesNotMatch(mount.textContent, /could not be measured on \d+ sessions?/);
+  assert.doesNotMatch(mount.textContent, /Checks not measured/);
+});
+
+test("Report keeps its explicit unknown and not-a-pass wording", () => {
+  const report = read(path.join(PUBLIC, "js", "pages", "report.js"));
+  assert.match(report, /could not be measured/i);
+  assert.match(report, /not a pass/);
 });
 
 test("the passed segment is passed/total and never passed+unknown", () => {
@@ -1137,7 +1232,7 @@ test("the passed segment is passed/total and never passed+unknown", () => {
   // bar. 4 passed of 6 is 66.66%, not the 100% that 4 passed + 2 unknown would
   // give if unknown were folded into passed.
   const bar = withClass(renderCard(SESSION({})), "score-bar")[0];
-  const passed = bar.childNodes.find((node) => node.className.includes("score-seg-passed"));
+  const passed = Array.from(bar.childNodes).find((node) => node.className.includes("score-seg-passed"));
   assert.ok(passed, "a passed segment must exist");
   assert.equal(passed.style.width, `${(4 / 6) * 100}%`);
 
@@ -1148,13 +1243,13 @@ test("the passed segment is passed/total and never passed+unknown", () => {
     "score-bar",
   )[0];
   assert.ok(
-    !allUnknown.childNodes.some((node) => node.className.includes("score-seg-passed")),
+    !Array.from(allUnknown.childNodes).some((node) => node.className.includes("score-seg-passed")),
     "0 passed draws no passed segment",
   );
-  assert.ok(allUnknown.childNodes.some((node) => node.className.includes("score-seg-unknown")));
+  assert.ok(Array.from(allUnknown.childNodes).some((node) => node.className.includes("score-seg-unknown")));
 });
 
-test("an unknown verdict shows its reason and is styled as neither pass nor warn", () => {
+test("an unknown verdict is styled as neither pass nor warn, with its reason in evidence details", () => {
   const reason = "the cache counters were absent, so this could not be measured";
   const card = renderCard(SESSION({
     rules: [RULE({ evidence: { status: "unknown", reason, values: [], sources: [], derivation: null, parserVersion: "t" } })],
@@ -1165,9 +1260,8 @@ test("an unknown verdict shows its reason and is styled as neither pass nor warn
   assert.ok(!verdict.classList.contains("verdict-warn"));
   assert.ok(!verdict.classList.contains("verdict-critical"));
   assert.equal(verdict.dataset.status, "unknown");
-  assert.match(card.textContent, new RegExp(reason.slice(0, 40)), "the reason must be visible");
-  // In words, in the row — not in a tooltip, and not as a pass.
-  assert.match(card.textContent, /This is NOT a pass — the check could not run here/);
+  assert.match(withClass(card, "verdict-more")[0].textContent, new RegExp(reason.slice(0, 40)), "the reason remains in evidence details");
+  assert.equal(withClass(card, "verdict-reason").length, 0, "unknown reasons are not rendered as inline rows");
   assert.match(card.textContent, /COULD NOT BE MEASURED/);
 
   // Four states, four different row classes.
@@ -1194,7 +1288,7 @@ test("an unknown verdict shows its reason and is styled as neither pass nor warn
   assert.ok(crit.classList.contains("verdict-critical"));
 });
 
-test("an observed finding offers [Preview] [Apply] [Skip]; an unmeasured check offers nothing", () => {
+test("an observed finding offers [View suggestion]; an unmeasured check offers nothing", () => {
   const api = {};
   const rerender = () => {};
   const buttonText = (root) => nodes(root)
@@ -1208,23 +1302,21 @@ test("an observed finding offers [Preview] [Apply] [Skip]; an unmeasured check o
   );
   assert.deepEqual(
     [...buttonText(observed)].sort(),
-    ["Apply", "Preview", "Skip"],
-    "the brief specifies exactly these three actions",
+    ["View suggestion"],
+    "SessionRx never applies or undoes anything, so the offer is a single view action",
   );
-  // Apply is the only primary action; Preview must not be the one-click path.
-  const apply = nodes(observed).find((node) => node.tagName === "BUTTON" && node.textContent.trim() === "Apply");
-  assert.ok(apply.className.includes("button-primary"));
-  assert.match(apply.getAttribute("aria-label") ?? "", /^Apply the fix for /);
+  const view = nodes(observed).find((node) => node.tagName === "BUTTON" && node.textContent.trim() === "View suggestion");
+  assert.match(view.getAttribute("aria-label") ?? "", /^View the suggested change for /);
 
   const unknown = renderCard(
     SESSION({ rules: [RULE({ evidence: { status: "unknown", reason: "no data", values: [], sources: [], derivation: null, parserVersion: "t" } })] }),
     api,
     rerender,
   );
-  assert.deepEqual(buttonText(unknown), [], "an unmeasured check must not offer a fix");
+  assert.deepEqual(buttonText(unknown), [], "an unmeasured check must not offer a suggestion");
   assert.equal(withClass(unknown, "verdict-actions").length, 0);
 
-  // Nor does a PASSING check, which has nothing to fix either.
+  // Nor does a PASSING check, which has nothing to suggest either.
   assert.deepEqual(buttonText(renderCard(SESSION({}), api, rerender)), []);
 });
 
@@ -1257,7 +1349,7 @@ test("a rule's default state is ONE line, and the honesty surface is not behind 
   // The collapsed line IS the <summary>, so the disclosure costs no extra row.
   const details = nodes(row).find((node) => node.tagName === "DETAILS");
   assert.ok(details, "the disclosure must be a native <details> — keyboard-operable without script");
-  const summary = details.childNodes.find((node) => node.tagName === "SUMMARY");
+  const summary = Array.from(details.childNodes).find((node) => node.tagName === "SUMMARY");
   assert.ok(summary, "the collapsed line must BE the summary, not a row above it");
   assert.ok(summary.classList.contains("verdict-line"));
 
@@ -1283,9 +1375,9 @@ test("a rule's default state is ONE line, and the honesty surface is not behind 
   // The fix offer is a sibling of the disclosure, never a child of it.
   const offer = withClass(row, "verdict-offer")[0];
   assert.ok(offer, "an observed finding offers its fix on its own line");
-  assert.ok(!isInside(offer, details), "[Preview] [Apply] [Skip] must never be behind a click");
-  assert.match(offer.textContent, /Output hygiene instruction/, "the offer names the fix, not just its id");
-  // No button inside the summary: a click on Apply must apply, not toggle.
+  assert.ok(!isInside(offer, details), "[View suggestion] must never be behind a click");
+  assert.match(offer.textContent, /Output hygiene instruction/, "the offer names the suggestion, not just its id");
+  // No button inside the summary: a click on View suggestion must open the panel, not toggle.
   assert.deepEqual(
     nodes(summary).filter((node) => node.tagName === "BUTTON").map((node) => node.textContent),
     [],
@@ -1293,7 +1385,7 @@ test("a rule's default state is ONE line, and the honesty surface is not behind 
   );
 });
 
-test("an unknown's reason stays visible, outside the disclosure", () => {
+test("an unknown's reason stays in the evidence disclosure, not as an inline row", () => {
   const reason = "Nothing in Codex's rollout records establishes a sub-agent interval (DIS-004)";
   const row = withClass(
     renderCard(SESSION({
@@ -1305,11 +1397,8 @@ test("an unknown's reason stays visible, outside the disclosure", () => {
   )[0];
 
   const details = nodes(row).find((node) => node.tagName === "DETAILS");
-  const reasonNode = withClass(row, "verdict-reason")[0];
-  assert.ok(reasonNode, "an unknown must state why it could not run");
-  assert.ok(!isInside(reasonNode, details), "that reason must not be behind a disclosure — it is the product's point");
-  assert.match(reasonNode.textContent, /This is NOT a pass — the check could not run here/);
-  assert.match(reasonNode.textContent, new RegExp(reason.slice(0, 40)));
+  assert.equal(withClass(row, "verdict-reason").length, 0, "an unknown has no inline reason row");
+  assert.match(details.textContent, new RegExp(reason.slice(0, 40)));
 
   // The score sentence and the bar are card-level and likewise never folded.
   const card = renderCard(SESSION({}));
@@ -1429,43 +1518,12 @@ test("the header carries CLI, session, duration and turn count", () => {
   );
 });
 
-test("the fix diff reaches the DOM character-identical to the bytes the API returned", () => {
-  const diff = [
-    "--- a/.claude/CLAUDE.md",
-    "+++ b/.claude/CLAUDE.md",
-    "@@ -1,3 +1,8 @@",
-    " # existing heading",
-    "-removed line with  double  spaces",
-    "+<!-- session-rx:output-hygiene:v1 -->",
-    "+## SessionRx: output hygiene",
-    "+\tindented with a real tab",
-    "\\ No newline at end of file",
-    "",
-  ].join("\n");
-  const pre = fixModal.renderDiff(diff);
-  assert.equal(pre.textContent, diff, "the rendered text must equal the diff byte for byte");
-  assert.equal(pre.dataset.rendered, "verbatim");
-
-  // Colour comes from wrapping, never from rewriting.
-  const classes = pre.childNodes.filter((node) => node.className).map((node) => node.className);
-  assert.ok(classes.some((cls) => cls.includes("ins")), "added lines are marked");
-  assert.ok(classes.some((cls) => cls.includes("del")), "removed lines are marked");
-  assert.ok(classes.some((cls) => cls.includes("hunk")), "hunk headers are marked");
-  // `---`/`+++` are file headers, not a deletion and an addition.
-  assert.equal(pre.childNodes[0].className, "diff-line meta");
-  assert.equal(pre.childNodes[2].className, "diff-line meta");
-
-  // Markup inside a diff is text, not markup.
-  const hostile = '+<img src=x onerror="alert(1)">';
-  const escaped = fixModal.renderDiff(hostile);
-  assert.equal(escaped.textContent, hostile);
-  assert.equal(escaped.childNodes.length, 1);
-  assert.ok(!(escaped.childNodes[0] instanceof ShimElement) || escaped.childNodes[0].childNodes.length === 0);
-});
-
-test("an empty diff says the API returned none, rather than showing a blank box", () => {
-  const pre = fixModal.renderDiff("");
-  assert.match(pre.textContent, /no diff/i);
+test("copyToClipboard falls back to the textarea path and never throws when navigator.clipboard is absent", async () => {
+  // The DOM shim gives no `navigator.clipboard` and no real `execCommand`, so
+  // this exercises the exact fallback path a browser without Clipboard API
+  // access takes — and proves it resolves `false` rather than throwing.
+  const ok = await suggestionPanel.copyToClipboard("some request text");
+  assert.equal(typeof ok, "boolean");
 });
 
 test("a null data point breaks the line: spanGaps is false and the null survives", () => {
