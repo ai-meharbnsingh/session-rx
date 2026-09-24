@@ -33,9 +33,8 @@
     "diagnostics",
     "claude-code",
     "codex",
-    "gemini-cli",
-    "kimi",
-    "opencode",
+    "cursor",
+    "antigravity",
     "local-first",
     "cli"
   ],

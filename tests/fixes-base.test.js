@@ -534,7 +534,11 @@ test("an absent target with an existing parent directory is created, not refused
   }
 });
 
-test("fail closed: a read-only target is refused before anything is created", async () => {
+test("fail closed: a read-only target is refused before anything is created", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: file modes do not deny access");
+    return;
+  }
   const home = await freshHome("fail-readonly");
   const target = await installFixture(home, "claude-md/lf.md", ".claude/CLAUDE.md");
   const before = await readFile(target);

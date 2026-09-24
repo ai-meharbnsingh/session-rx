@@ -21,7 +21,6 @@ htmlcov/
 # Credentials — never tracked
 .env
 .env.*
-!.env.example
 
 # npm (appended by wave 1A — package contract)
 npm-debug.log*

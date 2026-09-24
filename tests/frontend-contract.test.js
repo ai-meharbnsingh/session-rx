@@ -478,13 +478,13 @@ test("Overview counts installed supported and detection-only CLIs, ignoring abse
   const mount = new ShimElement("main");
   await overviewPage.default(mount, overviewHealth({ collectors: [
     { cli: "Claude Code", support: "supported", installed: true },
-    { cli: "Copilot", support: "detection-only", installed: true },
-    { cli: "Gemini", support: "supported", installed: false },
+    { cli: "Cursor", support: "detection-only", installed: true },
+    { cli: "Antigravity", support: "supported", installed: false },
   ] }), { api: overviewApi });
   assert.match(mount.textContent, /2 CLIs detected/);
   assert.match(mount.textContent, /Claude Code/);
-  assert.match(mount.textContent, /Copilot/);
-  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Gemini/);
+  assert.match(mount.textContent, /Cursor/);
+  assert.doesNotMatch(withClass(mount, "rx-chip").map((node) => node.textContent).join(" "), /Antigravity/);
   assert.equal(withClass(mount, "rx-chip").length, 2);
 });
 
@@ -493,7 +493,7 @@ test("Overview falls back to support when installed data is absent", async () =>
   await overviewPage.default(mount, overviewHealth({ collectors: [
     { cli: "Claude Code", support: "supported" },
     { cli: "Codex", support: "supported" },
-    { cli: "Copilot", support: "detection-only" },
+    { cli: "Cursor", support: "detection-only" },
   ] }), { api: overviewApi });
   assert.match(mount.textContent, /2 CLIs detected/);
   assert.equal(withClass(mount, "rx-chip").length, 2);

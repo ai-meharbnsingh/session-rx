@@ -59,11 +59,11 @@ test("date range, per-CLI session counts and trend direction all appear", () => 
 
   assert.match(md, /\| claude \| 96 \|/);
   assert.match(md, /\| codex \| 14 \|/);
-  assert.match(md, /\| gemini \| 8 \|/);
-  assert.match(md, /\| kimi \| 2 \|/);
+  assert.match(md, /\| cursor \| 8 \|/);
+  assert.match(md, /\| widget \| 2 \|/);
   // detection-only: a missing count is stated as missing, never as zero (DIS-007).
   // The set-aside sub-agent count is missing for the same reason: nothing was read.
-  assert.match(md, /\| copilot \| not recorded \(not zero\) \| not recorded \(not zero\) \| detection-only \|/);
+  assert.match(md, /\| antigravity \| not recorded \(not zero\) \| not recorded \(not zero\) \| detection-only \|/);
 
   assert.match(md, /^Direction: declining$/m);
   assert.match(md, /Reason: mean session context rose/);
@@ -122,7 +122,7 @@ test("L8: sub-agent sessions set aside are printed next to the count that exclud
     clis: [
       { cli: "claude", sessions: 10, subagentSessions: 106, support: "supported", note: null },
       { cli: "codex", sessions: 10, subagentSessions: 0, support: "supported", note: null },
-      { cli: "copilot", sessions: null, subagentSessions: null, support: "detection-only", note: "no transcript" },
+      { cli: "antigravity", sessions: null, subagentSessions: null, support: "detection-only", note: "no transcript" },
     ],
     rules: [],
     fixes: [],
@@ -136,7 +136,7 @@ test("L8: sub-agent sessions set aside are printed next to the count that exclud
   assert.match(md, /\| claude \| 10 \| 106 \| supported \|/);
   assert.match(md, /\| codex \| 10 \| 0 \| supported \|/);
   // nothing read for this CLI: not recorded, and specifically not zero
-  assert.match(md, /\| copilot \| not recorded \(not zero\) \| not recorded \(not zero\) \| detection-only \|/);
+  assert.match(md, /\| antigravity \| not recorded \(not zero\) \| not recorded \(not zero\) \| detection-only \|/);
 });
 
 test("L8: an input that does not record the set-aside count says so, rather than printing zero", () => {
@@ -181,9 +181,9 @@ test("an unknown verdict renders visibly as unknown WITH its reason", () => {
   const md = generateReport(happyInput);
 
   assert.match(md, /\| `repeat-tool` \| warn \| unknown \|/);
-  assert.match(md, /UNKNOWN — the 8 Gemini sessions in this range record tool calls but no stable tool-result contract/);
+  assert.match(md, /UNKNOWN — the 8 Cursor sessions in this range record tool calls but no stable tool-result contract/);
   // and again in the explicit unknown list, so it cannot be missed
-  assert.match(md, /- `repeat-tool` Repeated tool work: unknown — the 8 Gemini sessions/);
+  assert.match(md, /- `repeat-tool` Repeated tool work: unknown — the 8 Cursor sessions/);
   assert.match(md, /1 rule\(s\) returned `unknown` and could not be diagnosed/);
 });
 
@@ -478,7 +478,7 @@ test("redaction does not destroy the evidence references the report exists to ca
   const md = generateReport(secretsInput);
   // dashed UUID session ids survive; a continuous hex run does not
   assert.match(md, /9c1d4e77-2a58-4d31-b0f6-31ab92c4e708/);
-  assert.match(md, /~\/\.local\/share\/opencode\/opencode\.db#part\/\[REDACTED\]/);
+  assert.match(md, /~\/Library\/Application Support\/Cursor\/User\/globalStorage\/state\.vscdb#part\/\[REDACTED\]/);
   assert.match(md, /88,231 bytes/);
 });
 
@@ -638,7 +638,7 @@ const ANALYZER_SENTENCES = Object.freeze([
   "(promotion ladder `none`). The figure being divided and the figure it is divided by are therefore the same number again, and BP-002.18 applies exactly as it does to `observed-floor`.",
   `window.source "model-id-table" is not one of the sources BP-002.11-BP-002.14 permit a threshold comparison from.`,
   "codex recorded 41 tool calls for this session but no result signature that can be attributed to any single one of them — either the per-turn result byte length is absent (DIS-006) or every turn made more than one call, so its one byte total cannot be split between them. Same input with an unknown result is not a repeat, so this rule reports unknown rather than counting inputs alone (DIS-003).",
-  "gemini recorded 12 turns with tool calls for this session but no result byte length for any of them, so result size cannot be measured. A missing byte count is not a small result (DIS-006); it is not counted at all.",
+  "cursor recorded 12 turns with tool calls for this session but no result byte length for any of them, so result size cannot be measured. A missing byte count is not a small result (DIS-006); it is not counted at all.",
   "The `isSidechain` marker is not a substitute, which is why an empty child list is never read off it: the marker is never `true` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the count of marked turns recorded here (4) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end (DIS-004).",
   "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).",
   "(DIS-005: the fraction is preserved and never converted into invented absolute tokens).",
@@ -859,9 +859,8 @@ const VOCABULARY_SESSIONS = Object.freeze([
   // One per CLI: the sub-agent and tool-result rules branch on this alone.
   { cli: "claude", sessionId: "v-claude" },
   { cli: "codex", sessionId: "v-codex" },
-  { cli: "gemini", sessionId: "v-gemini" },
-  { cli: "kimi", sessionId: "v-kimi" },
-  { cli: "opencode", sessionId: "v-opencode" },
+  { cli: "cursor", sessionId: "v-cursor" },
+  { cli: "antigravity", sessionId: "v-antigravity" },
   { cli: "some-other-cli", sessionId: "v-other" },
   // One per window shape: each is a different reason from `windowDenominator`.
   { cli: "claude", sessionId: "v-floor", model: "an-unlisted-model", window: { tokens: 91000, source: "observed-floor" }, turns: [{ ts: 1, context: { inputTokens: 80000 } }] },
@@ -869,7 +868,7 @@ const VOCABULARY_SESSIONS = Object.freeze([
   { cli: "claude", sessionId: "v-unsupported", window: { tokens: 200000, source: "model-id-table" }, turns: [{ ts: 1, context: { inputTokens: 10000 } }] },
   { cli: "claude", sessionId: "v-no-window", turns: [{ ts: 1, context: { inputTokens: 10000 } }] },
   { cli: "claude", sessionId: "v-no-readings", window: { tokens: 200000, source: "model-table" }, turns: [{ ts: 1 }, { ts: 2 }] },
-  { cli: "kimi", sessionId: "v-native-over-one", turns: [{ ts: 1, context: { fraction: 1.4 } }] },
+  { cli: "cursor", sessionId: "v-native-over-one", turns: [{ ts: 1, context: { fraction: 1.4 } }] },
   // Cache counters, one branch each: reads only, creations only, both at zero.
   { cli: "claude", sessionId: "v-reads-only", turns: [{ ts: 1, cacheRead: 900 }] },
   { cli: "claude", sessionId: "v-creates-only", turns: [{ ts: 1, cacheCreate: 900 }] },

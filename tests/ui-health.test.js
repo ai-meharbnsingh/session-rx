@@ -641,10 +641,10 @@ test("a fix states its registry display names only when both names differ", () =
   const claude = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [observed] })] }), { api: {} });
   assert.equal(withClass(claude, "verdict-fix-scope").length, 0);
 
-  const openCode = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [RULE({ fixCli: "opencode", fixCliName: "OpenCode", evidence: observed.evidence })] })] }), { api: {} });
-  const openCodeNote = withClass(openCode, "verdict-fix-scope")[0];
-  assert.ok(openCodeNote);
-  assert.equal(openCodeNote.textContent, "Changes OpenCode's config, not Claude Code's. Affects future OpenCode sessions only.");
+  const cursorFix = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [RULE({ fixCli: "cursor", fixCliName: "Cursor CLI", evidence: observed.evidence })] })] }), { api: {} });
+  const cursorFixNote = withClass(cursorFix, "verdict-fix-scope")[0];
+  assert.ok(cursorFixNote);
+  assert.equal(cursorFixNote.textContent, "Changes Cursor CLI's config, not Claude Code's. Affects future Cursor CLI sessions only.");
 
   const missingTarget = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [RULE({ fixCli: null, fixCliName: null, evidence: observed.evidence })] })] }), { api: {} });
   assert.equal(withClass(missingTarget, "verdict-fix-scope").length, 0);
@@ -779,7 +779,7 @@ function jargonPayload() {
     collectors: [
       { cli: "codex", sessions: 1, support: "supported", note: SET_ASIDE_NOTE },
       { cli: "claude", sessions: 1, support: "supported", note: null },
-      { cli: "opencode", sessions: 0, support: "detection-only", note: null },
+      { cli: "antigravity", sessions: 0, support: "detection-only", note: null },
     ],
     scan: { limitPerCollector: 250, defaulted: true, atLimit: true, note: SCAN_NOTE },
   });

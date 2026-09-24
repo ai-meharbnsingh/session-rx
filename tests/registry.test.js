@@ -74,7 +74,7 @@ test("detectAll splits the real registry into supported / detection-only / absen
 
   const entries = [...result.supported, ...result.detectionOnly, ...result.absent, ...result.unreadable];
   const ids = entries.map((entry) => entry.id);
-  const expected = [...collectorDefinitions.map(([id]) => id), "grok-amp"];
+  const expected = collectorDefinitions.map(([id]) => id);
 
   // Every registered slot is classified exactly once, whatever is installed here.
   assert.deepEqual(ids.slice().sort(), expected.slice().sort());
@@ -88,8 +88,8 @@ test("detectAll splits the real registry into supported / detection-only / absen
     assert.equal(entry.diagnostic.cli, entry.id);
   }
 
-  // BP-002.06 / BP-002.07: these two have no parser and can never be "supported".
-  for (const id of ["copilot", "grok-amp"]) {
+  // BP-002.07: Antigravity has no parser and can never be "supported".
+  for (const id of ["antigravity"]) {
     assert.ok(!result.supported.some((entry) => entry.id === id), `${id} is never supported`);
   }
 });
@@ -122,7 +122,7 @@ test("discoverAll is the detectAll alias, and collectors() returns every registe
   const found = await collectors();
   assert.deepEqual(
     found.map((collector) => collector.id).sort(),
-    [...collectorDefinitions.map(([id]) => id), "grok-amp"].sort(),
+    collectorDefinitions.map(([id]) => id).sort(),
   );
 });
 
@@ -246,7 +246,7 @@ test("sessionMeta is forwarded when a collector provides a Map, keyed by session
   ]);
   const result = await collectMany([
     fake({
-      id: "opencode",
+      id: "widget",
       sessions: [{ sessionId: "ses_child" }, { sessionId: "ses_parent" }],
       sessionMeta: meta,
     }),
@@ -273,7 +273,7 @@ test("sessionMeta is forwarded when a collector provides a Map, keyed by session
 test("sessionMeta is absent from the entry when the collector does not provide it", async () => {
   const result = await collectMany([
     fake({ id: "claude", sessions: [{ sessionId: "s1" }] }),
-    fake({ id: "kimi", sessions: [], sessionMeta: undefined }),
+    fake({ id: "gadget", sessions: [], sessionMeta: undefined }),
   ]);
 
   for (const entry of result.supported) {
@@ -282,7 +282,7 @@ test("sessionMeta is absent from the entry when the collector does not provide i
 });
 
 test("an empty sessionMeta is still forwarded: the channel exists, it just has nothing to say", async () => {
-  const result = await collectMany([fake({ id: "opencode", sessionMeta: new Map() })]);
+  const result = await collectMany([fake({ id: "widget", sessionMeta: new Map() })]);
   assert.deepEqual(result.supported[0].sessionMeta, {});
 });
 
@@ -305,7 +305,7 @@ test("a non-Map, non-object sessionMeta is ignored rather than relayed as garbag
 test("sessionMeta survives a collector whose collect() threw, so partial meta is not discarded", async () => {
   const result = await collectMany([
     fake({
-      id: "opencode",
+      id: "widget",
       collectThrows: true,
       sessionMeta: new Map([["ses_partial", { sessionId: "ses_partial", parentSessionId: null }]]),
     }),
@@ -314,12 +314,12 @@ test("sessionMeta survives a collector whose collect() threw, so partial meta is
   const entry = result.supported[0];
   assert.deepEqual(entry.sessions, []);
   assert.deepEqual(Object.keys(entry.sessionMeta), ["ses_partial"]);
-  assert.deepEqual(result.diagnostics.find((d) => d.cli === "opencode").errors, ["opencode collect exploded"]);
+  assert.deepEqual(result.diagnostics.find((d) => d.cli === "widget").errors, ["widget collect exploded"]);
 });
 
 test("detectAll never emits sessionMeta: detect() does not collect", async () => {
   const result = await detectMany([
-    fake({ id: "opencode", status: "supported", sessionMeta: new Map([["s", {}]]) }),
+    fake({ id: "widget", status: "supported", sessionMeta: new Map([["s", {}]]) }),
   ]);
   assert.equal("sessionMeta" in result.supported[0], false);
 });
@@ -417,8 +417,8 @@ test("a read that partly failed keeps its count and says the count may be low", 
 // failure of that import — file not written yet, syntax error, a built-in the
 // running Node does not have — came out of one bare `catch` as
 // `{installed: false, status: "absent"}`. So a user running a Node too old for
-// `node:sqlite` was told OpenCode was not installed, confidently and silently,
-// while their OpenCode database sat there full. These tests hold the two cases
+// `node:sqlite` was told Cursor was not installed, confidently and silently,
+// while their Cursor database sat there full. These tests hold the two cases
 // apart: a reader that is NOT THERE, and a reader that IS there and BROKE.
 // ===========================================================================
 
@@ -447,7 +447,7 @@ const MISSING_READER = pathToFileURL(path.join(brokenDir, "never-written.mjs")).
  */
 const MISSING_BUILTIN_READER = reader(
   "missing-builtin.mjs",
-  'import { DatabaseSync } from "node:sqlite_not_a_module";\nexport class OpenCodeCollector {}\nexport { DatabaseSync };\n',
+  'import { DatabaseSync } from "node:sqlite_not_a_module";\nexport class CursorCollector {}\nexport { DatabaseSync };\n',
 );
 
 /** A reader that is there, loads, and throws while it runs. */
@@ -457,102 +457,102 @@ const THROWING_READER = reader("throws.mjs", 'throw new Error("boom while loadin
 const NO_EXPORT_READER = reader("no-export.mjs", "export const somethingElse = 1;\n");
 
 test("a reader whose FILE IS NOT THERE is still the Phase 1 slot, unchanged", async () => {
-  const collector = await loadCollector(["opencode", "OpenCode", MISSING_READER, "OpenCodeCollector"]);
+  const collector = await loadCollector(["cursor", "Cursor CLI", MISSING_READER, "CursorCollector"]);
 
   // This is the documented Phase 1 case: the parser has not landed, so the
   // slot is registered and reports nothing. It is NOT what changed.
   assert.deepEqual(collector.detect(), { installed: false, paths: [], status: "absent" });
   assert.deepEqual(await collector.collect(), []);
-  assert.equal(collector.id, "opencode");
-  assert.equal(collector.cli, "opencode");
+  assert.equal(collector.id, "cursor");
+  assert.equal(collector.cli, "cursor");
 });
 
 test("a reader that needs a built-in this Node lacks is NOT reported absent", async () => {
-  const collector = await loadCollector(["opencode", "OpenCode", MISSING_BUILTIN_READER, "OpenCodeCollector"]);
+  const collector = await loadCollector(["cursor", "Cursor CLI", MISSING_BUILTIN_READER, "CursorCollector"]);
   const detection = collector.detect();
 
   assert.equal(detection.status, COULD_NOT_READ);
   assert.notEqual(detection.status, "absent");
-  // Not `false`. Whether OpenCode is installed was never established, and
+  // Not `false`. Whether Cursor is installed was never established, and
   // `false` there is the false negative this whole change is about.
   assert.equal(detection.installed, null);
   assert.equal(typeof detection.reason, "string");
-  assert.match(detection.reason, /could not load the part of itself that reads OpenCode/);
+  assert.match(detection.reason, /could not load the part of itself that reads Cursor CLI/);
   // The reason carries the real cause, not a shrug.
   assert.match(detection.reason, /No such built-in module: node:sqlite_not_a_module/);
-  assert.match(detection.reason, /not a finding that OpenCode is missing/);
+  assert.match(detection.reason, /not a finding that Cursor CLI is missing/);
   assert.match(detection.reason, /Node version/);
 });
 
 test("a reader that throws while loading, and one that never landed its export, both say so", async () => {
-  const threw = await loadCollector(["kimi", "Kimi", THROWING_READER, "KimiCollector"]);
+  const threw = await loadCollector(["antigravity", "Antigravity CLI", THROWING_READER, "AntigravityCollector"]);
   assert.equal(threw.detect().status, COULD_NOT_READ);
   assert.match(threw.detect().reason, /boom while loading/);
 
   // The file IS on disk: a half-landed reader is a broken reader, not an
   // unwritten one, and saying "absent" about it would be the same false claim.
-  const noExport = await loadCollector(["kimi", "Kimi", NO_EXPORT_READER, "KimiCollector"]);
+  const noExport = await loadCollector(["antigravity", "Antigravity CLI", NO_EXPORT_READER, "AntigravityCollector"]);
   assert.equal(noExport.detect().status, COULD_NOT_READ);
-  assert.match(noExport.detect().reason, /exports no KimiCollector/);
+  assert.match(noExport.detect().reason, /exports no AntigravityCollector/);
 });
 
 test("a reader that could not be loaded refuses to collect rather than returning nothing", async () => {
-  const collector = await loadCollector(["opencode", "OpenCode", MISSING_BUILTIN_READER, "OpenCodeCollector"]);
+  const collector = await loadCollector(["cursor", "Cursor CLI", MISSING_BUILTIN_READER, "CursorCollector"]);
 
-  // `[]` here would read as "OpenCode was read and had no sessions", which is
+  // `[]` here would read as "Cursor was read and had no sessions", which is
   // the same false all-clear one layer down.
-  await assert.rejects(() => collector.collect(), /could not load the part of itself that reads OpenCode/);
+  await assert.rejects(() => collector.collect(), /could not load the part of itself that reads Cursor CLI/);
 });
 
 test("detectMany files a load failure under `unreadable`, never under `absent`", async () => {
-  const collector = await loadCollector(["opencode", "OpenCode", MISSING_BUILTIN_READER, "OpenCodeCollector"]);
+  const collector = await loadCollector(["cursor", "Cursor CLI", MISSING_BUILTIN_READER, "CursorCollector"]);
   const result = await detectMany([collector]);
 
   assert.deepEqual(result.absent, []);
-  assert.deepEqual(result.unreadable.map((entry) => entry.id), ["opencode"]);
+  assert.deepEqual(result.unreadable.map((entry) => entry.id), ["cursor"]);
   const entry = result.unreadable[0];
   assert.equal(entry.status, COULD_NOT_READ);
   assert.equal(entry.installed, null);
-  assert.match(entry.reason, /could not load the part of itself that reads OpenCode/);
+  assert.match(entry.reason, /could not load the part of itself that reads Cursor CLI/);
 
   // Filed as an error too, so a caller that has not learned the new bucket
   // still shows the failure instead of nothing.
-  const diagnostic = result.diagnostics.find((candidate) => candidate.cli === "opencode");
+  const diagnostic = result.diagnostics.find((candidate) => candidate.cli === "cursor");
   assert.equal(diagnostic.errors.length, 1);
-  assert.match(diagnostic.errors[0], /could not load the part of itself that reads OpenCode/);
+  assert.match(diagnostic.errors[0], /could not load the part of itself that reads Cursor CLI/);
 });
 
 test("collectMany does the same, and never lands a failed reader in `supported`", async () => {
-  const collector = await loadCollector(["opencode", "OpenCode", MISSING_BUILTIN_READER, "OpenCodeCollector"]);
+  const collector = await loadCollector(["cursor", "Cursor CLI", MISSING_BUILTIN_READER, "CursorCollector"]);
   const result = await collectMany([collector]);
 
   assert.deepEqual(result.supported, []);
   assert.deepEqual(result.absent, []);
   assert.deepEqual(result.detectionOnly, []);
-  assert.deepEqual(result.unreadable.map((entry) => entry.id), ["opencode"]);
+  assert.deepEqual(result.unreadable.map((entry) => entry.id), ["cursor"]);
   // No sessions key at all: an empty array would be a count nothing measured.
   assert.ok(!("sessions" in result.unreadable[0]));
-  assert.match(result.diagnostics[0].errors[0], /could not load the part of itself that reads OpenCode/);
+  assert.match(result.diagnostics[0].errors[0], /could not load the part of itself that reads Cursor CLI/);
 });
 
 test("one reader failing to load suppresses neither the readers that work nor the ones absent", async () => {
   const found = await Promise.all([
     ["claude", "Claude Code", "./claude.js", "ClaudeCollector"],
-    ["opencode", "OpenCode", MISSING_BUILTIN_READER, "OpenCodeCollector"],
+    ["cursor", "Cursor CLI", MISSING_BUILTIN_READER, "CursorCollector"],
     ["codex", "Codex", "./codex.js", "CodexCollector"],
-    ["kimi", "Kimi", MISSING_READER, "KimiCollector"],
+    ["antigravity", "Antigravity CLI", MISSING_READER, "AntigravityCollector"],
   ].map(loadCollector));
 
   const result = await detectMany(found);
   const seen = [...result.supported, ...result.detectionOnly, ...result.absent, ...result.unreadable];
 
   // All four slots survive, each classified once and on its own merits.
-  assert.deepEqual(seen.map((entry) => entry.id).sort(), ["claude", "codex", "kimi", "opencode"]);
+  assert.deepEqual(seen.map((entry) => entry.id).sort(), ["antigravity", "claude", "codex", "cursor"]);
   assert.equal(new Set(seen.map((entry) => entry.id)).size, 4);
-  assert.deepEqual(result.unreadable.map((entry) => entry.id), ["opencode"]);
+  assert.deepEqual(result.unreadable.map((entry) => entry.id), ["cursor"]);
   // Claude and Codex are real host probes, so their absent status depends on
-  // which AI CLIs happen to be installed; Kimi is always absent because its reader is missing.
-  assert.ok(result.absent.some((entry) => entry.id === "kimi"));
+  // which AI CLIs happen to be installed; Antigravity is always absent because its reader is missing.
+  assert.ok(result.absent.some((entry) => entry.id === "antigravity"));
 
   // The real readers loaded: neither is a bare fallback slot, whatever this
   // machine has installed.
@@ -567,14 +567,14 @@ test("one reader failing to load suppresses neither the readers that work nor th
   // Exactly one failure is reported, and it names the reader that failed.
   const errors = result.diagnostics.flatMap((diagnostic) => diagnostic.errors);
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /reads OpenCode/);
+  assert.match(errors[0], /reads Cursor CLI/);
 });
 
 // ============================================================== declared Node
 //
 // `engines.node` is the only place a user is told what SessionRx needs, and
 // npm's default `engine-strict=false` means a wrong value is a WARNING at
-// install and a crash later. `node:sqlite`, which `src/collectors/opencode.js`
+// install and a crash later. `node:sqlite`, which `src/collectors/cursor.js`
 // imports at module scope, landed in v22.5.0 and stayed behind
 // `--experimental-sqlite` until v22.13.0; `npx session-rx` passes no flag. So
 // v22.13.0 is the floor, and it is pinned here so the manifest and the code
@@ -594,6 +594,6 @@ test("engines.node and the README state the floor the code actually needs", asyn
 
   // The reason the floor is what it is, held to the code rather than to a
   // comment: move this import and the floor is free to move with it.
-  const opencode = await readFile(path.join(root, "src", "collectors", "opencode.js"), "utf8");
-  assert.match(opencode, /^import \{ DatabaseSync \} from "node:sqlite";$/m);
+  const cursor = await readFile(path.join(root, "src", "collectors", "cursor.js"), "utf8");
+  assert.match(cursor, /^import \{ DatabaseSync \} from "node:sqlite";$/m);
 });

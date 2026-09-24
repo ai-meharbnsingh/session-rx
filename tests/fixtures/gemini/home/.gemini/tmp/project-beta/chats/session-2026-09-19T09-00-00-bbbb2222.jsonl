@@ -1,2 +1,0 @@
-{"sessionId":"bbbb2222-0000-4000-8000-000000000002","projectHash":"7f1c9b2ad4e6f80112233445566778899","startTime":"2026-09-19T09:00:00.000Z","lastUpdated":"2026-09-19T09:00:00.000Z","kind":"main"}
-{"id":"n1","timestamp":"2026-09-19T09:00:02.000Z","type":"gemini","content":[{"text":"hi"}],"tokens":{"input":50,"output":5,"cached":0,"thoughts":0,"tool":0,"total":55},"model":"mystery-model-x"}

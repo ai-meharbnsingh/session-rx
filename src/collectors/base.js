@@ -71,9 +71,10 @@ export const WINDOW_SOURCES = Object.freeze([...BP002_WINDOW_SOURCES, ...OBSERVE
 // largest window its own vendor ships has an unknown window, not a borrowed one.
 //
 // `source` is per entry because BP-002 names the mechanism per CLI: Claude
-// (BP-002.01) and the Codex fallback read a versioned model-id TABLE, while
-// Gemini (BP-002.03) and OpenCode (BP-002.05) read a model-id MAP.  Callers
-// that know better may override it with lookupWindow(id, { source }).
+// (BP-002.01) and the Codex fallback read a versioned model-id TABLE, while a
+// CLI whose sessions can run on someone else's model — Cursor, which reports
+// whatever underlying model the session actually used — reads a model-id MAP.
+// Callers that know better may override it with lookupWindow(id, { source }).
 //
 // `examples` are load-bearing, not documentation: tests/collectors/base.test.js
 // asserts that every entry is the winning match for each of its own examples.
@@ -99,9 +100,8 @@ const MODEL_WINDOW_ENTRIES = [
     examples: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
   },
   {
-    // One Gemini entry, not two: every id the old `...(1m|pro)` variant matched
-    // resolved to the identical {tokens: 1000000, source: "model-map"} as this
-    // fallback, so the extra entry could not change any output.
+    // Model name, not CLI: Cursor and Antigravity sessions can run on Gemini
+    // models, so this entry stays even though the Gemini CLI reader is gone.
     id: "gemini-family",
     vendor: "google",
     pattern: /gemini-(?:2|3)(?:[. -]?\d+)?/i,
@@ -120,8 +120,7 @@ const MODEL_WINDOW_ENTRIES = [
     examples: ["gpt-5", "gpt-5-codex"],
   },
   {
-    // Reached through OpenCode's model-id map (BP-002.05); the Kimi collector
-    // itself reports a native fraction and leaves tokens null (BP-002.04).
+    // Model name, not CLI: Cursor can run a Kimi model.
     id: "kimi-k2-family",
     vendor: "moonshot",
     pattern: /kimi[-_ ]?k2/i,
@@ -260,9 +259,8 @@ export function peakContextTokens(turns) {
  * EXHAUSTING THE VENDOR'S OWN LADDER IS `null`, NOT A FALL-THROUGH.  The
  * all-vendor ladder used to answer when the vendor's own tiers ran out, which
  * borrowed the very window this function exists to refuse: `gpt-5-codex` at an
- * observed 500,000 was handed Anthropic's/Google's 1,000,000, and `kimi-k2` at
- * 300,000 was handed OpenAI's 400,000.  That is worse than refusing, because a
- * foreign tier is a plausible-looking number: a gpt-5-codex session averaging
+ * observed 500,000 was handed Anthropic's 1,000,000.  That is worse than
+ * refusing, because a foreign tier is a plausible-looking number: a gpt-5-codex session averaging
  * 476,667 measured 0.48 of a 1,000,000 window it does not have, i.e. an
  * all-clear, where its own 400,000 ladder says it exceeded every window OpenAI
  * is known to ship.  A session bigger than every tier its OWN vendor ships has
@@ -375,9 +373,10 @@ export function resolveWindow(modelId, options = {}) {
  * F-014, THE `observed-floor` RULE.  Where `window.source === "observed-floor"`
  * the window IS the session's own peak, so every fraction it can produce is
  * floor/floor = 1.0 BY CONSTRUCTION - an artifact of having no upper bound, not
- * a measurement.  Measured on this machine, all 401 real OpenCode sessions land
- * there, so a naive division would report every one of them, including a
- * trivial 5,000-token session, at "100% of window".  The window NUMBER is still
+ * a measurement.  Measured on this machine, hundreds of real sessions running
+ * on an unrecognised model landed there, so a naive division would report
+ * every one of them, including a trivial 5,000-token session, at "100% of
+ * window".  The window NUMBER is still
  * true and worth displaying as a lower bound ("at least 41,344"); turning a
  * lower bound into a percentage is what is forbidden, so the fraction is null
  * and no threshold verdict may be derived from it.

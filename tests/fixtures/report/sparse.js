@@ -70,7 +70,7 @@ export const twoFindingsInput = {
   range: { from: "2026-09-18T09:00:00Z", to: "2026-09-20T15:00:00Z", sessions: 17 },
   clis: [
     { cli: "claude", sessions: 12, support: "supported", note: null },
-    { cli: "kimi", sessions: 5, support: "supported", note: "native fraction only; window.tokens left null per DIS-005" },
+    { cli: "cursor", sessions: 5, support: "supported", note: "native fraction only; window.tokens left null per DIS-005" },
   ],
   rules: [
     {
@@ -85,7 +85,7 @@ export const twoFindingsInput = {
           { label: "peak native context fraction", value: 0.91, unit: "fraction", sessionId: "3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31", windowSource: "native" },
           { label: "session average native context fraction", value: 0.7742, unit: "fraction", sessionId: "3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31", windowSource: "native" },
         ],
-        sources: ["~/.kimi/sessions/<account>/3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31/wire.jsonl"],
+        sources: ["~/.cursor/chats/3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31.json"],
         derivation: "native fraction read straight from the wire record; no token count invented (DIS-005)",
         parserVersion: "2026-09-20.2",
       },
@@ -102,13 +102,13 @@ export const twoFindingsInput = {
           { label: "tool results above 10,240 bytes", value: 7, unit: "count", sessionId: "3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31" },
           { label: "largest tool result", value: 402118, unit: "bytes", sessionId: "3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31" },
         ],
-        sources: ["~/.kimi/sessions/<account>/3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31/wire.jsonl"],
+        sources: ["~/.cursor/chats/3f8a5c02-1d47-4b9e-8e10-77c4a2b90d31.json"],
         derivation: "byte length of each recovered tool result",
         parserVersion: "2026-09-20.2",
       },
     },
     NOT_OBSERVED("cache-hit", "Low cache hit", "cache hit rate 0.94 across 12 Claude sessions, above the 0.85 threshold"),
-    UNKNOWN("repeat-tool", "Repeated tool work", "5 Kimi sessions expose calls without a canonical result signature (DIS-003)"),
+    UNKNOWN("repeat-tool", "Repeated tool work", "5 Cursor sessions expose calls without a canonical result signature (DIS-003)"),
   ],
   fixes: [
     {

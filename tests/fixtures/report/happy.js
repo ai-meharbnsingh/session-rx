@@ -10,7 +10,7 @@
  *   - `context-pressure` carries a fraction of 2.08 (F-008 control case
  *     1ecace68) and an `observed-promoted` window, so both the impossible
  *     reading and the inferred-window label are exercised.
- *   - `repeat-tool` is `unknown` for Gemini per DIS-003, with a real reason.
+ *   - `repeat-tool` is `unknown` for Cursor per DIS-003, with a real reason.
  *   - `subagent-concurrency` is `not-observed` — evaluated, threshold not met.
  *   - session ids are dashed UUIDs, which survive redaction (a continuous
  *     32-char hex run would not).
@@ -27,9 +27,9 @@ export const happyInput = {
   clis: [
     { cli: "claude", sessions: 96, support: "supported", note: null },
     { cli: "codex", sessions: 14, support: "supported", note: null },
-    { cli: "gemini", sessions: 8, support: "supported", note: "tool results carry no stable byte length; see DIS-006" },
-    { cli: "kimi", sessions: 2, support: "supported", note: "native context fraction only; absolute window left null per DIS-005" },
-    { cli: "copilot", sessions: null, support: "detection-only", note: "installed, but Copilot exposes no transcript; absence of sessions is not an absence of usage (DIS-007)" },
+    { cli: "cursor", sessions: 8, support: "supported", note: "tool results carry no stable byte length; see DIS-006" },
+    { cli: "widget", sessions: 2, support: "supported", note: "native context fraction only; absolute window left null per DIS-005" },
+    { cli: "antigravity", sessions: null, support: "detection-only", note: "installed, but Antigravity exposes no transcript; absence of sessions is not an absence of usage (DIS-007)" },
   ],
   rules: [
     {
@@ -149,11 +149,11 @@ export const happyInput = {
       threshold: { value: 5, derivation: "same normalized tool name + canonical input + canonical result signature >= 5 times" },
       evidence: {
         status: "unknown",
-        reason: "the 8 Gemini sessions in this range record tool calls but no stable tool-result contract, so the same-input/same-result test cannot be evaluated without producing a same-input-only false positive (DIS-003)",
+        reason: "the 8 Cursor sessions in this range record tool calls but no stable tool-result contract, so the same-input/same-result test cannot be evaluated without producing a same-input-only false positive (DIS-003)",
         values: [
-          { label: "gemini sessions with tool calls but no result mapping", value: 8, unit: "count" },
+          { label: "cursor sessions with tool calls but no result mapping", value: 8, unit: "count" },
         ],
-        sources: ["~/.gemini/tmp/project-alpha/chats/session-2026-09-20T10-00-00-aaaa1111.jsonl"],
+        sources: ["~/.cursor/chats/session-2026-09-20T10-00-00-aaaa1111.json"],
         derivation: "not computed: prerequisite result signature is absent",
         parserVersion: "2026-09-20.2",
       },

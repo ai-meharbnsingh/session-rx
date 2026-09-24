@@ -28,7 +28,7 @@
  *
  * A SUB-AGENT IS EVIDENCE ABOUT ITS PARENT, NOT A PEER OF IT (F-023)
  * -----------------------------------------------------------------
- * Claude and Kimi sub-agent transcripts are collected as sibling sessions —
+ * Claude's sub-agent transcripts are collected as sibling sessions —
  * that is what lets BP-003.06 measure concurrency at all.  They are NOT
  * sessions the user started: on the real corpus a 10-per-CLI scan surfaces 50
  * of the user's own sessions and 106 sub-agent transcripts, so counting them as
@@ -53,13 +53,13 @@ import { RULES, evaluateRule } from "./rules.js";
 const SEVERITY_RANK = Object.freeze({ critical: 0, warn: 1, info: 2 });
 const STATUS_RANK = Object.freeze({ observed: 0, unknown: 1, "not-observed": 2 });
 const RULE_ORDER = new Map(RULES.map((rule, index) => [rule.id, index]));
-// The registry is the authority for collector capabilities.  Copilot's
+// The registry is the authority for collector capabilities.  Antigravity's
 // registered reader is deliberately detection-only; keep that distinction
 // attached to the registry entry rather than treating every registered ID as
 // a parser merely because its reader module exists.
 const DETECTION_ONLY_READER_PATHS = new Set(
   COLLECTOR_SPECS
-    .filter(([, , modulePath]) => modulePath === "./copilot.js")
+    .filter(([, , modulePath]) => modulePath === "./antigravity.js")
     .map(([, , modulePath]) => modulePath),
 );
 const PARSER_CLI_IDS = new Set(
@@ -78,13 +78,14 @@ const MAX_SOURCES_PER_RULE = 6;
 /**
  * At or above this share of turn-less sessions, the per-CLI note says so.
  *
- * A chat that was started and never used still parses as a session — for Gemini
- * a header line and a clock bump are the whole file — so a scan can return a
- * full window of empty shells: 250 of 250 on the machine this was measured on,
- * against 14 of 656 for Claude, 3 of 250 for Codex and 7 of 250 for OpenCode.
- * The gap between those is what the threshold is set to catch: at 0.9 the real
- * Gemini reading is disclosed and no other CLI's healthy mix raises a false
- * alarm.
+ * A chat that was started and never used still parses as a session — a header
+ * line and a clock bump can be the whole file for a CLI that writes one on
+ * open — so a scan can return a run of empty shells for one CLI while another
+ * CLI's real usage stays healthy: 14 of 656 for Claude and 3 of 250 for Codex
+ * on the machine this was measured on. The gap between a CLI genuinely mostly
+ * abandoned and one with ordinary noise is what the threshold is set to catch:
+ * at 0.9 a real all-empty reading is disclosed and no CLI's healthy mix raises
+ * a false alarm.
  */
 const EMPTY_SESSION_NOTE_SHARE = 0.9;
 

@@ -31,7 +31,7 @@
  *   BP-002.14          an `observed-promoted` window whose `promotion.ladder`
  *                      is `none` has the observed floor as its denominator, so
  *                      it falls under BP-002.18 too.
- *   DIS-005            `window.tokens` null (Kimi) ⇒ use the CLI's own native
+ *   DIS-005            `window.tokens` null (a native-fraction-reporting CLI) ⇒ use the CLI's own native
  *                      fraction if it reported one, else unknown.  Never invent
  *                      absolute tokens from a fraction.
  *   DIS-003            no recoverable tool RESULT signature ⇒ unknown.  Never
@@ -326,7 +326,7 @@ const contextPressure = {
 
     const denominator = windowDenominator(session, ctx);
 
-    // --- absolute-window path (Claude, Codex, OpenCode with a real tier) ----
+    // --- absolute-window path (Claude, Codex, Cursor with a real tier) ------
     if (denominator.usable) {
       if (!tokenReadings.length) {
         return unknown(
@@ -355,7 +355,7 @@ const contextPressure = {
         : notObserved(values, derivation, avgFraction);
     }
 
-    // --- native-fraction path (DIS-005: Kimi reports a fraction, no tokens) -
+    // --- native-fraction path (DIS-005: a CLI reports a fraction, no tokens) -
     if (nativeFractions.length) {
       const avg = mean(nativeFractions);
       const peak = Math.max(...nativeFractions);
@@ -923,11 +923,11 @@ function scanWidthCode(ctx) {
  * Why this CLI cannot establish sub-agent intervals for this session.
  *
  * Each reason names the specific missing thing, because "unknown" without a
- * reason is indistinguishable from a shrug.  Claude, Kimi and OpenCode all DO
- * read sub-agent evidence now (BP-003.07 - BP-003.09), so for them the missing
- * thing is never the parser: it is that no sub-agent was collected for THIS
- * session inside the scanned window, which is `scanWidthClause` above.  Codex
- * and Gemini publish no such evidence at all, which is structural (DIS-004).
+ * reason is indistinguishable from a shrug.  Claude DOES read sub-agent
+ * evidence (BP-003.07), so for it the missing thing is never the parser: it is
+ * that no sub-agent was collected for THIS session inside the scanned window,
+ * which is `scanWidthClause` above.  Codex publishes no such evidence at all,
+ * which is structural (DIS-004).
  *
  * These strings are the product's honesty surface, so a claim here that has
  * gone stale is a defect: it sends a reader to fix something already fixed.
@@ -942,21 +942,8 @@ function subagentReason(session, ctx) {
         `The \`isSidechain\` marker is not a substitute, which is why an empty child list is never read off it: the marker is never \`true\` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the count of marked turns recorded here (${sidechainTurns}) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end, so even a turn that does carry it cannot be attributed to one sub-agent or overlapped with another (DIS-004). ` +
         scanWidthClause(ctx)
       );
-    case "opencode":
-      return (
-        "OpenCode does link a child session to its parent (`sessionMeta.parentSessionId`), and no child session in the collected set names this session as its parent. " +
-        "The collected set is bounded by the collection limit and by the time window, so an empty child list here is not proof that no sub-agent was dispatched — only that none was collected."
-      );
-    case "kimi":
-      return (
-        "Kimi's sub-agent records ARE read: `SubagentEvent`, keyed by `task_tool_call_id` and a large share of all its records, nests a complete sub-agent wire stream, and `src/collectors/kimi.js` unwraps each one into a child session carrying its own start and end (BP-003.08). " +
-        "So an empty child list here is not the parser gap F-006 once described — that gap is closed, and this rule now produces real concurrency figures for Kimi. " +
-        scanWidthClause(ctx)
-      );
     case "codex":
       return "Nothing in Codex's rollout records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
-    case "gemini":
-      return "Nothing in Gemini's history records establishes a sub-agent interval: no turn is marked as belonging to a sub-agent, and nothing ties a child session to the session that dispatched it, so there are no intervals to overlap (DIS-004).";
     default:
       return `no turn marker and no record tying a child session to the session that dispatched it is available for ${cli || "this CLI"}, so sub-agent intervals cannot be established (DIS-004).`;
   }
@@ -965,23 +952,18 @@ function subagentReason(session, ctx) {
 /**
  * The reason CLASS behind `subagentReason`, branch for branch.
  *
- * Codex and Gemini get one each rather than sharing the structural class,
- * because the plain-English sentence names the tool and `plain.unmeasured` is
- * static data that cannot interpolate one.
+ * Codex gets its own reason rather than sharing the structural class, because
+ * the plain-English sentence names the tool and `plain.unmeasured` is static
+ * data that cannot interpolate one.
  *
  * @returns {string} a key of `subagentConcurrency.plain.unmeasured`
  */
 function subagentReasonCode(session, ctx) {
   switch (str(session?.cli)) {
     case "claude":
-    case "kimi":
       return scanWidthCode(ctx);
-    case "opencode":
-      return "no-subagent-collected";
     case "codex":
       return "codex-records-no-subagents";
-    case "gemini":
-      return "gemini-records-no-subagents";
     default:
       return "cli-records-no-subagents";
   }
@@ -1031,8 +1013,6 @@ const subagentConcurrency = {
         "Whether this session had several sub-agents running at the same moment could not be worked out from what was recorded, so that question is still open about this session.",
       "codex-records-no-subagents":
         "Codex's logs don't record which turns belonged to a sub-agent or which parent started them, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
-      "gemini-records-no-subagents":
-        "Gemini's history files don't record which turns belonged to a sub-agent or which parent started them, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
       "cli-records-no-subagents":
         "Nothing this tool records identifies a sub-agent, or says when one started and finished, so there is no way to tell whether two were running at the same time. Claude Code does record it, so this check produces a real result on a Claude session.",
       "subagent-reading-off":

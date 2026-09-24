@@ -31,7 +31,7 @@
  *                                     // which is not zero.
  *     }
  *     clis: Array<{
- *       cli:       string             // "claude" | "codex" | "gemini" | ...
+ *       cli:       string             // "claude" | "codex" | "cursor" | ...
  *       sessions:  number | null      // null = count not recoverable (NOT zero)
  *       subagentSessions?: number | null
  *                                     // sub-agent sessions set aside for this

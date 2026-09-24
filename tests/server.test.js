@@ -3,7 +3,7 @@
  *
  * ── Real-file safety, guaranteed structurally, not by care ──────────────────
  * 1. The collector registry is INJECTED as a stub in every test, so no test
- *    ever reads the developer's real `~/.claude`, `~/.codex`, `~/.gemini`, … .
+ *    ever reads the developer's real `~/.claude`, `~/.codex`, `~/.cursor`, … .
  *    The real registry hardcodes `os.homedir()` at module load, which is
  *    exactly why it is replaced rather than reconfigured.
  * 2. Every app is created with `home:` pointing at a fresh `mkdtemp` directory.
@@ -1869,11 +1869,11 @@ describe("BP-005.15 / FVA-004 — secret redaction on the way out", () => {
 describe("pure helpers", () => {
   it("filterSessions excludes a session with no recoverable timestamp from a bounded window", () => {
     const dated = testSession();
-    const undated = normalizeSession({ cli: "kimi", sessionId: "k1" });
+    const undated = normalizeSession({ cli: "cursor", sessionId: "k1" });
     const all = [dated, undated];
     assert.equal(filterSessions(all, {}).length, 2);
     assert.equal(filterSessions(all, { from: new Date(ISO(1)) }).length, 1);
-    assert.equal(filterSessions(all, { cli: ["kimi"] }).length, 1);
+    assert.equal(filterSessions(all, { cli: ["cursor"] }).length, 1);
     assert.equal(filterSessions(all, { project: "DEMO-APP" }).length, 1, "project match is case-insensitive");
   });
 

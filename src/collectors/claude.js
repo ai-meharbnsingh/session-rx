@@ -406,9 +406,9 @@ export class ClaudeCollector extends Collector {
    * tool calls are its own gauge; adding them to the session that dispatched it
    * inflates that session's figures, which is the exact error class that once
    * cost this codebase a 1.97x context inflation.  So a sub-agent becomes a
-   * sibling session and the link is published on `sessionMeta`, the same shape
-   * OpenCode already uses for its child sessions.  The parent object returned by
-   * `parseSession` is not touched here.
+   * sibling session and the link is published on `sessionMeta`, the general
+   * shape a collector uses to link a child session to its parent.  The parent
+   * object returned by `parseSession` is not touched here.
    */
   async #collectSubagents(entry, parent, diagnostic) {
     const dir = path.join(path.dirname(entry.file), path.basename(entry.file, ".jsonl"), SUBAGENT_DIR);
