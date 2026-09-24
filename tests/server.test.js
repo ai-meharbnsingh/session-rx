@@ -45,6 +45,7 @@ import {
   startServer,
 } from "../src/server.js";
 import { redactSecrets } from "../src/report/generator.js";
+import { RULES } from "../src/analyzer/rules.js";
 import { listSuggestionIds } from "../src/suggestions/index.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -232,7 +233,7 @@ function stubRegistry(collectors) {
   };
 }
 
-function syntheticHealth(ruleSets) {
+function syntheticHealth(ruleSets, options = {}) {
   return {
     analyzeAll(collected) {
       const sessions = (collected.supported ?? []).flatMap((entry) => (entry.sessions ?? []).map((session) => ({
@@ -241,6 +242,7 @@ function syntheticHealth(ruleSets) {
       })));
       return {
         sessions,
+        ...(options.ruleApplicability ? { ruleApplicability: options.ruleApplicability } : {}),
         subagentSessions: [],
         subagentSessionsSetAside: { total: 0, orphans: 0, byCli: [] },
         collectors: (collected.supported ?? []).map((entry) => ({ cli: entry.id, sessions: entry.sessions.length })),
@@ -932,6 +934,60 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
     assert.equal(total.unknown, 1);
     assert.equal(total.notApplicable, 0);
   });
+
+  it("keeps a wholly omitted applicable rule in ruleTotals as unknown", async () => {
+    const omitted = "context-pressure";
+    const sessions = [testSession({ sessionId: "omitted-1" }), testSession({ sessionId: "omitted-2" })];
+    const running = await server({
+      collectors: [new FakeCollector("claude", sessions)],
+      modules: { health: syntheticHealth({ "omitted-1": [], "omitted-2": [] }, {
+        ruleApplicability: [{ cli: "claude", applicable: RULES.map((rule) => rule.id), notApplicable: [] }],
+      }) },
+    });
+    const res = (await running.get("/api/health")).json;
+    const total = res.ruleTotals.find((rule) => rule.id === omitted);
+    assert.ok(total, "a rule omitted by every session must still be published");
+    assert.deepEqual(
+      { observed: total.observed, notObserved: total.notObserved, unknown: total.unknown, notApplicable: total.notApplicable },
+      { observed: 0, notObserved: 0, unknown: sessions.length, notApplicable: 0 },
+    );
+  });
+
+  it("separates not-applicable sessions from applicable sessions missing a verdict", async () => {
+    const ruleId = "subagent-concurrency";
+    const claude = testSession({ cli: "claude", sessionId: "missing-applicable" });
+    const codex = testSession({ cli: "codex", sessionId: "not-applicable" });
+    const running = await server({
+      collectors: [new FakeCollector("claude", [claude]), new FakeCollector("codex", [codex])],
+      modules: { health: syntheticHealth({ "missing-applicable": [], "not-applicable": [] }, {
+        ruleApplicability: [
+          { cli: "claude", applicable: RULES.map((rule) => rule.id), notApplicable: [] },
+          { cli: "codex", applicable: RULES.filter((rule) => rule.id !== ruleId).map((rule) => rule.id), notApplicable: [{ ruleId }] },
+        ],
+      }) },
+    });
+    const res = (await running.get("/api/health")).json;
+    const total = res.ruleTotals.find((rule) => rule.id === ruleId);
+    assert.deepEqual(
+      { observed: total.observed, notObserved: total.notObserved, unknown: total.unknown, notApplicable: total.notApplicable },
+      { observed: 0, notObserved: 0, unknown: 1, notApplicable: 1 },
+    );
+    assert.equal(total.observed + total.notObserved + total.unknown, 1);
+  });
+
+  it("keeps per-rule unknown totals aligned with headline and trend counts", async () => {
+    const sessions = [1, 2, 3].map((day) => testSession({ sessionId: `trend-missing-${day}`, startedAt: ISO(day, 9) }));
+    const running = await server({
+      collectors: [new FakeCollector("claude", sessions)],
+      modules: { health: syntheticHealth(Object.fromEntries(sessions.map((session) => [session.sessionId, []])), {
+        ruleApplicability: [{ cli: "claude", applicable: RULES.map((rule) => rule.id), notApplicable: [] }],
+      }) },
+    });
+    const res = (await running.get("/api/health?from=2026-09-01&to=2026-09-03")).json;
+    const perRuleUnknown = res.ruleTotals.reduce((sum, rule) => sum + rule.unknown, 0);
+    assert.equal(perRuleUnknown, res.windowTotals.unknownChecks);
+    assert.equal(perRuleUnknown, res.windowSeries.unknownChecks.reduce((sum, value) => sum + value, 0));
+  });
 });
 
 describe("/api/health window-wide totals and comparison", () => {
@@ -1005,7 +1061,9 @@ describe("/api/health window-wide totals and comparison", () => {
     assert.deepEqual(res.windowSeries.sessions, [1, 0, 1]);
     assert.deepEqual(res.windowSeries.observedFindings, [1, 0, 0]);
     assert.deepEqual(res.windowSeries.fixableFindings, [1, 0, 0]);
-    assert.deepEqual(res.windowSeries.unknownChecks, [0, 0, 1]);
+    // Both rules are part of this synthetic corpus's observed rule set. When
+    // one is omitted from a session it is now honestly counted as unknown.
+    assert.deepEqual(res.windowSeries.unknownChecks, [1, 0, 2]);
     assert.equal(res.windowTotals.sessions, res.windowSeries.sessions.reduce((a, b) => a + b, 0));
     assert.equal(res.windowTotals.observedFindings, res.windowSeries.observedFindings.reduce((a, b) => a + b, 0));
     assert.equal(res.windowTotals.fixableFindings, res.windowSeries.fixableFindings.reduce((a, b) => a + b, 0));

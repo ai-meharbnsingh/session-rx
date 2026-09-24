@@ -37,6 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
+import { RULES } from "./analyzer/rules.js";
 import { dayKeysEndingAt, localDayKey } from "./analyzer/trends.js";
 import { buildSuggestions, listSuggestionIds, suggestionTitleFor, TOOL_IDS, toolLabel } from "./suggestions/index.js";
 import { SUGGESTION_DEFS } from "./suggestions/sections.js";
@@ -388,7 +389,39 @@ function sessionWindow(sessions, { cli, project, from, to } = {}) {
   };
 }
 
-function calculateWindowTotals(sessions) {
+function ruleCatalog(sessions, analysis) {
+  const catalog = new Map(
+    Array.isArray(analysis?.ruleApplicability)
+      ? RULES.map((rule) => [rule.id, { id: rule.id, name: rule.name, fix: rule.fix ?? null }])
+      : [],
+  );
+  for (const session of sessions) {
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      if (!rule || typeof rule.id !== "string" || catalog.has(rule.id)) continue;
+      catalog.set(rule.id, { id: rule.id, name: rule.name ?? null, fix: rule.fix ?? null });
+    }
+  }
+  return catalog;
+}
+
+function isNotApplicable(session, ruleId, ruleApplicability) {
+  if (Array.isArray(session?.notApplicable) && session.notApplicable.some((entry) => entry?.ruleId === ruleId)) return true;
+  const cli = typeof session?.cli === "string" ? session.cli : "unknown";
+  return Array.isArray(ruleApplicability)
+    && ruleApplicability.some((entry) => entry?.cli === cli
+      && Array.isArray(entry?.notApplicable)
+      && entry.notApplicable.some((item) => item?.ruleId === ruleId));
+}
+
+function classifyRule(session, ruleId, ruleApplicability) {
+  if (isNotApplicable(session, ruleId, ruleApplicability)) return "notApplicable";
+  const rule = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+  const status = rule?.evidence?.status;
+  return status === "observed" || status === "not-observed" ? status : "unknown";
+}
+
+function calculateWindowTotals(sessions, analysis) {
+  const catalog = ruleCatalog(sessions, analysis);
   const totals = {
     sessions: sessions.length,
     observedFindings: 0,
@@ -398,14 +431,15 @@ function calculateWindowTotals(sessions) {
     measuredChecks: 0,
   };
   for (const session of sessions) {
-    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
-      const status = rule?.evidence?.status;
+    for (const [ruleId, ruleMeta] of catalog) {
+      const status = classifyRule(session, ruleId, analysis?.ruleApplicability);
       if (status === "observed") {
         totals.observedFindings += 1;
-        if (rule.fix) totals.fixableFindings += 1;
+        const rule = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+        if (rule?.fix ?? ruleMeta.fix) totals.fixableFindings += 1;
       } else if (status === "not-observed") {
         totals.notObservedChecks += 1;
-      } else {
+      } else if (status === "unknown") {
         totals.unknownChecks += 1;
       }
     }
@@ -500,7 +534,8 @@ function localCalendarDayCount(from, to) {
   return count;
 }
 
-function calculateWindowSeries(sessions, query) {
+function calculateWindowSeries(sessions, query, analysis) {
+  const catalog = ruleCatalog(sessions, analysis);
   const dated = sessions
     .map((session) => {
       const started = Date.parse(session?.startedAt ?? "");
@@ -534,12 +569,13 @@ function calculateWindowSeries(sessions, query) {
     const day = index.get(localDayKey(new Date(started)));
     if (day === undefined) continue;
     series.sessions[day] += 1;
-    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
-      const status = rule?.evidence?.status;
+    for (const [ruleId, ruleMeta] of catalog) {
+      const status = classifyRule(session, ruleId, analysis?.ruleApplicability);
       if (status === "observed") {
         series.observedFindings[day] += 1;
-        if (rule.fix) series.fixableFindings[day] += 1;
-      } else if (status !== "not-observed") {
+        const rule = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === ruleId);
+        if (rule?.fix ?? ruleMeta.fix) series.fixableFindings[day] += 1;
+      } else if (status === "unknown") {
         series.unknownChecks[day] += 1;
       }
     }
@@ -1328,39 +1364,29 @@ export function createApp(options = {}) {
     const sessionWindowValue = sessionWindow(allSessions, query);
     const windowedSessions = filterSessions(allSessions, { from: query.from, to: query.to });
     const cardSessions = sortSessions(windowedSessions, "startedAt", "desc").slice(0, HEALTH_CARD_LIMIT);
-    const windowTotals = calculateWindowTotals(windowedSessions);
-    const windowSeries = calculateWindowSeries(windowedSessions, query);
+    const windowTotals = calculateWindowTotals(windowedSessions, result.analysis);
+    const windowSeries = calculateWindowSeries(windowedSessions, query, result.analysis);
     const coverage = calculateCoverage(result);
     const comparison = calculateComparison(query, coverage, result.scan, allSessions, windowTotals);
-    const ruleTotalsById = new Map();
+    const ruleTotals = [...ruleCatalog(windowedSessions, result.analysis).values()].map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      observed: 0,
+      notObserved: 0,
+      unknown: 0,
+      notApplicable: 0,
+    }));
+    const ruleTotalsById = new Map(ruleTotals.map((rule) => [rule.id, rule]));
     for (const session of windowedSessions) {
-      const rules = Array.isArray(session?.rules) ? session.rules : [];
-      const rulesById = new Map(rules.filter((rule) => typeof rule?.id === "string").map((rule) => [rule.id, rule]));
-      for (const rule of rules) {
-        if (!rule || typeof rule.id !== "string") continue;
-        if (!ruleTotalsById.has(rule.id)) {
-          ruleTotalsById.set(rule.id, {
-            id: rule.id,
-            name: rule.name ?? null,
-            observed: 0,
-            notObserved: 0,
-            unknown: 0,
-            notApplicable: 0,
-          });
-        }
-      }
-      for (const [id, total] of ruleTotalsById) {
-        if (Array.isArray(session?.notApplicable) && session.notApplicable.some((entry) => entry?.ruleId === id)) {
-          total.notApplicable += 1;
-          continue;
-        }
-        const status = rulesById.get(id)?.evidence?.status;
-        if (status === "observed") total.observed += 1;
+      for (const ruleId of ruleTotalsById.keys()) {
+        const total = ruleTotalsById.get(ruleId);
+        const status = classifyRule(session, ruleId, result.analysis.ruleApplicability);
+        if (status === "notApplicable") total.notApplicable += 1;
+        else if (status === "observed") total.observed += 1;
         else if (status === "not-observed") total.notObserved += 1;
         else total.unknown += 1;
       }
     }
-    const ruleTotals = [...ruleTotalsById.values()];
     await sendJson(res, 200, {
       sessions: cardSessions,
       // The true count over the FULL analysis, so the health page's "N of
