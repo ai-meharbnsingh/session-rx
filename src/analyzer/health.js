@@ -367,8 +367,12 @@ function setAsideCount(sessions, explicit) {
   return channelSeen ? derived : null;
 }
 
-/** The CLIs a manager-facing summary always names, in this order, whether or not anything was read for them. */
-const SUMMARY_TOOLS = Object.freeze(["claude", "codex", "cursor"]);
+/** Registry order is the one source of truth for manager-facing tools. */
+function summaryTools(clis) {
+  const registered = COLLECTOR_SPECS.map(([id]) => id);
+  const supplied = clis.map((row) => str(row?.cli)).filter(Boolean);
+  return [...new Set([...registered, ...supplied])];
+}
 
 /**
  * A plain-language, manager-readable rollup of the same verdicts the report
@@ -391,10 +395,14 @@ export function buildManagerSummary(input = {}) {
   let observed = 0;
   let notObserved = 0;
   let unknown = 0;
-  const perCheck = RULES.map((rule) => ({ id: rule.id, name: rule.name, observed: 0, notObserved: 0, unknown: 0 }));
+  const perCheck = RULES.map((rule) => ({ id: rule.id, name: rule.name, observed: 0, notObserved: 0, unknown: 0, notApplicable: 0 }));
   const perCheckById = new Map(perCheck.map((row) => [row.id, row]));
 
   for (const session of sessions) {
+    for (const item of Array.isArray(session?.notApplicable) ? session.notApplicable : []) {
+      const bucket = perCheckById.get(str(item?.ruleId));
+      if (bucket) bucket.notApplicable += 1;
+    }
     for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
       const status = rule?.evidence?.status;
       const bucket = perCheckById.get(str(rule?.id));
@@ -412,7 +420,7 @@ export function buildManagerSummary(input = {}) {
   }
 
   const cliByName = new Map(clis.map((row) => [str(row?.cli), row]));
-  const perTool = SUMMARY_TOOLS.map((cli) => {
+  const perTool = summaryTools(clis).map((cli) => {
     const row = cliByName.get(cli) ?? null;
     const detectionOnly = row?.support === "detection-only";
     if (detectionOnly) {
@@ -468,7 +476,7 @@ export function buildManagerSummary(input = {}) {
  *
  * @param {{sessions: Array<object>, clis?: Array<object>, generatedAt?: string|null,
  *   parserVersion?: string, fixes?: Array<object>, trend?: object,
- *   subagentSessions?: number|null}} input
+ *   subagentSessions?: number|null, ruleApplicability?: Array<object>}} input
  * @returns {object} `ReportInput`
  */
 export function buildReportInput(input = {}) {
@@ -507,13 +515,23 @@ export function buildReportInput(input = {}) {
     }
   }
 
+  for (const entry of Array.isArray(input?.ruleApplicability) ? input.ruleApplicability : []) {
+    const cli = str(entry?.cli) || "unknown";
+    for (const item of Array.isArray(entry?.notApplicable) ? entry.notApplicable : []) {
+      const key = `${cli}:${str(item?.ruleId)}`;
+      if (seenNotApplicable.has(key)) continue;
+      seenNotApplicable.add(key);
+      notApplicable.push({ cli, ...item });
+    }
+  }
+
   return {
     generatedAt: str(input?.generatedAt) || null,
     parserVersion,
     range,
     clis,
     notApplicable,
-    rules: aggregateRules(sessions, parserVersion),
+    rules: aggregateRules(sessions, parserVersion, input?.ruleApplicability),
     // Computed from the SAME session-health objects (and the same verdicts)
     // the rest of this report renders — never re-derived from the assembled
     // Markdown prose, which is free to change under it (see generator.js).
@@ -561,16 +579,37 @@ function summariseUnknownReasons(unknownResults, unknownCount, total) {
  * three evidence rows, including when they are zero, so an observed verdict can
  * never hide how much of the corpus was unmeasurable.
  */
-function aggregateRules(sessions, parserVersion) {
+function aggregateRules(sessions, parserVersion, ruleApplicability = []) {
   const aggregates = [];
+
+  const suppliedNotApplicable = new Map();
+  for (const entry of Array.isArray(ruleApplicability) ? ruleApplicability : []) {
+    const cli = str(entry?.cli) || "unknown";
+    for (const item of Array.isArray(entry?.notApplicable) ? entry.notApplicable : []) {
+      const key = `${cli}:${str(item?.ruleId)}`;
+      suppliedNotApplicable.set(key, item);
+    }
+  }
 
   for (const rule of RULES) {
     const results = [];
+    let notApplicableCount = 0;
     for (const session of sessions) {
+      const cli = str(session?.cli) || "unknown";
+      const sessionNotApplicable = Array.isArray(session?.notApplicable) ? session.notApplicable : [];
+      const explicitlyNotApplicable = sessionNotApplicable.some((item) => item?.ruleId === rule.id)
+        || suppliedNotApplicable.has(`${cli}:${rule.id}`);
+      if (explicitlyNotApplicable) {
+        notApplicableCount += 1;
+        continue;
+      }
       const match = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry.id === rule.id);
       if (match) results.push(match);
     }
     const total = results.length;
+    // A rule with no applicable sessions has no verdict to aggregate. It is
+    // listed by `notApplicable`, but must not become unknown, zero, or pass.
+    if (total === 0 && notApplicableCount > 0) continue;
     const observedResults = results.filter((result) => result.evidence.status === "observed");
     const unknownResults = results.filter((result) => result.evidence.status === "unknown");
     const notObservedCount = total - observedResults.length - unknownResults.length;
@@ -595,6 +634,7 @@ function aggregateRules(sessions, parserVersion) {
       { label: "sessions where this could NOT be measured (not counted as passing)", value: unknownResults.length, unit: "count" },
       { label: "sessions checked", value: total, unit: "count" },
     ];
+    values.push({ label: "sessions where this was not applicable", value: notApplicableCount, unit: "count" });
 
     const representatives = (status === "observed" ? observedResults : status === "unknown" ? unknownResults : results)
       .slice()
@@ -909,6 +949,14 @@ export function analyzeAll(collected = {}, options = {}) {
       parserVersion,
       fixes: options?.fixes,
       trend: options?.trend,
+      ruleApplicability: clis.map((entry) => {
+        const cli = str(entry?.cli) || "unknown";
+        return {
+          cli,
+          applicable: RULES.filter((rule) => !notApplicableFor(cli, rule)).map((rule) => rule.id),
+          notApplicable: RULES.map((rule) => notApplicableFor(cli, rule)).filter(Boolean),
+        };
+      }),
     }),
   };
 }

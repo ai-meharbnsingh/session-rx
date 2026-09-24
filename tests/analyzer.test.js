@@ -251,6 +251,7 @@ const UNMEASURED_BRANCHES = [
   ["subagent-concurrency", "codex-records-no-subagents", makeSession({ cli: "codex" }), {}],
   ["subagent-concurrency", "cli-records-no-subagents", makeSession({ cli: "droid" }), {}],
   ["subagent-concurrency", "subagent-reading-off", makeSession({}), { sessionMeta: { subagentSessionIds: null } }],
+  ["subagent-concurrency", "subagent-reading-partial", makeSession({}), { childLinkageAvailable: true, sessionMeta: { subagentSessionIds: [], subagentReadError: "permission denied" } }],
   ["subagent-concurrency", "scan-bounded", makeSession({}), { sessionMeta: { subagentSessionIds: [] }, corpusComplete: false }],
   ["subagent-concurrency", "no-subagent-collected", makeSession({}), { sessionMeta: { subagentSessionIds: [] }, corpusComplete: true }],
   ["subagent-concurrency", "no-subagent-times", makeSession({}), { children: childrenWithoutIntervals }],

@@ -73,6 +73,22 @@ test("buildManagerSummary: perTool covers exactly the supported tools", () => {
   assert.deepEqual(summary.perTool.map((r) => r.cli), ["claude", "codex", "cursor"]);
 });
 
+test("buildManagerSummary includes a collector supplied outside the registry literal", () => {
+  const summary = buildManagerSummary({ sessions: [], clis: [{ cli: "future-cli", support: "supported" }] });
+  assert.deepEqual(summary.perTool.map((r) => r.cli), ["claude", "codex", "cursor", "future-cli"]);
+});
+
+test("report aggregation excludes not-applicable sessions and exposes the denominator", () => {
+  const codex = analyzeSession(repeatToolSession("codex", "codex-1"), { toolCallsRecorded: true });
+  const claude = analyzeSession(repeatToolSession("claude", "claude-1"), { toolCallsRecorded: true });
+  const input = buildReportInput({ sessions: [codex, claude], clis: [{ cli: "codex" }, { cli: "claude" }] });
+  const aggregate = input.rules.find((rule) => rule.id === "subagent-concurrency");
+  assert.ok(aggregate, "the mixed corpus still aggregates the applicable Claude session");
+  assert.equal(aggregate.evidence.values.find((value) => value.label === "sessions checked").value, 1);
+  assert.equal(aggregate.evidence.values.find((value) => value.label.includes("not applicable")).value, 1);
+  assert.equal(input.notApplicable.filter((item) => item.ruleId === "subagent-concurrency").length, 1);
+});
+
 test("buildManagerSummary: a tool with sessions read gets a real (non-null) problem count", () => {
   const sessions = [analyzeSession(repeatToolSession("claude", "s1"), { toolCallsRecorded: true })];
   const summary = buildManagerSummary({

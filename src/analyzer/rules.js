@@ -958,6 +958,7 @@ function scanWidthClause(ctx) {
  */
 function scanWidthCode(ctx) {
   const meta = ctx?.sessionMeta;
+  if (meta?.subagentReadError) return "subagent-reading-partial";
   const ids = meta && typeof meta === "object" ? meta.subagentSessionIds : undefined;
   if (ids === null) return "subagent-reading-off";
   if (ctx?.corpusComplete !== true) return "scan-bounded";
@@ -982,6 +983,9 @@ function subagentReason(session, ctx) {
   const sidechainTurns = ctx?.sidechainTurns ?? 0;
   switch (cli) {
     case "claude":
+      if (ctx?.sessionMeta?.subagentReadError) {
+        return `Claude's sub-agent records could not be read completely: ${ctx.sessionMeta.subagentReadError}. A partial child list is not evidence that no sub-agent ran, so concurrency is unknown until the unreadable records are read.`;
+      }
       return (
         "Claude's sub-agent transcripts ARE read: `src/collectors/claude.js` reads `<project-slug>/<session-id>/subagents/agent-*.jsonl` and turns each one it collects into a child session carrying its own start and end, which is what lets this rule return a figure at all (BP-003.07). " +
         `The \`isSidechain\` marker is not a substitute, which is why an empty child list is never read off it: the marker is never \`true\` in a main transcript (BP-003.07 measured true=0 against false=138,358), so the count of marked turns recorded here (${sidechainTurns}) is not a measurement of how many sub-agents ran, and a zero there would be a false all-clear rather than a finding. The marker also carries no sub-agent identity and no start or end, so even a turn that does carry it cannot be attributed to one sub-agent or overlapped with another (DIS-004). ` +
@@ -1006,6 +1010,7 @@ function subagentReason(session, ctx) {
 function subagentReasonCode(session, ctx) {
   switch (str(session?.cli)) {
     case "claude":
+      if (ctx?.sessionMeta?.subagentReadError) return "subagent-reading-partial";
       return scanWidthCode(ctx);
     case "codex":
       return "codex-records-no-subagents";
@@ -1066,6 +1071,8 @@ const subagentConcurrency = {
         "Only part of this tool's sessions were read on this run, so a sub-agent belonging to this session may simply have fallen outside what was looked at. An unread sub-agent is not an absent one, so this is not a statement that none ran. Reading more sessions settles it.",
       "no-subagent-collected":
         "No sub-agent record was found alongside this session, and nothing in what was read ties a sub-agent back to it, so an empty list cannot be treated as a real zero. This is not a statement that no sub-agents ran.",
+      "subagent-reading-partial":
+        "Some sub-agent records could not be read, so the list is incomplete and an empty or partial result cannot be treated as a measured zero.",
       "no-subagent-times":
         "Sub-agents are known to belong to this session, but not one of them recorded when it started and finished, so there is no way to work out which of them were running together. How many ran is known; how many ran at once is not. A start and finish time recorded for each sub-agent would make it measurable.",
       "partial-subagent-times":
@@ -1082,7 +1089,7 @@ const subagentConcurrency = {
       // parent, so an array here is complete evidence for THIS parent even when
       // the top-level session scan is bounded. `undefined` retains the defensive
       // unknown for callers that did not provide collector metadata.
-      if (ctx?.childLinkageAvailable === true && (Array.isArray(ctx?.sessionMeta?.subagentSessionIds) || ctx?.corpusComplete === true)) {
+      if (ctx?.childLinkageAvailable === true && !ctx?.sessionMeta?.subagentReadError && (Array.isArray(ctx?.sessionMeta?.subagentSessionIds) || ctx?.corpusComplete === true)) {
         return notObserved(
           [countValue("sub-agent sessions linked to this session", 0)],
           "this CLI records which session dispatched each sub-agent session, the scan was not cut short by the collection limit, and no session names this one as its parent. This is a measured zero, not a missing field.",

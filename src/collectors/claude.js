@@ -376,9 +376,10 @@ export class ClaudeCollector extends Collector {
       }
       sessions.push(parent);
 
-      const children = readSubagents
+      const childRead = readSubagents
         ? await this.#collectSubagents(entry, parent, diagnostic)
-        : [];
+        : { children: [], error: null };
+      const children = childRead.children;
       for (const child of children) sessions.push(child.session);
 
       this.sessionMeta.set(parent.sessionId, {
@@ -389,6 +390,7 @@ export class ClaudeCollector extends Collector {
         // sub-agent reading was off for this run, which is not the same claim
         // as an empty list: the difference is "not looked for" vs "none found".
         subagentSessionIds: readSubagents ? children.map((child) => child.session.sessionId) : null,
+        ...(childRead.error ? { subagentReadError: childRead.error } : {}),
       });
       for (const child of children) {
         this.sessionMeta.set(child.session.sessionId, {
@@ -418,14 +420,17 @@ export class ClaudeCollector extends Collector {
     let found;
     try {
       found = await readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
       // No sub-agent directory is the normal case and is a MEASURED zero, not a
       // failure: this session dispatched none. It is not counted as a skipped
       // file, which would read as data we could not parse.
-      return [];
+      if (error?.code === "ENOENT") return { children: [], error: null };
+      const reason = error instanceof Error ? error.message : String(error);
+      return { children: [], error: `could not read sub-agent directory ${dir}: ${reason}` };
     }
 
     const children = [];
+    let readError = null;
     for (const file of found) {
       if (!file.isFile()) continue;
       const matched = SUBAGENT_FILE.exec(file.name);
@@ -444,10 +449,12 @@ export class ClaudeCollector extends Collector {
         });
       } catch (error) {
         diagnostic.filesSkipped += 1;
-        diagnostic.errors.push(error instanceof Error ? error.message : String(error));
+        const reason = error instanceof Error ? error.message : String(error);
+        diagnostic.errors.push(reason);
+        readError = readError || `could not read sub-agent file ${child}: ${reason}`;
       }
     }
-    return children;
+    return { children, error: readError };
   }
 
   /** `<root>/<cwd-slug>/<session-uuid>.jsonl`, newest first. */

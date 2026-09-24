@@ -121,6 +121,24 @@ class ShimText {
   get children() { return []; }
 }
 
+/** A browser-like NodeList: iterable, indexed, and deliberately not an Array. */
+class ShimNodeList {
+  constructor() {
+    this._items = [];
+    return new Proxy(this, {
+      get: (target, property, receiver) => {
+        if (/^\d+$/.test(String(property))) return target._items[Number(property)];
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+  get length() { return this._items.length; }
+  item(index) { return this._items[index] ?? null; }
+  forEach(callback, thisArg) { this._items.forEach(callback, thisArg); }
+  push(...nodes) { this._items.push(...nodes); }
+  [Symbol.iterator]() { return this._items[Symbol.iterator](); }
+}
+
 /**
  * A DocumentFragment: `public/js/pages/health.js` returns one from
  * `windowValueNode` / `evidenceValueNode`, and the real DOM splices its children
@@ -128,8 +146,8 @@ class ShimText {
  * does the same, so a structural assertion sees the same tree a browser builds.
  */
 class ShimFragment {
-  constructor() { this.childNodes = []; this.parent = null; this.isFragment = true; }
-  get textContent() { return this.childNodes.map((node) => node.textContent).join(""); }
+  constructor() { this.childNodes = new ShimNodeList(); this.parent = null; this.isFragment = true; }
+  get textContent() { return Array.from(this.childNodes, (node) => node.textContent).join(""); }
   append(...nodes) {
     nodes.forEach((node) => {
       if (node === null || node === undefined) return;
@@ -144,7 +162,7 @@ class ShimFragment {
 class ShimElement {
   constructor(tag) {
     this.tagName = String(tag).toUpperCase();
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this.parent = null;
     this._text = "";
     this._className = "";
@@ -182,11 +200,11 @@ class ShimElement {
 
   get textContent() {
     if (this.childNodes.length === 0) return this._text;
-    return this.childNodes.map((node) => node.textContent).join("");
+    return Array.from(this.childNodes, (node) => node.textContent).join("");
   }
 
   set textContent(value) {
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this._text = value === null || value === undefined ? "" : String(value);
   }
 
@@ -207,14 +225,16 @@ class ShimElement {
   }
 
   replaceChildren(...nodes) {
-    this.childNodes = [];
+    this.childNodes = new ShimNodeList();
     this._text = "";
     this.append(...nodes);
   }
 
   remove() {
     if (!this.parent) return;
-    this.parent.childNodes = this.parent.childNodes.filter((node) => node !== this);
+    const remaining = Array.from(this.parent.childNodes).filter((node) => node !== this);
+    this.parent.childNodes = new ShimNodeList();
+    this.parent.childNodes.push(...remaining);
     this.parent = null;
   }
 
@@ -276,8 +296,8 @@ function metaMap(card) {
   const out = new Map();
   for (const cell of grid?.childNodes ?? []) {
     const kids = cell.childNodes ?? [];
-    const label = kids.find((node) => node.classList?.contains?.("meta-label"));
-    const value = kids.find((node) => node.classList?.contains?.("meta-value"));
+    const label = Array.from(kids).find((node) => node.classList?.contains?.("meta-label"));
+    const value = Array.from(kids).find((node) => node.classList?.contains?.("meta-value"));
     if (label && value) out.set(label.textContent.trim(), value);
   }
   return out;
@@ -931,7 +951,7 @@ test("the score line states unknowns only when present", () => {
   // The bar carries a segment per state, and the unknown one is its own segment.
   const bar = withClass(withUnknown, "score-bar")[0];
   assert.ok(bar, "score bar must render");
-  const segs = bar.childNodes.map((node) => node.className);
+  const segs = Array.from(bar.childNodes, (node) => node.className);
   assert.ok(segs.some((cls) => cls.includes("score-seg-passed")));
   assert.ok(segs.some((cls) => cls.includes("score-seg-unknown")), "unknown is a segment, not empty space");
   assert.ok(!segs.some((cls) => cls.includes("score-seg-observed")), "no observed problems here");
@@ -1212,7 +1232,7 @@ test("the passed segment is passed/total and never passed+unknown", () => {
   // bar. 4 passed of 6 is 66.66%, not the 100% that 4 passed + 2 unknown would
   // give if unknown were folded into passed.
   const bar = withClass(renderCard(SESSION({})), "score-bar")[0];
-  const passed = bar.childNodes.find((node) => node.className.includes("score-seg-passed"));
+  const passed = Array.from(bar.childNodes).find((node) => node.className.includes("score-seg-passed"));
   assert.ok(passed, "a passed segment must exist");
   assert.equal(passed.style.width, `${(4 / 6) * 100}%`);
 
@@ -1223,10 +1243,10 @@ test("the passed segment is passed/total and never passed+unknown", () => {
     "score-bar",
   )[0];
   assert.ok(
-    !allUnknown.childNodes.some((node) => node.className.includes("score-seg-passed")),
+    !Array.from(allUnknown.childNodes).some((node) => node.className.includes("score-seg-passed")),
     "0 passed draws no passed segment",
   );
-  assert.ok(allUnknown.childNodes.some((node) => node.className.includes("score-seg-unknown")));
+  assert.ok(Array.from(allUnknown.childNodes).some((node) => node.className.includes("score-seg-unknown")));
 });
 
 test("an unknown verdict is styled as neither pass nor warn, with its reason in evidence details", () => {
@@ -1329,7 +1349,7 @@ test("a rule's default state is ONE line, and the honesty surface is not behind 
   // The collapsed line IS the <summary>, so the disclosure costs no extra row.
   const details = nodes(row).find((node) => node.tagName === "DETAILS");
   assert.ok(details, "the disclosure must be a native <details> — keyboard-operable without script");
-  const summary = details.childNodes.find((node) => node.tagName === "SUMMARY");
+  const summary = Array.from(details.childNodes).find((node) => node.tagName === "SUMMARY");
   assert.ok(summary, "the collapsed line must BE the summary, not a row above it");
   assert.ok(summary.classList.contains("verdict-line"));
 
