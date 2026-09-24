@@ -619,20 +619,34 @@ const rule = (id, name, status, extra = {}) => ({
   ...extra,
 });
 
+/**
+ * A suggestion now targets the SAME tool whose session showed the problem, so
+ * this fixture's `pressure` finding carries suggestion facts matching
+ * whichever CLI it is attached to — the same thing `annotateSuggestions`
+ * (server.js) would stamp on it.
+ */
+const pressureFor = (cli, cliName) => rule("context-pressure", "Context pressure", "observed", {
+  fix: "claude-auto-compact",
+  suggestionAvailable: true,
+  suggestionTool: cli,
+  suggestionToolName: cliName,
+});
+
 /** Six sessions whose health and issues differ, so each filter has something to cut. */
 function mixedCorpus() {
   const base = corpusOf(6);
-  const pressure = rule("context-pressure", "Context pressure", "observed", { fix: "claude-auto-compact", fixCli: "claude", fixCliName: "Claude Code" });
+  const pressureClaude = pressureFor("claude", "Claude Code");
+  const pressureCodex = pressureFor("codex", "Codex");
   const repeats = rule("repeat-reads", "Repeated reads", "observed");
   const blind = rule("subagent-concurrency", "High sub-agent concurrency", "unknown");
   const clean = rule("cache-reuse", "Cache reuse", "not-observed");
   const shapes = [
-    { rules: [pressure, clean], score: { total: 2, passed: 1, observed: 1, unknown: 0 } },
+    { rules: [pressureClaude, clean], score: { total: 2, passed: 1, observed: 1, unknown: 0 } },
     { rules: [repeats, blind], score: { total: 2, passed: 0, observed: 1, unknown: 1 } },
-    { rules: [pressure, repeats], score: { total: 2, passed: 0, observed: 2, unknown: 0 } },
+    { rules: [pressureClaude, repeats], score: { total: 2, passed: 0, observed: 2, unknown: 0 } },
     { rules: [blind, clean], score: { total: 2, passed: 1, observed: 0, unknown: 1 } },
     { rules: [clean], score: { total: 1, passed: 1, observed: 0, unknown: 0 } },
-    { rules: [pressure], score: { total: 1, passed: 0, observed: 1, unknown: 0 }, cli: "codex", cliName: "Codex", model: null },
+    { rules: [pressureCodex], score: { total: 1, passed: 0, observed: 1, unknown: 0 }, cli: "codex", cliName: "Codex", model: null },
   ];
   return base.map((session, index) => ({ ...session, ...shapes[index] }));
 }
@@ -707,9 +721,9 @@ test("the detail panel's four tabs each switch to their own real content", () =>
   assert.equal(withClass(panel(), "tab-button").length, 4);
   assert.equal(content().dataset.tab, "diagnosis");
   assert.match(content().textContent, /Context pressure/);
-  // A Codex finding whose only fix changes Claude Code's settings is not offered as a fix for Codex.
-  assert.match(content().textContent, /Recommendation only/);
-  assert.doesNotMatch(content().textContent, /Fix available for your CLI/);
+  // A suggestion now targets the SAME tool whose session showed the
+  // problem, so this Codex finding gets its own Codex-targeted suggestion.
+  assert.match(content().textContent, /Suggested change for Codex/);
 
   fire(tab("evidence"));
   assert.equal(content().dataset.tab, "evidence");
@@ -734,11 +748,11 @@ test("the detail panel's four tabs each switch to their own real content", () =>
   assert.equal(panel(), undefined);
 });
 
-test("a session whose fix targets its own CLI says the fix is available for it", () => {
+test("a session whose finding has a suggestion targeting its own CLI says so", () => {
   const corpus = mixedCorpus();
   const mount = paint(corpus, makeApi(corpus));
   fire(dataRows(mount).find((row) => row.dataset.sessionId === "s-0000"));
   const panel = withClass(mount, "detail-panel")[0];
-  assert.match(panel.textContent, /Fix available for your CLI/);
+  assert.match(panel.textContent, /Suggested change for Claude Code/);
   fire(withClass(panel, "button").find((node) => node.textContent === "Close"));
 });

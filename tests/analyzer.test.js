@@ -5,7 +5,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { RULES, evaluateRule, EVIDENCE_STATUSES } from "../src/analyzer/rules.js";
 import { analyzeSession, analyzeAll, buildReportInput } from "../src/analyzer/health.js";
 import { generateReport, generateReportDocument } from "../src/report/generator.js";
-import { FIX_CATALOG, annotateFixTitles } from "../src/server.js";
+import { annotateSuggestions } from "../src/server.js";
+import { listSuggestionIds, TOOL_IDS } from "../src/suggestions/index.js";
 import {
   at,
   makeSession,
@@ -48,32 +49,34 @@ import {
 
 const RULE_IDS = ["context-pressure", "cache-hit", "repeat-tool", "large-tool-result", "long-rising-context", "subagent-concurrency"];
 
-test("the server catalogue publishes each fix target CLI name and null for unknown data", () => {
-  assert.equal(FIX_CATALOG.length, 5);
-  assert.ok(FIX_CATALOG.every((fix) => fix.cli === "claude"));
+test("annotateSuggestions targets the session's own CLI and null for a session whose CLI SessionRx does not suggest for", () => {
+  const suggestionIds = listSuggestionIds();
+  assert.equal(suggestionIds.length, 5);
+  assert.ok(TOOL_IDS.includes("claude"));
 
-  const rules = FIX_CATALOG.map((fix) => ({ fix: fix.id }));
+  const rules = suggestionIds.map((id) => ({ fix: id }));
   rules.push({ fix: "not-a-real-fix" }, { fix: null });
   const sessions = [{ cli: "claude", rules }];
-  annotateFixTitles(
-    sessions,
-    new Map(FIX_CATALOG.map((fix) => [fix.id, fix])),
-    new Map([["claude", "Claude Code"]]),
-  );
+  annotateSuggestions(sessions, new Map([["claude", "Claude Code"]]));
 
-  for (let index = 0; index < FIX_CATALOG.length; index += 1) {
-    assert.equal(sessions[0].rules[index].fixCli, "claude");
-    assert.equal(sessions[0].rules[index].fixCliName, "Claude Code");
+  for (let index = 0; index < suggestionIds.length; index += 1) {
+    assert.equal(sessions[0].rules[index].suggestionAvailable, true);
+    assert.equal(sessions[0].rules[index].suggestionTool, "claude");
+    assert.equal(sessions[0].rules[index].suggestionToolName, "Claude Code");
   }
-  assert.equal(sessions[0].rules[5].fixCli, null);
-  assert.equal(sessions[0].rules[5].fixCliName, null);
-  assert.equal(sessions[0].rules[6].fixCli, null);
-  assert.equal(sessions[0].rules[6].fixCliName, null);
+  // "not-a-real-fix" names no suggestion definition, so it is announced as
+  // unavailable rather than pointed at a made-up remedy.
+  assert.equal(sessions[0].rules[5].suggestionAvailable, false);
+  // A rule with no `fix` id at all carries no suggestion facts either way.
+  assert.equal(sessions[0].rules[6].suggestionAvailable, false);
+  assert.equal(sessions[0].rules[6].suggestionUnavailableReason, null);
   assert.equal(sessions[0].cliName, "Claude Code");
 
-  const unknownSession = [{ cli: "not-a-cli", rules: [] }];
-  annotateFixTitles(unknownSession, new Map(), new Map());
-  assert.equal(unknownSession[0].cliName, null);
+  const unsupportedSession = [{ cli: "gemini", rules: [{ fix: suggestionIds[0] }] }];
+  annotateSuggestions(unsupportedSession, new Map());
+  assert.equal(unsupportedSession[0].cliName, null);
+  assert.equal(unsupportedSession[0].rules[0].suggestionAvailable, false);
+  assert.equal(unsupportedSession[0].rules[0].suggestionTool, null);
 });
 
 function ruleById(id) {

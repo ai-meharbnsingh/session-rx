@@ -39,7 +39,7 @@
  */
 
 import { rangeQuery, registerPage, api as appApi } from '../app.js';
-import { openFixModal } from '../components/fix-modal.js';
+import { openSuggestionPanel } from '../components/suggestion-panel.js';
 import { dateText, duration, el as uiEl, healthNode, cliIcon, icon, ruleLabel, scoreParts, severity, button as uiButton, sparkline as uiSparkline } from '../components/ui.js';
 import {
   callout,
@@ -630,8 +630,8 @@ async function loadNextPage(api, redraw) {
     absorb(payload, false);
     state.error = null;
   } catch (error) {
-    // app.js's request helper has already turned a dead server or a stale CSRF
-    // nonce into a sentence a person can act on; it is shown verbatim.
+    // app.js's request helper has already turned a dead server into a
+    // sentence a person can act on; it is shown verbatim.
     state.error = error?.message || 'The next page of sessions could not be loaded.';
     state.requested.delete(offset);
   } finally {
@@ -950,13 +950,12 @@ function factRow(label, value, why) {
   return wrap;
 }
 
-/** Whether a rule's fix changes the settings of the CLI the session came from. */
+/** Whether SessionRx can offer a suggestion for the tool this session used. */
 function fixScopeChip(session, rule) {
-  if (rule?.fixCli && rule.fixCli === session?.cli) return el('span', 'rx-chip', 'Fix available for your CLI');
-  const target = rule?.fixCliName || rule?.fixCli || 'another CLI';
+  if (rule?.suggestionAvailable) return el('span', 'rx-chip', `Suggested change for ${rule.suggestionToolName || rule.suggestionTool || 'this CLI'}`);
   const source = session?.cliName || session?.cli || 'this CLI';
-  const chip = el('span', 'rx-chip rx-chip-muted', 'Recommendation only');
-  chip.title = `No automated fix exists for ${source}. The available fix changes ${target}'s settings instead.`;
+  const chip = el('span', 'rx-chip rx-chip-muted', 'No suggested change');
+  chip.title = `SessionRx has no suggested change for ${source}.`;
   return chip;
 }
 
@@ -979,10 +978,11 @@ function diagnosisTab(session, api) {
   if (unknown.length) box.append(el('p', 'not-measured', `${unknown.length} check${unknown.length === 1 ? '' : 's'} could not be measured. They are not passes.`));
   const suggested = observed.filter((rule) => rule.fix);
   if (suggested.length) {
-    box.append(el('h3', '', 'Suggested fixes'));
+    box.append(el('h3', '', 'Suggested changes'));
     suggested.forEach((rule) => {
-      const review = uiButton('Review fix');
-      review.addEventListener('click', () => openFixModal({ fixId: rule.fix, rule, session, api }));
+      const review = uiButton('View suggestion');
+      review.disabled = !rule.suggestionAvailable;
+      review.addEventListener('click', () => openSuggestionPanel({ id: rule.fix, toolId: rule.suggestionTool, title: rule.suggestionTitle || ruleLabel(rule), api }));
       const row = el('div', 'fix-row');
       row.append(el('span', 'fix-title', ruleLabel(rule)), fixScopeChip(session, rule), review);
       box.append(row);

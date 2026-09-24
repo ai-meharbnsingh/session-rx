@@ -1,6 +1,16 @@
+/**
+ * Suggestions page — every suggestion SessionRx can offer, grouped by tool.
+ *
+ * SessionRx never writes a user's files. For each observed finding that
+ * names a suggestion, this page shows the plain-language summary, a
+ * Global / Project switch, the target, the preview text, and a "Copy
+ * request" button that copies a ready-to-paste message for the user's own
+ * AI coding tool. Nothing here implies SessionRx changed anything itself.
+ */
+
 import { rangeQuery, registerPage } from '../app.js';
-import { openFixModal } from '../components/fix-modal.js';
-import { button, el, icon, observedRules, plainText, ruleLabel, severity } from '../components/ui.js';
+import { copyToClipboard } from '../components/suggestion-panel.js';
+import { button, el, icon, observedRules, ruleLabel, severity } from '../components/ui.js';
 
 function iconBadge(name) {
   const badge = el('span', 'rx-icon');
@@ -14,277 +24,172 @@ function sectionTitle(title, iconName, tone = 'accent') {
   return node;
 }
 
-function diffView(diff) {
-  const box = el('div', 'diff-box');
-  const raw = typeof diff === 'string' ? diff : '';
-  if (!raw) { box.append(el('p', 'not-measured', 'The fix did not return a preview.')); return box; }
-  raw.split('\n').forEach((line, index) => {
-    const kind = line.startsWith('+') ? 'ins' : line.startsWith('-') ? 'del' : line.startsWith('@@') ? 'hunk' : '';
-    const row = el('span', `diff-line ${kind}`);
-    row.append(el('span', 'diff-number', String(index + 1).padStart(3, ' ')), document.createTextNode(line)); box.append(row);
-  });
+function callout(kind, title, message) {
+  const box = el('div', `callout callout-${kind}`);
+  box.append(el('p', 'callout-title', title));
+  if (message) box.append(el('p', '', message));
   return box;
 }
 
-const CATEGORIES = ['All issues', 'Configuration', 'Context & memory', 'Tool usage', 'Performance'];
-
-/**
- * Whether one catalogue fix is in place on this machine, as exactly one of
- * three answers: applied | not-applied | unknown. There is no fourth.
- *
- * WHY THE PAGE HAS TO ASK: the health verdicts cannot answer this. A fix that
- * worked makes its own finding stop being observed, so a page that reads only
- * the verdicts loses sight of every fix the user applied — which is the one
- * list they need to undo anything.
- *
- * `unknown` is not "not applied" and is never a pass: a check that could not
- * run, a fix that could not be loaded, and a request that failed all land here
- * carrying the reason they gave, which the UI then puts on screen.
- *
- * @returns {Promise<{id: string, title: string, state: string, detail: ?string}>}
- */
-async function fixApplyState(api, fix) {
-  const id = String(fix?.id ?? '');
-  const title = fix?.title || id;
-  const firstText = (...values) => values.find((value) => typeof value === 'string' && value.length) || null;
-  if (fix?.available === false) {
-    return { id, title, state: 'unknown', detail: firstText(fix?.reason) || 'this fix could not be loaded on this machine' };
-  }
-  let checked;
-  try {
-    checked = await api.get(`/api/fixes/${encodeURIComponent(id)}/check`);
-  } catch (error) {
-    return { id, title, state: 'unknown', detail: firstText(error?.message) || 'the check could not be reached' };
-  }
-  const status = typeof checked?.status === 'string' ? checked.status : null;
-  const said = firstText(checked?.message, checked?.reason);
-  const detail = said && checked?.reason && checked.message ? `${checked.message} (${checked.reason})` : said;
-  if (status === 'unknown') return { id, title, state: 'unknown', detail: detail || 'the check did not say why' };
-  if (status === 'applied' || checked?.applied === true) {
-    // A drifted-but-applied fix keeps its reason visible: the file moved under it.
-    return { id, title, state: 'applied', detail: checked?.drifted === true ? detail : null };
-  }
-  if (status === 'not-applied' || checked?.applied === false) return { id, title, state: 'not-applied', detail: null };
-  return { id, title, state: 'unknown', detail: 'the check did not report whether this fix is in place' };
+function statusNote(suggestion) {
+  const status = suggestion?.status;
+  if (status === 'already-added') return callout('ok', 'Already added', `SessionRx found this marker in ${suggestion.targetLabel || 'the target'} already.`);
+  if (status === 'not-added') return callout('info', 'Not added yet', null);
+  const reason = suggestion?.statusReason;
+  const why = reason === 'project-path-not-resolvable'
+    ? 'SessionRx cannot resolve a project path from here.'
+    : reason === 'no-local-file'
+      ? 'This target is not a local file SessionRx can read.'
+      : 'SessionRx could not determine whether this is already added.';
+  return callout('unknown', 'Could not be checked', `${why} That is not the same as "not added".`);
 }
 
-/**
- * Ask about every catalogue fix that can be applied at all.
- *
- * Returns `null` — not an empty list — when there is no client to ask with, so
- * a caller renders nothing rather than an empty list that would read as "you
- * have applied none of these".
- */
-async function fixApplyStates(api, catalog) {
-  if (!api || typeof api.get !== 'function') return null;
-  const rows = (catalog || []).filter((fix) => fix?.id && fix?.applyable !== false);
-  if (!rows.length) return [];
-  return Promise.all(rows.map((fix) => fixApplyState(api, fix)));
-}
+/** One suggestion card: summary, scope switch, target, preview, copy button. */
+function suggestionCard(suggestion, api, { id, toolId }) {
+  const card = el('article', 'rx-card suggestion-card');
+  card.dataset.suggestionId = id;
+  card.dataset.tool = toolId;
 
-/** The fixes already in place, each under the one action that reverses it. */
-function appliedFixesSection(states, api) {
-  const applied = states.filter((row) => row.state === 'applied');
-  if (!applied.length) return null;
-  const section = el('section', 'rx-card applied-fixes');
-  section.append(sectionTitle('Applied fixes', 'fixes'));
-  section.append(el('p', 'rx-label', applied.length === 1
-    ? 'One fix is in place on this machine. Undo restores the file it changed.'
-    : `${applied.length} fixes are in place on this machine. Undo restores the file each one changed.`));
-  const strip = el('div', 'rx-grid rx-grid-even');
-  // No slice: a user must be able to reach every fix they applied, not the first few.
-  applied.forEach((row) => {
-    const item = el('article', 'rx-card applied-fix');
-    item.dataset.fixId = row.id;
-    item.append(el('h3', '', row.title));
-    if (row.detail) item.append(el('p', 'not-measured', row.detail));
-    const undo = button('Undo', 'button button-sm');
-    undo.dataset.action = 'undo-fix';
-    undo.dataset.fixId = row.id;
-    undo.setAttribute('aria-label', `Undo ${row.title}`);
-    undo.addEventListener('click', () => openFixModal({ fixId: row.id, api }));
-    item.append(undo);
-    strip.append(item);
+  if (suggestion?.available === false) {
+    card.append(el('h3', '', 'No suggested change for this tool'), el('p', 'not-measured', suggestion.message || ''));
+    return card;
+  }
+
+  card.append(el('h3', '', suggestion.title || id));
+  card.append(el('p', 'suggestion-summary', suggestion.plainSummary || ''));
+
+  const scopeState = { scope: suggestion.scope || 'global' };
+  const switcher = el('div', 'scope-switch');
+  switcher.setAttribute('role', 'group');
+  switcher.setAttribute('aria-label', 'Global or project');
+  const body = el('div', 'suggestion-body');
+
+  async function renderScope(scope) {
+    body.replaceChildren(el('p', 'empty-state', 'Loading…'));
+    let fetched = suggestion;
+    if (scope !== suggestion.scope) {
+      try {
+        const payload = await api.get(`/api/suggestions?id=${encodeURIComponent(id)}&tool=${encodeURIComponent(toolId)}&scope=${encodeURIComponent(scope)}`);
+        fetched = Array.isArray(payload?.suggestions) ? payload.suggestions[0] : null;
+      } catch (error) {
+        body.replaceChildren(callout('error', 'Could not load this suggestion', error?.message || ''));
+        return;
+      }
+    }
+    if (!fetched) {
+      body.replaceChildren(callout('error', 'No suggestion found', ''));
+      return;
+    }
+    body.replaceChildren();
+    const target = el('p', 'suggestion-target');
+    target.append(el('strong', '', 'Target: '), document.createTextNode(fetched.targetLabel || 'not resolved'));
+    body.append(target);
+    body.append(statusNote(fetched));
+    const pre = el('pre', 'diff');
+    pre.textContent = fetched.preview || '';
+    body.append(el('h4', '', 'preview'), pre);
+
+    const actions = el('div', 'toolbar');
+    const copyBtn = button('Copy request', 'button button-primary button-sm');
+    const status = el('span', 'copy-status', '');
+    copyBtn.addEventListener('click', async () => {
+      const ok = await copyToClipboard(fetched.request || '');
+      status.textContent = ok ? 'Copied.' : 'Could not copy automatically — select the text below and copy it.';
+    });
+    actions.append(copyBtn, status);
+    body.append(actions);
+
+    const requestBox = el('pre', 'diff');
+    requestBox.textContent = fetched.request || '';
+    body.append(el('h4', '', 'request'), requestBox);
+  }
+
+  ['global', 'project'].forEach((scope) => {
+    const scopeButton = button(scope === 'global' ? 'Global' : 'Project', `button button-sm${scope === scopeState.scope ? ' is-active' : ''}`);
+    scopeButton.setAttribute('aria-pressed', scope === scopeState.scope ? 'true' : 'false');
+    scopeButton.addEventListener('click', () => {
+      if (scope === scopeState.scope) return;
+      scopeState.scope = scope;
+      switcher.querySelectorAll('button').forEach((btn) => btn.classList.remove('is-active'));
+      scopeButton.classList.add('is-active');
+      renderScope(scope);
+    });
+    switcher.append(scopeButton);
   });
-  section.append(strip);
-  return section;
-}
-
-/** The third state, on screen with its reason — never folded into either of the other two. */
-function uncheckedFixesSection(states, api) {
-  const unknown = states.filter((row) => row.state === 'unknown');
-  if (!unknown.length) return null;
-  const section = el('section', 'rx-card unchecked-fixes');
-  section.append(sectionTitle('Fixes that could not be checked', 'fixes'));
-  section.append(el('p', 'not-measured', 'Whether these are already in place could not be worked out. That is not the same as "not applied", and it is not a pass.'));
-  const strip = el('div', 'rx-grid rx-grid-even');
-  unknown.forEach((row) => {
-    const item = el('article', 'rx-card unchecked-fix');
-    item.dataset.fixId = row.id;
-    item.append(el('h3', '', row.title));
-    item.append(el('p', 'not-measured', row.detail || 'no reason was recorded'));
-    const open = button('Open fix', 'button button-sm');
-    open.dataset.action = 'open-fix';
-    open.dataset.fixId = row.id;
-    open.setAttribute('aria-label', `Open ${row.title}`);
-    open.addEventListener('click', () => openFixModal({ fixId: row.id, api }));
-    item.append(open);
-    strip.append(item);
-  });
-  section.append(strip);
-  return section;
-}
-
-function inCategory(name, { rule }) {
-  if (name === 'All issues') return true;
-  const words = `${rule?.name || ''} ${rule?.fix || ''}`.toLowerCase();
-  if (name === 'Configuration') return words.includes('compact') || words.includes('config');
-  if (name === 'Context & memory') return words.includes('context') || words.includes('worker') || words.includes('agent');
-  if (name === 'Tool usage') return words.includes('tool') || words.includes('repeat') || words.includes('batch');
-  return words.includes('long') || words.includes('cache') || words.includes('performance');
-}
-
-/** The hash for one issue within one category; the category is kept across Previous/Next. */
-function fixesHash(category, issue) {
-  const query = new URLSearchParams();
-  if (category && category !== 'All issues') query.set('cat', category);
-  query.set('issue', String(issue));
-  return `#/fixes?${query}`;
-}
-
-/**
- * Whether the fix changes the settings of the CLI the finding came from.
- * `rule.fixCli` is stamped by the server (annotateFixTitles); the catalogue
- * supplies the same target when the finding has no session attached.
- */
-function fixScopeChip(session, rule, descriptor) {
-  const fixCli = rule?.fixCli || descriptor?.cli;
-  if (!fixCli) return el('span', 'rx-chip rx-chip-muted', 'Fix target not measured');
-  if (session && session.cli === fixCli) return el('span', 'rx-chip', 'Fix available for your CLI');
-  return el('span', 'rx-chip rx-chip-muted', 'Recommendation only');
-}
-
-function issueNavigation(index, total, category) {
-  const nav = el('div', 'issue-nav');
-  const previous = button('‹ Previous', 'button button-sm'); previous.disabled = index <= 0;
-  previous.addEventListener('click', () => { location.hash = fixesHash(category, index - 1); });
-  const next = button('Next ›', 'button button-sm'); next.disabled = index >= total - 1;
-  next.addEventListener('click', () => { location.hash = fixesHash(category, index + 1); });
-  nav.append(previous, el('span', 'rx-label', total ? `Issue ${index + 1} of ${total}` : 'No observed fixable issues'), next);
-  return nav;
+  card.append(switcher, body);
+  renderScope(scopeState.scope);
+  return card;
 }
 
 async function renderFixes(mount, data, ctx = {}) {
   if (!mount) return;
   const api = ctx.api;
   const health = data?.health || await api.get(`/api/health${rangeQuery('/api/health')}`);
-  const fixesPayload = data?.fixes || await api.get('/api/fixes');
+  const toolsPayload = await api.get('/api/suggestions?scope=global');
+  const tools = Array.isArray(toolsPayload?.tools) ? toolsPayload.tools : [];
+
   const allItems = observedRules(health?.sessions || []).filter((item) => item.rule?.fix);
-  const catalog = fixesPayload?.fixes || [];
-  const query = new URLSearchParams(location.hash.split('?')[1] || '');
-  const category = CATEGORIES.includes(query.get('cat')) ? query.get('cat') : 'All issues';
-  const items = allItems.filter((item) => inCategory(category, item));
-  const requestedIndex = Number(query.get('issue') || 0);
-  const selectedIndex = Math.min(Number.isFinite(requestedIndex) ? Math.max(0, requestedIndex) : 0, Math.max(0, items.length - 1));
-  const selected = items[selectedIndex] || null;
-  const fixId = selected?.rule?.fix || null;
-  const descriptor = fixId ? catalog.find((fix) => fix.id === fixId) || null : null;
-  const hasCliInventory = Array.isArray(health?.collectors);
-  const installedClis = new Set((hasCliInventory ? health.collectors : []).filter((entry) => entry?.installed === true).map((entry) => entry.cli));
-  const installedCatalog = hasCliInventory ? catalog.filter((fix) => installedClis.has(fix?.cli)) : [];
-  let preview = null;
-  if (fixId) { try { preview = await api.post(`/api/fixes/${encodeURIComponent(fixId)}/preview`, {}); } catch (error) { preview = { error: error?.message || 'Preview unavailable' }; } }
-  // Which fixes are already in place. Asked of the server, because the health
-  // verdicts cannot say: a fix that worked stops its own finding being observed.
-  const states = await fixApplyStates(api, catalog) || [];
-  const stateById = new Map(states.map((row) => [row.id, row.state]));
+  // Group by (fix id, target tool) — one card per distinct suggestion a
+  // finding actually offers, never duplicated per session.
+  const byKey = new Map();
+  allItems.forEach((item) => {
+    const id = item.rule.fix;
+    const toolId = item.rule.suggestionTool;
+    if (!id || !toolId) return;
+    const key = `${id}::${toolId}`;
+    if (!byKey.has(key)) byKey.set(key, { id, toolId, title: item.rule.suggestionTitle || ruleLabel(item.rule), count: 0, sample: item });
+    byKey.get(key).count += 1;
+  });
 
   const root = el('div', 'rx-page');
-  const top = el('div', 'rx-card-head'); const back = el('a', '', 'Back to issues'); back.href = '#/health';
-  top.append(back, issueNavigation(selectedIndex, items.length, category)); root.append(top);
-  const layout = el('div', 'fix-layout');
-  const steps = el('aside', 'rx-card step-list'); steps.append(sectionTitle('Fix workflow', 'fixes'));
-  [['Diagnose', 'Issues detected from your sessions', 'done'], ['Review & Fix', 'Apply a targeted change', 'active'], ['Verify', 'Continue with a healthier setup', '']].forEach(([name, copy, kind], index) => { const step = el('div', `step ${kind}`); step.append(el('strong', '', `${index + 1}. ${name}`), el('small', '', copy)); steps.append(step); });
-  const categories = el('div', 'filter-group'); categories.append(el('h3', '', 'Issue categories'));
-  CATEGORIES.forEach((name) => {
-    const choice = button(`${name} (${allItems.filter((item) => inCategory(name, item)).length})`, `filter-option${name === category ? ' is-active' : ''}`);
-    choice.dataset.category = name;
-    choice.setAttribute('aria-pressed', name === category ? 'true' : 'false');
-    choice.addEventListener('click', () => { location.hash = fixesHash(name, 0); });
-    categories.append(choice);
-  });
-  steps.append(categories); layout.append(steps);
+  const head = el('div', 'rx-card-head');
+  head.append(el('h1', '', 'Suggestions'));
+  head.append(el('p', 'rx-label', 'SessionRx never changes your files. Each suggestion below is a preview and a '
+    + 'ready-to-paste request for your own AI coding tool to act on.'));
+  root.append(head);
 
-  const detail = el('main', 'rx-card');
-  if (!selected) detail.append(el('h2', '', 'No observed fixable issue'), el('p', 'not-measured', category === 'All issues' ? 'No rule with an available fix was observed in the current scan.' : `No rule with an available fix was observed in the "${category}" category.`));
-  else {
-    detail.append(el('span', `severity ${severity(selected.rule).toLowerCase()}`, severity(selected.rule)), el('h1', 'issue-title', ruleLabel(selected.rule)));
-    const problem = plainText(selected.rule, 'problem'); if (problem) detail.append(el('p', '', problem));
-    const why = plainText(selected.rule, 'why'); if (why) { const section = el('section', 'rx-card'); section.append(el('h3', '', 'Why this happens'), el('p', '', why)); detail.append(section); }
-    const benefit = plainText(selected.rule, 'benefit'); if (benefit) { const section = el('section', 'benefit'); section.append(el('h3', '', 'Expected benefit'), el('p', '', benefit)); detail.append(section); }
-    const count = items.filter((item) => item.rule?.fix === selected.rule?.fix).length;
-    detail.append(sectionTitle('Occurrences in recent sessions', 'trends'));
-    // Real per-day counts. The previous version invented bar heights from an
-    // index, which drew a shape no data supported — on a tool whose whole claim
-    // is that it never shows a number it cannot justify.
-    const dayKey = (item) => { const raw = item?.session?.startedAt; const when = raw ? new Date(raw) : null; return when && !Number.isNaN(when.getTime()) ? when.toISOString().slice(0, 10) : null; };
-    const dated = items.filter((item) => dayKey(item) !== null);
-    if (!dated.length) {
-      detail.append(el('p', 'not-measured', 'These findings carry no session start time, so they cannot be placed on a timeline. The total below is still exact.'));
-    } else {
-      const byDay = new Map();
-      dated.forEach((item) => { const key = dayKey(item); const slot = byDay.get(key) || { mine: 0, other: 0 }; if (item.rule?.fix === selected.rule?.fix) slot.mine += 1; else slot.other += 1; byDay.set(key, slot); });
-      const days = [...byDay.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1).slice(-14);
-      const peak = Math.max(1, ...days.map(([, slot]) => slot.mine + slot.other));
-      const chart = el('div', 'occurrence-chart');
-      days.forEach(([day, slot]) => {
-        const column = el('span', 'occurrence-col');
-        column.title = `${day}: ${slot.mine} of this issue, ${slot.other} other`;
-        const mine = el('span', 'occurrence-bar occurrence-mine'); mine.style.height = `${slot.mine / peak * 100}%`;
-        const other = el('span', 'occurrence-bar occurrence-other'); other.style.height = `${slot.other / peak * 100}%`;
-        column.append(other, mine); chart.append(column);
-      });
-      const legend = el('p', 'occurrence-legend');
-      legend.append(el('span', 'legend-key legend-mine', 'this issue'), el('span', 'legend-key legend-other', 'other issues'));
-      detail.append(chart, legend);
-    }
-    detail.append(el('p', 'rx-label', `${count} observed finding(s) in the loaded health view`));
+  if (!byKey.size) {
+    root.append(el('p', 'not-measured', 'No observed finding with a suggested change was found in the current scan.'));
+    mount.replaceChildren(root);
+    return;
   }
-  layout.append(detail);
 
-  const proposed = el('aside', 'rx-card fix-proposed'); proposed.append(sectionTitle('Proposed fix', 'fixes'), fixScopeChip(selected?.session, selected?.rule, descriptor), el('p', '', descriptor?.title || 'No fix proposed without an observed finding'));
-  proposed.append(el('p', 'rx-label', preview?.targets?.[0]?.display || preview?.files_affected?.[0] || 'Target file not measured'));
-  if (selected?.session && selected.rule?.fixCli && selected.session.cli !== selected.rule.fixCli) proposed.append(el('p', 'local-note', `This finding came from ${selected.session.cliName || selected.session.cli || 'one CLI'}; no automated fix exists for it. The proposed fix changes ${selected.rule.fixCliName || selected.rule.fixCli}'s settings instead.`));
-  proposed.append(preview?.error ? el('p', 'not-measured', preview.error) : diffView(preview?.diff));
-  // One button, one honest label. The modal is the whole workflow — it shows the
-  // exact change, applies it only on a second click, and offers Undo once it is
-  // applied — so three page buttons that all opened it were three promises of
-  // different actions kept by the same one.
-  const actions = el('div', 'toolbar');
-  const review = button('Review fix', 'button button-primary');
-  review.dataset.action = 'review-fix';
-  review.disabled = !fixId;
-  review.addEventListener('click', () => openFixModal({ fixId, rule: selected?.rule, session: selected?.session, api }));
-  actions.append(review);
-  actions.append(el('span', 'local-note', 'Opens the fix: check the exact change, apply it, and undo it from the same window. Only local files are changed. Nothing is sent anywhere.')); proposed.append(actions); layout.append(proposed); root.append(layout);
+  // Group cards by tool, since a suggestion always targets the tool whose
+  // session showed the problem.
+  const byTool = new Map();
+  for (const entry of byKey.values()) {
+    if (!byTool.has(entry.toolId)) byTool.set(entry.toolId, []);
+    byTool.get(entry.toolId).push(entry);
+  }
 
-  // Applied and could-not-check come FIRST, and are named for what they are.
-  // Until this existed, a fix the user had applied survived only as an
-  // unlabelled card in the recommendation strip below, six deep and capped.
-  const applied = appliedFixesSection(states, api);
-  if (applied) root.append(applied);
-  const unchecked = uncheckedFixesSection(states, api);
-  if (unchecked) root.append(unchecked);
+  for (const [toolId, entries] of byTool) {
+    const toolLabel = tools.find((t) => t.id === toolId)?.label || toolId;
+    const section = el('section', 'rx-card');
+    section.append(sectionTitle(`${toolLabel} (${entries.length})`, 'fixes'));
+    const grid = el('div', 'rx-grid rx-grid-even');
+    for (const entry of entries) {
+      let suggestion = null;
+      try {
+        const payload = await api.get(`/api/suggestions?id=${encodeURIComponent(entry.id)}&tool=${encodeURIComponent(entry.toolId)}&scope=global`);
+        suggestion = Array.isArray(payload?.suggestions) ? payload.suggestions[0] : null;
+      } catch {
+        suggestion = null;
+      }
+      if (!suggestion) {
+        const card = el('article', 'rx-card');
+        card.append(el('h3', '', entry.title), el('p', 'not-measured', 'This suggestion could not be loaded.'));
+        grid.append(card);
+        continue;
+      }
+      const card = suggestionCard(suggestion, api, { id: entry.id, toolId: entry.toolId });
+      card.append(el('p', 'rx-label', `${entry.count} occurrence(s) in the loaded health view · ${severity(entry.sample.rule)}`));
+      grid.append(card);
+    }
+    section.append(grid);
+    root.append(section);
+  }
 
-  const other = el('section', 'rx-card'); other.append(sectionTitle('Other recommended fixes', 'fixes'));
-  if (!hasCliInventory) other.append(el('p', 'not-measured', 'Installed CLI inventory was not measured, so no fixes can be recommended.'));
-  const strip = el('div', 'rx-grid rx-grid-even');
-  // A fix already in place, or one whose state could not be read, is shown in
-  // its own group above; recommending it here as well would say two things.
-  installedCatalog.filter((fix) => fix.id !== fixId && stateById.get(fix.id) !== 'applied' && stateById.get(fix.id) !== 'unknown').slice(0, 6).forEach((fix) => { const item = el('article', 'rx-card'); item.append(el('h3', '', fix.title)); const review = button('Review'); const found = allItems.findIndex((candidate) => candidate.rule?.fix === fix.id);
-    // A fix no session triggered has no issue page to jump to; open the fix itself rather than landing on an unrelated issue.
-    review.addEventListener('click', () => { if (found >= 0) location.hash = fixesHash('All issues', found); else openFixModal({ fixId: fix.id, api }); }); item.append(review); strip.append(item); });
-  other.append(strip); root.append(other); mount.replaceChildren(root);
+  mount.replaceChildren(root);
 }
 
 registerPage('fixes', renderFixes);

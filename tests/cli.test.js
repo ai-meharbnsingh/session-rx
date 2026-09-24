@@ -351,8 +351,8 @@ describe("the CLI as a real process — help and clean", () => {
     const { code, stdout } = runCli(["--help"]);
     assert.equal(code, 0);
     assert.match(stdout, /session-rx clean \[--yes\]/, "usage must show the subcommand");
-    assert.match(stdout, /clean\s+remove SessionRx's own undo history/);
-    assert.match(stdout, /can no longer be undone/, "--help must say what cleaning costs");
+    assert.match(stdout, /clean\s+remove SessionRx's own leftover data/);
+    assert.match(stdout, /backups an earlier version made/, "--help must say what cleaning costs");
   });
 
   it("`clean` against a home with no state directory exits 0 and starts no server", async () => {

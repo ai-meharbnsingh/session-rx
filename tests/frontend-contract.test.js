@@ -41,9 +41,9 @@ const VENDOR_FILE = path.join(PUBLIC, "vendor", "chart.umd.min.js");
 // shipping session card is public/js/pages/health.js `sessionCard`, which part B
 // below asserts directly. RETIRED_COMPONENTS is audited too — a retired file
 // that came back would be a second implementation again.
-const COMPONENT_FILES = ["fix-modal.js", "chart.js"]
+const COMPONENT_FILES = ["suggestion-panel.js", "chart.js"]
   .map((name) => path.join(COMPONENTS, name));
-const RETIRED_COMPONENTS = ["health-card.js"].map((name) => path.join(COMPONENTS, name));
+const RETIRED_COMPONENTS = ["health-card.js", "fix-modal.js"].map((name) => path.join(COMPONENTS, name));
 const PAGE_FILES = ["health.js", "trends.js", "sessions.js", "report.js"]
   .map((name) => path.join(PUBLIC, "js", "pages", name));
 
@@ -291,7 +291,7 @@ function metaMap(card) {
 // rather than a component with no product caller.
 const healthPage = await import("../public/js/pages/health.js");
 const trendsPage = await import("../public/js/pages/trends.js");
-const fixModal = await import("../public/js/components/fix-modal.js");
+const suggestionPanel = await import("../public/js/components/suggestion-panel.js");
   const chart = await import("../public/js/components/chart.js");
 const overviewPage = await import("../public/js/pages/overview.js");
 const app = await import("../public/js/app.js");
@@ -681,7 +681,9 @@ test("index.html loads the vendored chart and nothing remote", () => {
   const html = read(path.join(PUBLIC, "index.html"));
   assert.match(html, /src="\/vendor\/chart\.umd\.min\.js"/, "must load the vendored chart");
   assert.match(html, /href="\/css\/style\.css"/, "must load the local stylesheet");
-  assert.match(html, /name="csrf-token"/, "must carry the CSRF meta the server rewrites (BP-005.13)");
+  // No CSRF meta any more: SessionRx has no mutating route left to defend
+  // (THE SUGGESTION CONTRACT), so the server injects no nonce into the page.
+  assert.doesNotMatch(html, /name="csrf-token"/);
   const srcs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]);
   const PNG = "data:image/png;base64,";
   for (const value of srcs) {
@@ -792,7 +794,7 @@ test("no component builds DOM from an HTML string (XSS audit; regex, limits stat
   for (const file of audited) {
     const src = stripJsComments(read(file));
     for (const sink of sinks) {
-      assert.ok(!sink.test(src), `${rel(file)} must not use ${sink} — this origin can POST fix-apply`);
+      assert.ok(!sink.test(src), `${rel(file)} must not use ${sink} — a suggestion's preview and request text render here`);
     }
   }
   assert.ok(audited.length >= COMPONENT_FILES.length);
@@ -839,11 +841,12 @@ const RULE = (over) => ({
   name: "Low cache hit",
   severity: "warn",
   fix: "claude-output-hygiene",
-  // The API publishes the human name next to the id (server.js
-  // `annotateFixTitles`); the page no longer keeps its own copy.
-  fixTitle: "Output hygiene instruction",
-  fixCli: "claude",
-  fixCliName: "Claude Code",
+  // The API publishes the human name and target tool next to the id
+  // (server.js `annotateSuggestions`); the page no longer keeps its own copy.
+  suggestionTitle: "Output hygiene instruction",
+  suggestionAvailable: true,
+  suggestionTool: "claude",
+  suggestionToolName: "Claude Code",
   threshold: { value: 0.85, derivation: "cacheRead / (cacheRead + cacheCreate) < 0.85" },
   magnitude: null,
   evidence: { status: "not-observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
@@ -1060,8 +1063,8 @@ test("the Fixes card's chip and sparkline never describe a different series from
   const mount = new ShimElement("main");
   return overviewPage.default(mount, health, { api: populatedOverviewApi }).then(() => {
     const cards = withClass(mount, "summary-card");
-    const fixesCard = cards.find((card) => /Fixes available/.test(card.textContent));
-    assert.ok(fixesCard, "the Fixes card must render");
+    const fixesCard = cards.find((card) => /Suggestions available/.test(card.textContent));
+    assert.ok(fixesCard, "the Suggestions card must render");
     assert.equal(withClass(fixesCard, "rx-number")[0].textContent, "3", "the value is the distinct-fix count");
 
     const chip = withClass(fixesCard, "rx-delta")[0];
@@ -1194,7 +1197,7 @@ test("an unknown verdict shows its reason and is styled as neither pass nor warn
   assert.ok(crit.classList.contains("verdict-critical"));
 });
 
-test("an observed finding offers [Preview] [Apply] [Skip]; an unmeasured check offers nothing", () => {
+test("an observed finding offers [View suggestion]; an unmeasured check offers nothing", () => {
   const api = {};
   const rerender = () => {};
   const buttonText = (root) => nodes(root)
@@ -1208,23 +1211,21 @@ test("an observed finding offers [Preview] [Apply] [Skip]; an unmeasured check o
   );
   assert.deepEqual(
     [...buttonText(observed)].sort(),
-    ["Apply", "Preview", "Skip"],
-    "the brief specifies exactly these three actions",
+    ["View suggestion"],
+    "SessionRx never applies or undoes anything, so the offer is a single view action",
   );
-  // Apply is the only primary action; Preview must not be the one-click path.
-  const apply = nodes(observed).find((node) => node.tagName === "BUTTON" && node.textContent.trim() === "Apply");
-  assert.ok(apply.className.includes("button-primary"));
-  assert.match(apply.getAttribute("aria-label") ?? "", /^Apply the fix for /);
+  const view = nodes(observed).find((node) => node.tagName === "BUTTON" && node.textContent.trim() === "View suggestion");
+  assert.match(view.getAttribute("aria-label") ?? "", /^View the suggested change for /);
 
   const unknown = renderCard(
     SESSION({ rules: [RULE({ evidence: { status: "unknown", reason: "no data", values: [], sources: [], derivation: null, parserVersion: "t" } })] }),
     api,
     rerender,
   );
-  assert.deepEqual(buttonText(unknown), [], "an unmeasured check must not offer a fix");
+  assert.deepEqual(buttonText(unknown), [], "an unmeasured check must not offer a suggestion");
   assert.equal(withClass(unknown, "verdict-actions").length, 0);
 
-  // Nor does a PASSING check, which has nothing to fix either.
+  // Nor does a PASSING check, which has nothing to suggest either.
   assert.deepEqual(buttonText(renderCard(SESSION({}), api, rerender)), []);
 });
 
@@ -1283,9 +1284,9 @@ test("a rule's default state is ONE line, and the honesty surface is not behind 
   // The fix offer is a sibling of the disclosure, never a child of it.
   const offer = withClass(row, "verdict-offer")[0];
   assert.ok(offer, "an observed finding offers its fix on its own line");
-  assert.ok(!isInside(offer, details), "[Preview] [Apply] [Skip] must never be behind a click");
-  assert.match(offer.textContent, /Output hygiene instruction/, "the offer names the fix, not just its id");
-  // No button inside the summary: a click on Apply must apply, not toggle.
+  assert.ok(!isInside(offer, details), "[View suggestion] must never be behind a click");
+  assert.match(offer.textContent, /Output hygiene instruction/, "the offer names the suggestion, not just its id");
+  // No button inside the summary: a click on View suggestion must open the panel, not toggle.
   assert.deepEqual(
     nodes(summary).filter((node) => node.tagName === "BUTTON").map((node) => node.textContent),
     [],
@@ -1429,43 +1430,12 @@ test("the header carries CLI, session, duration and turn count", () => {
   );
 });
 
-test("the fix diff reaches the DOM character-identical to the bytes the API returned", () => {
-  const diff = [
-    "--- a/.claude/CLAUDE.md",
-    "+++ b/.claude/CLAUDE.md",
-    "@@ -1,3 +1,8 @@",
-    " # existing heading",
-    "-removed line with  double  spaces",
-    "+<!-- session-rx:output-hygiene:v1 -->",
-    "+## SessionRx: output hygiene",
-    "+\tindented with a real tab",
-    "\\ No newline at end of file",
-    "",
-  ].join("\n");
-  const pre = fixModal.renderDiff(diff);
-  assert.equal(pre.textContent, diff, "the rendered text must equal the diff byte for byte");
-  assert.equal(pre.dataset.rendered, "verbatim");
-
-  // Colour comes from wrapping, never from rewriting.
-  const classes = pre.childNodes.filter((node) => node.className).map((node) => node.className);
-  assert.ok(classes.some((cls) => cls.includes("ins")), "added lines are marked");
-  assert.ok(classes.some((cls) => cls.includes("del")), "removed lines are marked");
-  assert.ok(classes.some((cls) => cls.includes("hunk")), "hunk headers are marked");
-  // `---`/`+++` are file headers, not a deletion and an addition.
-  assert.equal(pre.childNodes[0].className, "diff-line meta");
-  assert.equal(pre.childNodes[2].className, "diff-line meta");
-
-  // Markup inside a diff is text, not markup.
-  const hostile = '+<img src=x onerror="alert(1)">';
-  const escaped = fixModal.renderDiff(hostile);
-  assert.equal(escaped.textContent, hostile);
-  assert.equal(escaped.childNodes.length, 1);
-  assert.ok(!(escaped.childNodes[0] instanceof ShimElement) || escaped.childNodes[0].childNodes.length === 0);
-});
-
-test("an empty diff says the API returned none, rather than showing a blank box", () => {
-  const pre = fixModal.renderDiff("");
-  assert.match(pre.textContent, /no diff/i);
+test("copyToClipboard falls back to the textarea path and never throws when navigator.clipboard is absent", async () => {
+  // The DOM shim gives no `navigator.clipboard` and no real `execCommand`, so
+  // this exercises the exact fallback path a browser without Clipboard API
+  // access takes — and proves it resolves `false` rather than throwing.
+  const ok = await suggestionPanel.copyToClipboard("some request text");
+  assert.equal(typeof ok, "boolean");
 });
 
 test("a null data point breaks the line: spanGaps is false and the null survives", () => {

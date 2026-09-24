@@ -35,19 +35,17 @@ import { Collector, normalizeSession } from "../src/collectors/base.js";
 import { collectMany, detectMany } from "../src/collectors/registry.js";
 import {
   DEFAULT_SCAN_LIMIT,
-  FIX_CATALOG,
   HEALTH_CARD_LIMIT,
   LOOPBACK_HOST,
   SESSIONS_PAGE_LIMIT,
   createApp,
-  csrfFailure,
   filterSessions,
-  injectNonce,
   redactJson,
   sortSessions,
   startServer,
 } from "../src/server.js";
 import { redactSecrets } from "../src/report/generator.js";
+import { listSuggestionIds } from "../src/suggestions/index.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(HERE, "..");
@@ -77,6 +75,32 @@ async function fingerprint(target) {
   } catch (error) {
     return `absent:${error.code ?? "unknown"}`;
   }
+}
+
+/** A stable fingerprint of every file under `root`: path, size and content hash. */
+async function snapshotTree(root) {
+  const rows = [];
+  async function walk(dir) {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const relative = path.relative(root, full);
+      if (entry.isDirectory()) {
+        rows.push(`${relative}\tdir`);
+        await walk(full);
+      } else {
+        rows.push(`${relative}\tfile\t${await fingerprint(full)}`);
+      }
+    }
+  }
+  await walk(root);
+  return rows.sort().join("\n");
 }
 
 const realBefore = new Map();
@@ -306,7 +330,6 @@ async function launch(overrides = {}) {
     home,
     publicDir: overrides.publicDir ?? PUBLIC_DIR,
     modules: { registry: stubRegistry(collectors), ...(overrides.modules ?? {}) },
-    ...(overrides.fixCatalog ? { fixCatalog: overrides.fixCatalog } : {}),
     ...(overrides.scanLimit ? { scanLimit: overrides.scanLimit } : {}),
   });
 
@@ -316,6 +339,9 @@ async function launch(overrides = {}) {
     home,
     origin,
     get: (target, headers = {}) => raw({ port: running.port, target, headers }),
+    // Kept only to prove a POST is refused everywhere (THE SUGGESTION
+    // CONTRACT: no mutating route exists). Carries no CSRF header — there is
+    // none to carry any more.
     post: (target, { body = "{}", headers = {} } = {}) => raw({
       port: running.port,
       method: "POST",
@@ -323,7 +349,6 @@ async function launch(overrides = {}) {
       headers: {
         "content-type": "application/json",
         "content-length": Buffer.byteLength(body),
-        "x-csrf-token": running.nonce,
         origin,
         host: `${LOOPBACK_HOST}:${running.port}`,
         ...headers,
@@ -387,32 +412,22 @@ describe("BP-005.12 — loopback binding", () => {
   });
 });
 
-describe("BP-005.11 — the page and the injected nonce", () => {
-  it("serves index.html with the per-process nonce in the csrf-token meta", async () => {
+describe("the page (no nonce — there is nothing left to defend with one)", () => {
+  it("serves index.html with no CSRF meta", async () => {
     const running = await server();
     const res = await running.get("/");
     assert.equal(res.status, 200);
     assert.match(res.headers["content-type"], /^text\/html/);
-    assert.match(res.headers["cache-control"], /no-store/);
+    assert.match(res.headers["cache-control"], /no-cache/);
     assert.ok(res.headers["content-security-policy"].includes("default-src 'self'"));
-    assert.ok(res.text.includes(`<meta name="csrf-token" content="${running.nonce}">`), "nonce must reach the page");
-    assert.equal(res.text.includes(`content=""`), false, "the placeholder meta must be replaced");
+    assert.equal(res.text.includes("csrf-token"), false, "no mutating route exists, so no nonce is injected");
   });
 
   it("serves /index.html the same way", async () => {
     const running = await server();
     const res = await running.get("/index.html");
     assert.equal(res.status, 200);
-    assert.ok(res.text.includes(running.nonce));
-  });
-
-  it("injects a meta tag even if the placeholder is gone", () => {
-    const nonce = "abc123";
-    assert.ok(injectNonce("<html><head><title>x</title></head></html>", nonce)
-      .includes(`<meta name="csrf-token" content="${nonce}">`));
-    assert.ok(injectNonce(`<meta name='csrf-token' content='old'>`, nonce)
-      .includes(`content="${nonce}"`));
-    assert.ok(injectNonce("no head at all", nonce).includes(nonce));
+    assert.equal(res.text.includes("csrf-token"), false);
   });
 
   it("serves the real stylesheet from public/", async () => {
@@ -519,38 +534,40 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.equal(setAside.total, perCli, "the aggregate must equal the per-CLI counts it summarises");
   });
 
-  it("F-021 /api/health publishes each fix's TITLE, so the UI keeps no second catalogue", async () => {
+  it("F-021 /api/health publishes each rule's suggestion title, so the UI keeps no second catalogue", async () => {
     const running = await server();
     const res = await running.get("/api/health");
     assert.equal(res.status, 200);
 
-    const titles = new Map(FIX_CATALOG.map((fix) => [fix.id, fix.title]));
+    const suggestionIds = new Set(listSuggestionIds());
     let offered = 0;
     for (const session of res.json.sessions) {
       for (const rule of session.rules) {
-        assert.ok("fixTitle" in rule, `rule ${rule.id} must carry fixTitle, even when it is null`);
+        assert.ok("suggestionTitle" in rule, `rule ${rule.id} must carry suggestionTitle, even when it is null`);
         if (rule.fix === null) {
-          assert.equal(rule.fixTitle, null, "a rule with no fix names no fix");
+          assert.equal(rule.suggestionTitle, null, "a rule with no fix names no suggestion");
           continue;
         }
+        if (!suggestionIds.has(rule.fix)) continue;
         offered += 1;
-        assert.equal(rule.fixTitle, titles.get(rule.fix), `the title published for ${rule.fix} must be the catalogue's`);
+        assert.equal(rule.suggestionAvailable, true);
+        assert.equal(typeof rule.suggestionTitle, "string");
       }
     }
-    assert.ok(offered > 0, "this fixture must exercise at least one rule that maps to a fix");
+    assert.ok(offered > 0, "this fixture must exercise at least one rule that maps to a suggestion");
   });
 
-  it("F-021 a fix id outside the catalogue publishes a null title, never a guessed name", async () => {
-    // The rules still name `claude-*` fixes; this catalogue knows none of them.
+  it("a fix id outside the catalogue publishes a null title, never a guessed name", async () => {
     const running = await server({
-      fixCatalog: [{ id: "not-a-real-fix", title: "Not a real fix", kind: "append-section", blueprint: "BP-000", specifier: "./fixes/nowhere.js" }],
+      modules: { health: syntheticHealth({ [testSession().sessionId]: [syntheticRule("not-a-real-fix-rule", { status: "observed", fix: "not-a-real-fix" })] }) },
     });
     const res = await running.get("/api/health");
     assert.equal(res.status, 200);
     const withFix = res.json.sessions.flatMap((session) => session.rules).filter((rule) => rule.fix !== null);
     assert.ok(withFix.length > 0, "this fixture must exercise at least one rule that maps to a fix");
     for (const rule of withFix) {
-      assert.equal(rule.fixTitle, null, `${rule.fix} is not in this catalogue, so no name may be invented for it`);
+      assert.equal(rule.suggestionTitle, null, `${rule.fix} is not in the suggestion catalogue, so no name may be invented for it`);
+      assert.equal(rule.suggestionAvailable, false);
     }
   });
 
@@ -665,64 +682,12 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.equal(typeof res.json.redactions, "number");
   });
 
-  // -------------------------------------------------------------------------
-  // F1 / F2 — section 5 and section 6 were structurally incapable of saying
-  // anything else, because the route passed neither `fixes` nor `trend`. F1 is
-  // the only place this product ever asserted something FALSE: five fixes
-  // applied, five journal rows on disk, and a report that said none were.
-  // -------------------------------------------------------------------------
-
-  it("BP-005.05 section 5 NAMES a fix that was applied, read from the transaction journal", async () => {
+  it("BP-005.05 section 5 always says no fix was applied — SessionRx never applies one any more", async () => {
     const running = await server();
-    // This test applies a fix, so it proves WHERE it will write before writing.
-    assert.ok(running.state.home.includes("session-rx-5a-"),
-      `refusing to run an apply outside a suite temp dir: ${running.state.home}`);
-    const applied = await running.post("/api/fixes/claude-output-hygiene/apply");
-    assert.equal(applied.status, 200);
-
-    const res = await running.get("/api/report");
-    assert.equal(res.status, 200);
-    const md = res.json.markdown;
-    assert.ok(md.includes("claude-output-hygiene"), "the applied fix id must appear in section 5");
-    assert.match(md, /- Status: applied/);
-    assert.equal(md.includes("No fix was applied in this period"), false,
-      "a fix was applied seconds ago: this sentence would be an outright falsehood");
-    // The report is a file users paste in public, so the journal's absolute
-    // paths render in the fix engine's `~/...` display form, as before.
-    assert.equal(md.includes(running.home), false, "no new absolute path enters the report");
-  });
-
-  it("BP-005.05 'No fix was applied' appears ONLY when the journal was read and held none", async () => {
-    const running = await server();
-    const journal = path.join(running.home, ".session-rx", "journal.jsonl");
-    await fs.mkdir(path.dirname(journal), { recursive: true });
-    await fs.writeFile(journal, "", "utf8");
     const md = (await running.get("/api/report")).json.markdown;
     assert.match(md, /## 5\. Fixes applied\n\nNo fix was applied in this period\./);
-  });
-
-  it("BP-005.05 a MISSING journal is unknown with its reason, never 'no fix was applied'", async () => {
-    const running = await server();
-    assert.equal(existsSync(path.join(running.home, ".session-rx", "journal.jsonl")), false,
-      "precondition: this home has no journal yet");
-    const md = (await running.get("/api/report")).json.markdown;
-    assert.ok(
-      md.includes(`Applied-fix history: unknown — ${path.join("~", ".session-rx", "journal.jsonl")} does not exist`),
-      "the unknown journal reason must name the platform-native user-facing path",
-    );
-    assert.equal(md.includes("No fix was applied in this period"), false,
-      "an unread record is unknown, not an empty history");
-  });
-
-  it("BP-005.05 a MALFORMED journal is unknown with its reason, never 'no fix was applied'", async () => {
-    const running = await server();
-    const journal = path.join(running.home, ".session-rx", "journal.jsonl");
-    await fs.mkdir(path.dirname(journal), { recursive: true });
-    await fs.writeFile(journal, `not json at all\n{"event": truncated\n`, "utf8");
-    const md = (await running.get("/api/report")).json.markdown;
-    assert.match(md, /Applied-fix history: unknown — /);
-    assert.match(md, /not one parseable record/);
-    assert.equal(md.includes("No fix was applied in this period"), false);
+    // Genuinely true now, not merely unread: there is no apply route at all.
+    assert.equal(md.includes("Applied-fix history: unknown"), false);
   });
 
   it("BP-005.05 section 6 carries the SAME direction /api/trends computes (F-021: one implementation)", async () => {
@@ -748,40 +713,23 @@ describe("GET routes return 200 with the BP-005 shape", () => {
     assert.match(md, /Reason: the trend for this window could not be computed/);
   });
 
-  it("BP-005.09 /api/fixes/:fixId/check is a GET and changes nothing", async () => {
+  it("GET /api/suggestions lists the suggestion catalogue and never writes", async () => {
     const running = await server();
     const target = path.join(running.home, ".claude", "CLAUDE.md");
     const before = await fs.readFile(target, "utf8");
-    const res = await running.get("/api/fixes/claude-output-hygiene/check");
+    const res = await running.get("/api/suggestions?tool=claude&scope=global");
     assert.equal(res.status, 200);
-    assert.equal(typeof res.json.applied, "boolean");
-    assert.equal(res.json.applied, false);
-    assert.equal(typeof res.json.marker, "string");
-    assert.equal(await fs.readFile(target, "utf8"), before, "check() must not write");
-  });
-
-  it("lists the fix catalog", async () => {
-    const running = await server();
-    const res = await running.get("/api/fixes");
-    assert.equal(res.status, 200);
-    assert.equal(res.json.fixes.length, 5, "BP-004.01..05");
-    assert.deepEqual(res.json.fixes.map((fix) => fix.id).sort(), [
+    assert.equal(res.json.suggestions.length, 5, "the five suggestion definitions, one per rule.fix id");
+    assert.deepEqual(res.json.suggestions.map((s) => s.id).sort(), [
       "claude-auto-compact",
       "claude-batch-commands",
       "claude-compact-contract",
       "claude-output-hygiene",
       "claude-worker-cap",
     ]);
-    assert.ok(res.json.fixes.every((fix) => fix.available === true), "every BP-004 fix module resolves");
-    assert.ok(res.json.fixes.every((fix) => fix.cli === "claude" && fix.cliName === "Claude Code"), "every available fix publishes its target CLI and display name");
-  });
-
-  it("lists fixes with null CLI names when the registry cannot be loaded", async () => {
-    const running = await server({ modules: { registry: "./__missing_registry__.js" } });
-    const res = await running.get("/api/fixes");
-    assert.equal(res.status, 200);
-    assert.equal(res.json.fixes.length, 5);
-    assert.ok(res.json.fixes.every((fix) => fix.cli === "claude" && fix.cliName === null));
+    assert.ok(res.json.suggestions.every((s) => s.available === true));
+    assert.ok(res.json.suggestions.every((s) => s.targetTool === "claude"));
+    assert.equal(await fs.readFile(target, "utf8"), before, "listing suggestions must not write");
   });
 
   it("rejects a malformed query parameter with a 400, not a 500", async () => {
@@ -932,9 +880,10 @@ describe("/api/health window-wide totals and comparison", () => {
   });
 
   it("publishes distinctFixes as unique, non-null, catalogue-bounded fix ids", async () => {
+    const catalogIds = listSuggestionIds();
     const duplicateRules = [
-      syntheticRule("duplicate-a", { status: "observed", fix: FIX_CATALOG[0].id }),
-      syntheticRule("duplicate-b", { status: "observed", fix: FIX_CATALOG[0].id }),
+      syntheticRule("duplicate-a", { status: "observed", fix: catalogIds[0] }),
+      syntheticRule("duplicate-b", { status: "observed", fix: catalogIds[0] }),
     ];
     const duplicate = await fixture([
       testSession({ sessionId: "duplicate-fixes" }),
@@ -954,16 +903,15 @@ describe("/api/health window-wide totals and comparison", () => {
     assert.notEqual(emptyHealth.distinctFixes.count, null);
 
     const bounded = await fixture([testSession({ sessionId: "too-many-fixes" })], {
-      "too-many-fixes": FIX_CATALOG.map((fix, index) => syntheticRule(`catalog-${index}`, {
+      "too-many-fixes": catalogIds.map((id, index) => syntheticRule(`catalog-${index}`, {
         status: "observed",
-        fix: fix.id,
+        fix: id,
       })).concat(syntheticRule("outside-catalog", { status: "observed", fix: "not-in-catalogue" })),
-    }, { fixCatalog: FIX_CATALOG.slice(0, 2) });
+    });
     const boundedHealth = (await bounded.get("/api/health")).json;
-    assert.ok(
-      boundedHealth.distinctFixes.count <= 2,
-      "distinctFixes must never exceed the size of the published fix catalogue",
-    );
+    assert.equal(boundedHealth.distinctFixes.count, catalogIds.length,
+      "every catalogue id is counted; the id outside the catalogue is not");
+    assert.deepEqual(boundedHealth.distinctFixes.unknownFixIds, ["not-in-catalogue"]);
   });
 
   it("publishes inclusive per-day window series, including an empty measured day", async () => {
@@ -1395,83 +1343,20 @@ describe("BP-005.02 — /api/sessions is paginated", () => {
   });
 });
 
-describe("BP-005.13/14 — CSRF: the four rejection paths", () => {
-  const TARGET = "/api/fixes/claude-output-hygiene/preview";
-
-  it("missing nonce → 403", async () => {
+describe("no mutating route exists, and no response leaks a CORS header", () => {
+  // THE SUGGESTION CONTRACT: SessionRx never writes a user's files, so every
+  // route is GET and there is no CSRF surface left to defend. What used to be
+  // the CSRF suite is now a small proof that POST is refused everywhere and
+  // that nothing here talks CORS.
+  it("a POST to any known route is refused, not routed to a handler that writes", async () => {
     const running = await server();
-    const res = await running.post(TARGET, { headers: { "x-csrf-token": undefined } });
-    assert.equal(res.status, 403);
-    assert.equal(res.json.reason, "csrf_token_missing");
+    for (const target of ["/api/health", "/api/sessions", "/api/suggestions", "/"]) {
+      const res = await running.post(target);
+      assert.notEqual(res.status, 200, `${target} must not accept a POST`);
+    }
   });
 
-  it("wrong nonce → 403", async () => {
-    const running = await server();
-    const res = await running.post(TARGET, { headers: { "x-csrf-token": BAD_HEADER_SHORT } });
-    assert.equal(res.status, 403);
-    assert.equal(res.json.reason, "csrf_token_mismatch");
-  });
-
-  it("foreign Origin → 403", async () => {
-    const running = await server();
-    const res = await running.post(TARGET, { headers: { origin: "https://evil.example" } });
-    assert.equal(res.status, 403);
-    assert.equal(res.json.reason, "origin_rejected");
-  });
-
-  it("wrong Host → 403", async () => {
-    const running = await server();
-    const res = await running.post(TARGET, {
-      headers: { host: `evil.example:${running.port}`, origin: `http://evil.example:${running.port}` },
-    });
-    assert.equal(res.status, 403);
-    // Real interaction with the DNS-rebinding fix below: a bad Host is now
-    // caught by the standalone Host-allowlist middleware, which runs on
-    // EVERY method and therefore BEFORE this CSRF middleware ever sees the
-    // request — so this POST is refused with `host_not_allowed`, not
-    // `host_rejected`. `host_rejected` still exists and is still reachable:
-    // it is what `csrfFailure` itself returns for a bad Host, proven direct
-    // (bypassing the middleware chain) by the "order-stable" test below.
-    assert.equal(res.json.reason, "host_not_allowed");
-  });
-
-  it("missing Origin and Origin: null → 403 (BP-005.14)", async () => {
-    const running = await server();
-    const absent = await running.post(TARGET, { headers: { origin: undefined } });
-    assert.equal(absent.status, 403);
-    assert.equal(absent.json.reason, "origin_missing");
-
-    const nulled = await running.post(TARGET, { headers: { origin: "null" } });
-    assert.equal(nulled.status, 403);
-    assert.equal(nulled.json.reason, "origin_rejected");
-  });
-
-  it("a right-length wrong value is still refused (constant-time compare)", async () => {
-    const running = await server();
-    assert.equal(BAD_HEADER_SAME_LENGTH.length, running.nonce.length);
-    const res = await running.post(TARGET, { headers: { "x-csrf-token": BAD_HEADER_SAME_LENGTH } });
-    assert.equal(res.status, 403);
-    assert.equal(res.json.reason, "csrf_token_mismatch");
-  });
-
-  it("a rejection never echoes the nonce back", async () => {
-    const running = await server();
-    const res = await running.post(TARGET, { headers: { "x-csrf-token": BAD_HEADER_SHORT } });
-    assert.equal(res.text.includes(running.nonce), false);
-  });
-
-  it("csrfFailure is order-stable: token, then Host, then Origin", () => {
-    const state = { nonce: "n", hostAllowlist: new Set(["127.0.0.1:1"]) };
-    assert.equal(csrfFailure(state, { headers: {} }).reason, "csrf_token_missing");
-    assert.equal(csrfFailure(state, { headers: { "x-csrf-token": "x" } }).reason, "csrf_token_mismatch");
-    assert.equal(csrfFailure(state, { headers: { "x-csrf-token": "n", host: "evil:1" } }).reason, "host_rejected");
-    assert.equal(csrfFailure(state, { headers: { "x-csrf-token": "n", host: "127.0.0.1:1" } }).reason, "origin_missing");
-    assert.equal(csrfFailure(state, {
-      headers: { "x-csrf-token": "n", host: "127.0.0.1:1", origin: "http://127.0.0.1:1" },
-    }), null);
-  });
-
-  it("a GET carries no CSRF requirement", async () => {
+  it("a GET works with no CSRF header at all", async () => {
     const running = await server();
     assert.equal((await running.get("/api/collectors")).status, 200);
   });
@@ -1487,9 +1372,7 @@ describe("BP-005.13/14 — CSRF: the four rejection paths", () => {
   });
 });
 
-describe("DNS rebinding — Host header enforced on EVERY method (T1-T8)", () => {
-  const TARGET = "/api/fixes/claude-output-hygiene/preview";
-
+describe("DNS rebinding — Host header enforced on EVERY method", () => {
   it("T1: GET with a foreign Host is refused before it reaches any route", async () => {
     const running = await server();
     const res = await running.get("/api/collectors", { host: "evil.com" });
@@ -1538,187 +1421,80 @@ describe("DNS rebinding — Host header enforced on EVERY method (T1-T8)", () =>
     const res = await running.get("/api/collectors", { host: `[::1]:${running.port}` });
     assert.equal(res.status, 200);
   });
-
-  it("T7: a POST with a valid nonce and a valid Host still succeeds", async () => {
-    const running = await server();
-    const res = await running.post(TARGET);
-    assert.equal(res.status, 200, "the new Host middleware must not break the legitimate mutating path");
-  });
-
-  it("T8: a POST with a valid Host but no nonce is still 403 — CSRF intact", async () => {
-    const running = await server();
-    const res = await running.post(TARGET, { headers: { "x-csrf-token": undefined } });
-    assert.equal(res.status, 403);
-    assert.equal(res.json.reason, "csrf_token_missing");
-  });
 });
 
-describe("a valid POST succeeds", () => {
-  it("BP-005.06 preview with nonce + Origin + Host returns the fix shape", async () => {
+describe("GET /api/suggestions — THE SUGGESTION CONTRACT", () => {
+  it("every tool x scope combination names the right target", async () => {
     const running = await server();
-    const res = await running.post("/api/fixes/claude-output-hygiene/preview");
+    const res = await running.get("/api/suggestions?id=claude-output-hygiene");
     assert.equal(res.status, 200);
-    assert.equal(typeof res.json.description, "string");
-    assert.equal(typeof res.json.diff, "string");
-    assert.ok(res.json.diff.includes("session-rx:output-hygiene:v1"), "the diff shows the marker it will write");
-    assert.ok(Array.isArray(res.json.files_affected) && res.json.files_affected.length > 0);
-    assert.equal(res.json.reversible, true);
-    assert.ok(res.json.check, "preview carries the check result");
+    const byKey = new Map(res.json.suggestions.map((s) => [`${s.targetTool}:${s.scope}`, s]));
+    assert.equal(byKey.get("claude:global").targetLabel, "~/.claude/CLAUDE.md");
+    assert.equal(byKey.get("claude:project").targetLabel, "./CLAUDE.md");
+    assert.equal(byKey.get("codex:global").targetLabel, "~/.codex/AGENTS.md");
+    assert.equal(byKey.get("codex:project").targetLabel, "./AGENTS.md");
+    assert.equal(byKey.get("antigravity:global").targetLabel, "~/.gemini/GEMINI.md");
+    assert.equal(byKey.get("antigravity:project").targetLabel, "./AGENTS.md");
+    assert.equal(byKey.get("cursor:project").targetLabel, "./AGENTS.md");
   });
 
-  it("preview writes nothing", async () => {
+  it("Cursor's global suggestion tells the user to paste into User Rules, since there is no file to point at", async () => {
+    const running = await server();
+    const res = await running.get("/api/suggestions?id=claude-output-hygiene&tool=cursor&scope=global");
+    const suggestion = res.json.suggestions[0];
+    assert.equal(suggestion.targetLabel, "Cursor Settings → Rules → User Rules");
+    assert.match(suggestion.request, /paste the following in there/i);
+    assert.equal(suggestion.status, "unknown", "there is no local file to check, so this is not claimed either way");
+  });
+
+  it("project scope never claims already-added or not-added — it is always unknown", async () => {
+    const running = await server();
+    for (const tool of ["claude", "codex", "antigravity", "cursor"]) {
+      const res = await running.get(`/api/suggestions?id=claude-output-hygiene&tool=${tool}&scope=project`);
+      const suggestion = res.json.suggestions[0];
+      assert.equal(suggestion.status, "unknown", `${tool} project scope`);
+      assert.equal(suggestion.statusReason, "project-path-not-resolvable");
+    }
+  });
+
+  it("an already-present marker in a resolvable global target shows already-added", async () => {
     const running = await server();
     const target = path.join(running.home, ".claude", "CLAUDE.md");
-    const before = await fingerprint(target);
-    await running.post("/api/fixes/claude-output-hygiene/preview");
-    assert.equal(await fingerprint(target), before);
-    assert.equal(existsSync(path.join(running.home, ".session-rx")), false, "preview creates no undo state");
+    await fs.appendFile(target, "\n<!-- session-rx:output-hygiene:v1 -->\nalready here\n<!-- /session-rx:output-hygiene:v1 -->\n");
+    const res = await running.get("/api/suggestions?id=claude-output-hygiene&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "already-added");
   });
 
-  it("BP-005.07/08 apply then undo, inside the temp home only", async () => {
+  it("a marker absent from a resolvable global target shows not-added, not unknown", async () => {
     const running = await server();
-    const target = path.join(running.home, ".claude", "CLAUDE.md");
-    // This test writes, so it proves WHERE it will write before writing.
-    assert.ok(running.state.home.includes("session-rx-5a-"),
-      `refusing to run an apply outside a suite temp dir: ${running.state.home}`);
-    const before = await fs.readFile(target, "utf8");
-
-    const applied = await running.post("/api/fixes/claude-output-hygiene/apply");
-    assert.equal(applied.status, 200);
-    assert.equal(applied.json.applied, true);
-    assert.equal(typeof applied.json.undoPath, "string");
-    assert.ok(applied.json.undoPath.startsWith(running.home), "undo state stays under the configured home");
-    const afterApply = await fs.readFile(target, "utf8");
-    assert.notEqual(afterApply, before);
-    assert.ok(afterApply.startsWith(before), "BP-004.08: existing bytes preserved, the section appended");
-
-    const checked = await running.get("/api/fixes/claude-output-hygiene/check");
-    assert.equal(checked.json.applied, true);
-
-    const undone = await running.post("/api/fixes/claude-output-hygiene/undo", {
-      body: JSON.stringify({ undoPath: applied.json.undoPath }),
-    });
-    assert.equal(undone.status, 200);
-    assert.equal(undone.json.restored, true);
-    assert.equal(undone.json.byteIdentical, true);
-    assert.equal(await fs.readFile(target, "utf8"), before, "undo is byte-identical");
+    const res = await running.get("/api/suggestions?id=claude-output-hygiene&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "not-added");
   });
 
-  it("a fix refusal is a 409 with its code, not a 500", async () => {
+  it("a Codex-targeted suggestion is never routed at Claude Code's settings file", async () => {
     const running = await server();
-    assert.equal((await running.post("/api/fixes/claude-batch-commands/apply")).status, 200);
-    const second = await running.post("/api/fixes/claude-batch-commands/preview");
-    assert.equal(second.status, 409);
-    assert.equal(second.json.code, "ALREADY_APPLIED");
-    assert.equal(second.json.reason, "fix_already_applied");
+    const res = await running.get("/api/suggestions?id=claude-batch-commands&tool=codex&scope=global");
+    const suggestion = res.json.suggestions[0];
+    assert.equal(suggestion.targetTool, "codex");
+    assert.match(suggestion.request, /Codex/);
+    assert.doesNotMatch(suggestion.request, /\.claude\//);
   });
 
-  // This test used to assert 409 TARGET_MISSING for a missing target FILE. That
-  // was the old engine contract, and BP-004.11 replaced it: measured on a clean
-  // machine, every fix refused because `~/.claude/CLAUDE.md` and
-  // `~/.claude/settings.json` had never been written, which is the normal state
-  // for most Claude Code users — the product's core loop was unreachable. A
-  // missing FILE is now a disclosed CREATE, so this asserts the create, over the
-  // same route and the same fix as before. The 409 precondition is not a lowered
-  // bar, it has MOVED to the case that genuinely is one: an absent parent
-  // DIRECTORY, asserted in the test immediately below.
-  it("a missing target file is created, and the create is disclosed in the diff", async () => {
+  it("the settings suggestion on a non-Claude tool offers the compact-contract instruction instead of inventing a setting", async () => {
     const running = await server();
-    // This test writes, so it proves WHERE it will write before writing.
-    assert.ok(running.state.home.includes("session-rx-5a-"),
-      `refusing to run an apply outside a suite temp dir: ${running.state.home}`);
-    const target = path.join(running.home, ".claude", "CLAUDE.md");
-    await fs.rm(target);
-
-    const res = await running.post("/api/fixes/claude-worker-cap/preview");
-    assert.equal(res.status, 200, "a missing target file is a create, not a precondition failure");
-    assert.equal(res.json.targets[0].created, true, "preview must mark the absent target as created");
-    assert.match(res.json.diff, /^--- \/dev\/null\n/, "the old side of a created file's diff is /dev/null");
-    assert.match(res.json.description, /does not exist yet; SessionRx will create it/);
-    assert.equal(existsSync(target), false, "preview must not create the file it previews");
-
-    const applied = await running.post("/api/fixes/claude-worker-cap/apply");
-    assert.equal(applied.status, 200);
-    assert.equal(applied.json.applied, true);
-    assert.equal(existsSync(target), true, "apply must create the missing target");
-
-    const undone = await running.post("/api/fixes/claude-worker-cap/undo", {
-      body: JSON.stringify({ undoPath: applied.json.undoPath }),
-    });
-    assert.equal(undone.status, 200);
-    assert.equal(undone.json.restored, true);
-    assert.equal(existsSync(target), false, "undo of a created file removes it, not leaves an empty stub");
+    const res = await running.get("/api/suggestions?id=claude-auto-compact&tool=codex&scope=global");
+    const suggestion = res.json.suggestions[0];
+    assert.equal(suggestion.usingFallback, true);
+    assert.match(suggestion.plainSummary, /no confirmed setting for Codex/i);
+    assert.match(suggestion.preview, /session-rx:compact-contract:v1/);
   });
 
-  it("an absent ~/.claude directory is the 409 precondition, not a 500", async () => {
+  it("no route SessionRx serves writes a single byte under the configured home", async () => {
     const running = await server();
-    await fs.rm(path.join(running.home, ".claude"), { recursive: true });
-    const res = await running.post("/api/fixes/claude-worker-cap/preview");
-    assert.equal(res.status, 409);
-    assert.equal(res.json.code, "TARGET_MISSING");
-    assert.equal(res.json.reason, "fix_target_missing");
-    // The diagnostic names the DIRECTORY, because the directory is what is
-    // missing: an absent `~/.claude/` means the owning CLI is not installed, and
-    // SessionRx does not fabricate that tree.
-    assert.match(res.json.error, /does not exist; SessionRx will not create it/);
-    assert.equal(existsSync(path.join(running.home, ".claude")), false, "the refusal created the directory");
-  });
-
-  it("an engine-invariant failure is a 500, not a 409", async () => {
-    const { FixError, FIX_ERROR_CODES } = await import("../src/fixes/base.js");
-    const running = await server({
-      fixCatalog: [{
-        id: "engine-broke",
-        title: "Engine failure double",
-        kind: "append-section",
-        factory: () => ({
-          id: "engine-broke",
-          check: async () => ({ applied: false, marker: "none" }),
-          preview: async () => {
-            throw new FixError(FIX_ERROR_CODES.WRITE_NOT_VERIFIED, "the bytes on disk are not the bytes written");
-          },
-        }),
-      }],
-    });
-    const res = await running.post("/api/fixes/engine-broke/preview");
-    assert.equal(res.status, 500);
-    assert.equal(res.json.code, "WRITE_NOT_VERIFIED");
-    assert.equal(res.json.reason, "fix_write_not_verified");
-  });
-
-  it("a documented response key is not overridable by the fix", async () => {
-    const running = await server({
-      fixCatalog: [{
-        id: "liar-fix",
-        title: "A fix that reports the wrong shape",
-        kind: "append-section",
-        factory: () => ({
-          id: "liar-fix",
-          check: async () => ({ applied: "yes", marker: 42 }),
-          preview: async () => ({ reversible: "sure", files_affected: "not-an-array", diff: null, description: null }),
-        }),
-      }],
-    });
-    const checked = await running.get("/api/fixes/liar-fix/check");
-    assert.equal(checked.json.applied, false, "a non-boolean applied is normalised to false");
-    const previewed = await running.post("/api/fixes/liar-fix/preview");
-    assert.equal(previewed.json.reversible, false);
-    assert.deepEqual(previewed.json.files_affected, []);
-    assert.equal(previewed.json.diff, "");
-  });
-
-  it("an unknown fix id is a 404", async () => {
-    const running = await server();
-    const res = await running.post("/api/fixes/not-a-fix/preview");
-    assert.equal(res.status, 404);
-    assert.equal(res.json.reason, "fix_not_found");
-  });
-
-  it("a malformed JSON body is a 400, not a 500", async () => {
-    const running = await server();
-    const res = await running.post("/api/fixes/claude-output-hygiene/preview", { body: "{not json" });
-    assert.equal(res.status, 400);
-    assert.equal(res.json.reason, "body_parse_failed");
+    const before = await snapshotTree(running.home);
+    await running.get("/api/suggestions?id=claude-output-hygiene&tool=claude&scope=global");
+    await running.get("/api/suggestions?id=claude-auto-compact&tool=claude&scope=global");
+    assert.deepEqual(await snapshotTree(running.home), before);
   });
 });
 
@@ -1778,18 +1554,11 @@ describe("honest degradation", () => {
     assert.equal(res.json.reason, "redactor_unavailable");
   });
 
-  it("a fix whose module is absent is listed as unavailable, not silently dropped", async () => {
-    const running = await server({
-      fixCatalog: [{ id: "ghost-fix", title: "Ghost", kind: "append-section", blueprint: "BP-999", specifier: "./fixes/claude/__not_landed__.js" }],
-    });
-    const listed = await running.get("/api/fixes");
-    assert.equal(listed.status, 200);
-    assert.equal(listed.json.fixes[0].available, false);
-    assert.ok(listed.json.fixes[0].reason.includes("not installed"));
-
-    const previewed = await running.post("/api/fixes/ghost-fix/preview");
-    assert.equal(previewed.status, 503);
-    assert.equal(previewed.json.reason, "fix_unavailable");
+  it("a suggestion id outside the catalogue is a 404, not a silently empty list", async () => {
+    const running = await server();
+    const res = await running.get("/api/suggestions?id=not-a-real-suggestion&tool=claude&scope=global");
+    assert.equal(res.status, 404);
+    assert.equal(res.json.reason, "suggestion_not_found");
   });
 
   it("an unreadable frontend is a 500 that says so", async () => {
@@ -1810,27 +1579,14 @@ describe("BP-005.15 / FVA-004 — secret redaction on the way out", () => {
     }
   });
 
-  it("the nonce is never in an API response", async () => {
+  it("SessionRx never writes anything under the configured home — every route is read-only", async () => {
     const running = await server();
-    for (const target of ["/api/collectors", "/api/health", "/api/sessions", "/api/trends", "/api/report", "/api/fixes"]) {
+    const before = await snapshotTree(running.home);
+    for (const target of ["/api/collectors", "/api/health", "/api/sessions", "/api/trends", "/api/report", "/api/suggestions?tool=claude&scope=global"]) {
       const res = await running.get(target);
-      assert.equal(res.text.includes(running.nonce), false, `${target} leaked the nonce`);
+      assert.equal(res.status, 200, target);
     }
-  });
-
-  it("the nonce is never written under the configured home", async () => {
-    const running = await server();
-    await running.post("/api/fixes/claude-worker-cap/apply");
-    const found = [];
-    const walk = async (dir) => {
-      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) await walk(full);
-        else if ((await fs.readFile(full, "utf8").catch(() => "")).includes(running.nonce)) found.push(full);
-      }
-    };
-    await walk(running.home);
-    assert.deepEqual(found, [], "the nonce must not be persisted anywhere");
+    assert.deepEqual(await snapshotTree(running.home), before, "no route may add, remove or change a single file under home");
   });
 
   it("redactJson drops a value its key makes credential-shaped, and keeps ordinary text", () => {
@@ -1900,12 +1656,9 @@ describe("pure helpers", () => {
     assert.ok(res.json.scan.note.includes("older sessions exist"));
   });
 
-  it("createApp generates a distinct high-entropy nonce per process", () => {
-    const a = createApp({ publicDir: PUBLIC_DIR }).state.nonce;
-    const b = createApp({ publicDir: PUBLIC_DIR }).state.nonce;
-    assert.notEqual(a, b);
-    assert.equal(a.length, 64, "32 random bytes, hex");
-    assert.match(a, /^[0-9a-f]{64}$/);
+  it("createApp carries no nonce — there is no mutating route left to protect with one", () => {
+    const state = createApp({ publicDir: PUBLIC_DIR }).state;
+    assert.equal(Object.hasOwn(state, "nonce"), false);
   });
 });
 

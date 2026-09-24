@@ -195,9 +195,10 @@ const RULE = (over) => ({
   name: "Low cache hit",
   severity: "warn",
   fix: "claude-output-hygiene",
-  fixTitle: "Output hygiene instruction",
-  fixCli: "claude",
-  fixCliName: "Claude Code",
+  suggestionTitle: "Output hygiene instruction",
+  suggestionAvailable: true,
+  suggestionTool: "claude",
+  suggestionToolName: "Claude Code",
   threshold: { value: 0.85, derivation: "cacheRead / (cacheRead + cacheCreate) < 0.85" },
   magnitude: null,
   plain: null,
@@ -340,11 +341,11 @@ test("the Health summary and the Overview cards never share a label for two diff
   assert.ok(!stats.has("Fixes available"), '"Fixes available" is the Overview card\'s name for the distinct-fix count, and must not also name this one');
 
   // The other half of the contract: the Overview card is still called
-  // "Fixes available" over `distinctFixes`. If it is ever renamed to match
-  // the Health stat, the collision is back and this test must fail.
+  // "Suggestions available" over `distinctFixes`. If it is ever renamed to
+  // match the Health stat, the collision is back and this test must fail.
   const here = path.dirname(fileURLToPath(import.meta.url));
   const overviewSrc = readFileSync(path.join(here, "..", "public", "js", "pages", "overview.js"), "utf8");
-  assert.match(overviewSrc, /summaryCard\('Fixes available',\s*'fixes'/, "the Overview card must keep its own distinct-fix label");
+  assert.match(overviewSrc, /summaryCard\('Suggestions available',\s*'fixes'/, "the Overview card must keep its own distinct-fix label");
   assert.ok(!overviewSrc.includes("'Fixable findings'"), "the findings label belongs to the Health summary alone");
 
   // No Health summary label may collide with an Overview card label unless the
@@ -612,7 +613,7 @@ test("all three verdict states remain visually distinguishable after the compact
   assert.match(mount.textContent, /COULD NOT BE MEASURED/);
 });
 
-test("every rule still offers exactly [Preview] [Apply] [Skip] when observed, and nothing when it is not", () => {
+test("every rule still offers exactly [View suggestion] when observed, and nothing when it is not", () => {
   const buttonText = (root) => nodes(root).filter((n) => n.tagName === "BUTTON").map((n) => n.textContent.trim());
 
   const observed = RULE({
@@ -621,36 +622,28 @@ test("every rule still offers exactly [Preview] [Apply] [Skip] when observed, an
   });
   const mount = render(PAYLOAD({ sessions: [SESSION({ rules: [observed] })] }), { api: {} });
   const actionButtons = buttonText(mount).filter((t) => !["Review fixes"].includes(t));
-  assert.deepEqual([...actionButtons].sort(), ["Apply", "Preview", "Skip"]);
+  assert.deepEqual([...actionButtons].sort(), ["View suggestion"]);
 
   const passOnly = render(PAYLOAD({ sessions: [SESSION({ rules: [RULE({})] })] }));
   const passButtons = buttonText(passOnly).filter((t) => t !== "Review fixes");
-  assert.deepEqual(passButtons, [], "an unmeasured/passing check must offer no fix action");
+  assert.deepEqual(passButtons, [], "an unmeasured/passing check must offer no suggestion action");
 });
 
-test("a fix states its registry display names only when both names differ", () => {
+test("a finding whose CLI SessionRx does not suggest for says so, and offers a disabled action", () => {
   const observed = RULE({
     evidence: { status: "observed", reason: null, values: [], sources: [], derivation: null, parserVersion: "t" },
   });
-  const codex = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [observed] })] }), { api: {} });
-  const note = withClass(codex, "verdict-fix-scope")[0];
-  assert.ok(note);
-  assert.equal(note.textContent, "Changes Claude Code's config, not Codex's. Affects future Claude Code sessions only.");
-  assert.ok(!/DIS-\d|BP-\d|\bF-\d|\bsidechain|\blinkage|\bdenominator|\bcorpus|\bmagnitude/i.test(note.textContent));
-
   const claude = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [observed] })] }), { api: {} });
-  assert.equal(withClass(claude, "verdict-fix-scope").length, 0);
+  assert.equal(withClass(claude, "verdict-fix-scope").length, 0, "a supported CLI carries no scope caveat");
 
-  const cursorFix = render(PAYLOAD({ sessions: [SESSION({ cli: "claude", rules: [RULE({ fixCli: "cursor", fixCliName: "Cursor CLI", evidence: observed.evidence })] })] }), { api: {} });
-  const cursorFixNote = withClass(cursorFix, "verdict-fix-scope")[0];
-  assert.ok(cursorFixNote);
-  assert.equal(cursorFixNote.textContent, "Changes Cursor CLI's config, not Claude Code's. Affects future Cursor CLI sessions only.");
-
-  const missingTarget = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: "Codex", rules: [RULE({ fixCli: null, fixCliName: null, evidence: observed.evidence })] })] }), { api: {} });
-  assert.equal(withClass(missingTarget, "verdict-fix-scope").length, 0);
-
-  const missingSource = render(PAYLOAD({ sessions: [SESSION({ cli: "codex", cliName: null, rules: [observed] })] }), { api: {} });
-  assert.equal(withClass(missingSource, "verdict-fix-scope").length, 0);
+  const unsupported = RULE({
+    suggestionAvailable: false, suggestionTool: null, suggestionToolName: null,
+    evidence: observed.evidence,
+  });
+  const missingTarget = render(PAYLOAD({ sessions: [SESSION({ cli: "gemini", cliName: "Gemini CLI", rules: [unsupported] })] }), { api: {} });
+  const note = withClass(missingTarget, "verdict-fix-scope")[0];
+  assert.ok(note, "an unsupported CLI must say plainly that no suggestion exists for it");
+  assert.match(note.textContent, /no suggested change for this CLI/i);
 });
 
 test("the scan-limit disclosure and the sub-agent set-aside note both survive in the rendered output", () => {

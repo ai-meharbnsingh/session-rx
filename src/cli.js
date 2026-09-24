@@ -35,8 +35,7 @@ process.on("warning", (warning) => {
   // not replace it; every non-matching warning is therefore still printed.
 });
 
-import { STATE_DIR_NAME } from "./fixes/base.js";
-import { runCleanCommand } from "./fixes/clean.js";
+import { STATE_DIR_NAME, runCleanCommand } from "./clean.js";
 import { startServer } from "./server.js";
 
 const STARTED_AT = process.hrtime.bigint();
@@ -63,10 +62,10 @@ Usage: session-rx [options]
        session-rx clean [--yes]
 
 Commands:
-  clean          remove SessionRx's own undo history in ~/${STATE_DIR_NAME}.
-                 Shows what it would remove and stops; --yes performs it.
-                 Nothing else ever removes that directory, and once it is
-                 gone the fixes already applied can no longer be undone.
+  clean          remove SessionRx's own leftover data in ~/${STATE_DIR_NAME},
+                 including any backups an earlier version made before writing
+                 a file. Shows what it would remove and stops; --yes performs
+                 it. Nothing else ever removes that directory.
 
 Options:
   --port <n>     bind this exact port (fails if it is taken)
@@ -80,7 +79,7 @@ Environment:
   SESSION_RX_PORT     same as --port
   SESSION_RX_LIMIT    same as --limit
   SESSION_RX_NO_OPEN  set to 1 to imply --no-open
-  SESSION_RX_HOME     resolve fix targets under this home instead of $HOME
+  SESSION_RX_HOME     resolve suggestion targets and \`clean\` under this home instead of $HOME
 
 SessionRx binds 127.0.0.1 only and reads local session files. It makes no
 network requests.`;

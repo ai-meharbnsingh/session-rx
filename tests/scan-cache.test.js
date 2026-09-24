@@ -522,7 +522,7 @@ describe("the scan cache never hands out the object it holds", () => {
 
   it("returns byte-identical pages for an unchanged corpus, request after request", async () => {
     // The compounding case, through the REAL analyzer and the real
-    // `annotateFixTitles`: the damage a shared corpus would do does not look
+    // `annotateSuggestions`: the damage a shared corpus would do does not look
     // like a cache bug, it looks like page 3 being wrong.
     const root = await corpusRoot();
     const claude = new CountingCollector("claude", root, Array.from({ length: 40 }, (_, i) => madeUpSession("claude", i)));
@@ -536,7 +536,7 @@ describe("the scan cache never hands out the object it holds", () => {
     assert.equal(bodies[0], bodies[2], "page 1 must be the same page the second time it is asked for");
     assert.equal(bodies[1], bodies[3], "and so must page 2");
     const first = JSON.parse(bodies[0]);
-    assert.ok(first.sessions[0].rules.some((rule) => rule.fixTitle !== undefined), "fix titles are still annotated");
+    assert.ok(first.sessions[0].rules.some((rule) => rule.suggestionAvailable !== undefined), "suggestions are still annotated");
   });
 });
 

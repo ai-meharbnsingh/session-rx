@@ -2,12 +2,12 @@
  * `session-rx clean` — the ONLY code path in SessionRx that removes anything
  * from `~/.session-rx/`.
  *
- * Nothing else ever prunes that directory: not an undo, not an uninstall, not
- * a version upgrade. That is deliberate. The undo history is what makes
- * "Undo" a real promise rather than a word in the UI — a fix applied last
- * month is still undoable next month because its backup is still on disk. So
- * removing it is a decision only the user gets to make, out loud, with the
- * consequence stated first.
+ * Older SessionRx versions could apply and undo fixes, and kept a byte-for-
+ * byte backup of every file they touched under `~/.session-rx/undo/`. This
+ * version never writes a user's files at all — see THE SUGGESTION CONTRACT
+ * in `.claude/CLAUDE.md` — so nothing here creates new backups. What it does
+ * is let a user remove the backups an EARLIER version left behind, on an
+ * explicit `--yes`, and only ever inside SessionRx's own state directory.
  *
  * Hence the shape of this module:
  *
@@ -19,20 +19,63 @@
  * what is about to be lost, BEFORE a single byte is unlinked.
  *
  * ── Why the deletion is allowed here at all ──────────────────────────────
- * Every other module in this project is read-only by contract, and the fix
- * engine only ever writes after an explicit click. This file deletes, on an
+ * Every other module in this project is read-only. This file deletes, on an
  * explicit `--yes`, and only inside a directory SessionRx created itself. The
  * containment check below is what keeps that narrow: a symlink, a `..`, or an
  * injected state directory that points anywhere else ABORTS the whole run and
  * removes nothing. Symlinks are resolved BEFORE the check, never after.
  */
 
-import { lstat, readdir, readlink, realpath, rm } from "node:fs/promises";
+import { lstat, readdir, readFile, readlink, realpath, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
-import { STATE_DIR_NAME, createFixEnvironment, listTransactions } from "./base.js";
+export const STATE_DIR_NAME = ".session-rx";
+const UNDO_DIR_NAME = "undo";
+const TRANSACTION_NAME = "transaction.json";
+const JOURNAL_NAME = "journal.jsonl";
 
-/** Same containment test the fix engine uses on its own targets. */
+/**
+ * A minimal read-only view of the state directory an older SessionRx version
+ * used to write through `src/fixes/base.js`'s `createFixEnvironment`. Only
+ * the parts `clean` needs: where the state directory, its undo root, and its
+ * (now historical) transaction journal are.
+ */
+export function createStateEnvironment({ home = os.homedir(), stateDir } = {}) {
+  const resolvedHome = path.resolve(home);
+  const resolvedState = stateDir ? path.resolve(stateDir) : path.join(resolvedHome, STATE_DIR_NAME);
+  return {
+    home: resolvedHome,
+    stateDir: resolvedState,
+    undoRoot: path.join(resolvedState, UNDO_DIR_NAME),
+    journalPath: path.join(resolvedState, JOURNAL_NAME),
+  };
+}
+
+/** Every `transaction.json` an earlier version left under `undoRoot`, newest first. */
+export async function listTransactions(env) {
+  let names;
+  try {
+    names = await readdir(env.undoRoot);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  const records = [];
+  for (const name of names.sort().reverse()) {
+    const undoPath = path.join(env.undoRoot, name);
+    let record;
+    try {
+      record = JSON.parse(await readFile(path.join(undoPath, TRANSACTION_NAME), "utf8"));
+    } catch {
+      continue;
+    }
+    records.push({ ...record, undoPath });
+  }
+  return records;
+}
+
+/** Same containment test the fix engine used to use on its own targets. */
 function isInside(root, candidate) {
   return candidate === root || candidate.startsWith(root + path.sep);
 }
@@ -153,7 +196,7 @@ async function walkState(root) {
  * remove nothing and say why).
  */
 export async function surveyState({ home, stateDir } = {}) {
-  const env = createFixEnvironment({ home, stateDir });
+  const env = createStateEnvironment({ home, stateDir });
   const requested = env.stateDir;
 
   // An override whose own name is not the state directory's name is not a
@@ -226,9 +269,8 @@ export async function surveyState({ home, stateDir } = {}) {
 
 /**
  * Remove the CONTENTS of a surveyed state directory. The directory itself is
- * left in place and empty: the next fix that needs it does not have to
- * recreate it, and a state directory the user deliberately symlinked onto
- * another volume keeps working.
+ * left in place and empty: a state directory the user deliberately symlinked
+ * onto another volume keeps working.
  */
 export async function removeState(survey) {
   if (!survey || survey.status !== "ready") {
@@ -263,9 +305,10 @@ function datesLine(survey) {
 
 /** The sentence this whole command exists to make the user read. */
 const CONSEQUENCE =
-  "Once the undo history is gone, the fixes SessionRx has already applied can no\n" +
-  "longer be undone by SessionRx. Your own files are not touched either way —\n" +
-  "what is removed is the saved copy needed to put them back.\n";
+  "This removes backups an EARLIER version of SessionRx made before writing a\n" +
+  "file. This version never writes your files, so nothing here is needed for\n" +
+  "anything SessionRx itself still does. Your own files are not touched either\n" +
+  "way — what is removed is only the old saved copies.\n";
 
 export function formatSurvey(survey) {
   if (survey.status === "missing") {
