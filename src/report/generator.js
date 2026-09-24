@@ -30,6 +30,24 @@
  *                                     // the user's own. null = not recorded,
  *                                     // which is not zero.
  *     }
+ *     summary?: {                    // a plain-language rollup of the SAME
+ *                                     // verdicts this report renders, used for
+ *                                     // the "Summary for managers" section and
+ *                                     // by /api/report's own `summary` field
+ *                                     // (public/js/pages/report.js renders it
+ *                                     // as cards). Computed automatically by
+ *                                     // `buildReportInput` when not supplied.
+ *       sessionsAnalyzed: number
+ *       verdicts: {observed: number, notObserved: number, unknown: number}
+ *       perCheck: Array<{id: string, name: string, observed: number,
+ *                         notObserved: number, unknown: number}>
+ *       perTool: Array<{cli: string, status: "read" | "detected-not-read" |
+ *                        "not-installed", sessions: number|null,
+ *                        problems: number|null, note: string|null}>
+ *                                     // antigravity is detection-only: it is
+ *                                     // ALWAYS "detected-not-read" with
+ *                                     // problems: null, never a measured 0.
+ *     }
  *     clis: Array<{
  *       cli:       string             // "claude" | "codex" | "cursor" | ...
  *       sessions:  number | null      // null = count not recoverable (NOT zero)
@@ -498,6 +516,91 @@ function countCell(value) {
   return cell(typeof value === "number" && Number.isFinite(value) ? groupInt(value) : value);
 }
 
+/** How a per-tool row from `data.summary.perTool` reads in plain English. */
+function summaryToolLine(row) {
+  const cli = str(row?.cli).trim() || "this tool";
+  const label = cli.charAt(0).toUpperCase() + cli.slice(1);
+  if (row?.status === "detected-not-read") {
+    return `${label}: detected on this machine, but not read yet — not the same as zero problems.`;
+  }
+  if (typeof row?.sessions !== "number" || !Number.isFinite(row.sessions)) {
+    return `${label}: not installed, or nothing was read for it.`;
+  }
+  const problems = typeof row?.problems === "number" && Number.isFinite(row.problems)
+    ? `${groupInt(row.problems)} problem${row.problems === 1 ? "" : "s"} found`
+    : "problems not available";
+  return `${label}: ${groupInt(row.sessions)} session${row.sessions === 1 ? "" : "s"} checked, ${problems}.`;
+}
+
+/**
+ * "Summary for managers" — a short, plain-language rollup at the TOP of the
+ * document, ahead of every other section, so a reader who never opens the
+ * tables below still gets: how many sessions were checked, how many problems
+ * were found and the top few kinds, how many checks could not be measured
+ * (explicitly not a pass), and the next step.
+ *
+ * Built ONLY from `data.summary` (the same structured verdicts the rest of
+ * this report renders) when it is supplied. Where it is not — an older or a
+ * hand-built `ReportInput` that has not been updated — nothing here is
+ * invented from parsing the rest of the document; the section states plainly
+ * that the summary could not be computed, which is the same honesty rule
+ * this whole file follows for every other missing number.
+ */
+function renderManagerSummary(data) {
+  const summary = isPlainObject(data?.summary) ? data.summary : null;
+  const lines = ["## Summary for managers", ""];
+
+  if (!summary) {
+    lines.push(
+      "A plain-language summary could not be computed for this report — the data needed for it was not supplied. " +
+      "See the sections below for the full detail.",
+    );
+    lines.push("");
+    return lines;
+  }
+
+  const sessionsAnalyzed = typeof summary.sessionsAnalyzed === "number" && Number.isFinite(summary.sessionsAnalyzed)
+    ? summary.sessionsAnalyzed
+    : null;
+  const verdicts = isPlainObject(summary.verdicts) ? summary.verdicts : {};
+  const observed = typeof verdicts.observed === "number" && Number.isFinite(verdicts.observed) ? verdicts.observed : null;
+  const unknown = typeof verdicts.unknown === "number" && Number.isFinite(verdicts.unknown) ? verdicts.unknown : null;
+
+  lines.push(
+    sessionsAnalyzed === null
+      ? "- Sessions checked: not available."
+      : `- ${groupInt(sessionsAnalyzed)} session${sessionsAnalyzed === 1 ? "" : "s"} checked.`,
+  );
+  lines.push(
+    observed === null
+      ? "- Problems found: not available."
+      : `- ${groupInt(observed)} problem${observed === 1 ? "" : "s"} found.`,
+  );
+
+  const perCheck = Array.isArray(summary.perCheck) ? summary.perCheck : [];
+  const topProblems = perCheck
+    .filter((row) => typeof row?.observed === "number" && row.observed > 0)
+    .sort((a, b) => b.observed - a.observed)
+    .slice(0, 3);
+  if (topProblems.length) {
+    const named = topProblems.map((row) => `${str(row?.name).trim() || str(row?.id).trim() || "an unnamed check"} (${groupInt(row.observed)})`).join(", ");
+    lines.push(`- Most common: ${named}.`);
+  }
+
+  lines.push(
+    unknown === null
+      ? "- Checks that could not be measured: not available."
+      : `- ${groupInt(unknown)} check${unknown === 1 ? "" : "s"} could not be measured — this is explicitly not a pass, not a clean result.`,
+  );
+
+  const perTool = Array.isArray(summary.perTool) ? summary.perTool : [];
+  for (const row of perTool) lines.push(`- ${summaryToolLine(row)}`);
+
+  lines.push("- Next step: see Suggested changes below — each one can be pasted directly into your AI tool.");
+  lines.push("");
+  return lines;
+}
+
 function renderRange(range) {
   const from = str(range?.from).trim();
   const to = str(range?.to).trim();
@@ -813,6 +916,7 @@ function renderTrend(trend) {
 function assemble(data) {
   const lines = [
     ...renderHeader(data),
+    ...renderManagerSummary(data),
     ...renderRange(data.range),
     ...renderClis(data.clis),
     ...renderFindings(data.rules),

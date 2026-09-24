@@ -265,7 +265,7 @@ function windowDenominator(session, ctx) {
 
 const contextPressure = {
   id: "context-pressure",
-  name: "Context pressure",
+  name: "Conversation got too full",
   description:
     "The session's average per-turn context, as a share of the window it actually had. High average context means every later turn is paying to carry the whole history.",
   threshold: {
@@ -284,9 +284,9 @@ const contextPressure = {
   // `magnitude` — never a number invented on the client.
   plain: {
     problem:
-      "Your AI's context has been averaging {pct} of its available window in this session. When context runs this high, older parts of the conversation are more likely to get pushed out, summarized, or dropped before they should be.",
+      "During this conversation, the AI has been carrying an average of {pct} of everything it can hold at once — its memory limit, measured in tokens (chunks of text the AI reads). When it runs this full, older parts of the conversation are more likely to get pushed out, shortened, or dropped before they should be.",
     why:
-      "This is a warning about headroom, not proof that anything went wrong — a big task can legitimately use a lot of context. It flags sessions where compacting the conversation, or splitting the task into smaller pieces, would likely help.",
+      "This is a warning about how much room is left, not proof that anything went wrong — a big task can legitimately use a lot of that memory. It flags conversations where summarising what has been discussed so far, or splitting the task into smaller pieces, would likely help.",
     // One sentence per CAUSE, because this rule goes unmeasured for several
     // different reasons and a single sentence would be false for the others.
     // The renderer picks by `evidence.reasonCode` and falls back to `default`.
@@ -405,7 +405,7 @@ const contextPressure = {
 
 const cacheHit = {
   id: "cache-hit",
-  name: "Low cache hit",
+  name: "Re-read the same material instead of reusing it",
   description:
     "How much of the cacheable prompt prefix was READ back from cache rather than re-created. A low rate means the session keeps paying to rebuild a prefix it already had.",
   threshold: {
@@ -418,9 +418,9 @@ const cacheHit = {
   fix: "claude-output-hygiene",
   plain: {
     problem:
-      "About {pct} of this session's reusable prompt content had to be rebuilt from scratch instead of being read back from cache.",
+      "About {pct} of the material the AI could have reused from earlier in this conversation had to be rebuilt from scratch instead of being reused. Reused material is cheaper and faster than rebuilding it.",
     why:
-      "A low cache hit rate usually means the reusable part of the prompt — system instructions, tool descriptions, file contents — kept changing between calls, or caching could not take advantage of a stable prefix. It is not a sign that the task itself was done wrong.",
+      "This usually means the reusable part of what is sent to the AI — instructions, command descriptions, file contents — kept changing between requests, so it could not be reused. It is not a sign that the task itself was done wrong.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -508,7 +508,7 @@ const cacheHit = {
 
 const repeatTool = {
   id: "repeat-tool",
-  name: "Repeated tool work",
+  name: "Ran the same command again and again",
   description:
     "The same tool, called with the same input, returning a result of the same size, five or more times in one session — the session paying again for an answer that shows no sign of having changed.",
   threshold: {
@@ -522,9 +522,9 @@ const repeatTool = {
   fix: "claude-batch-commands",
   plain: {
     problem:
-      "Your AI made the same tool call — same tool, same input, and a result of the same size — {count} times in this session.",
+      "Your AI ran the same command — same command, same input, and an answer of the same size — {count} times in this session.",
     why:
-      "This may indicate wasted work, but repeated calls are not always unnecessary — a command can legitimately return the same answer more than once. This is a DETECTED REPETITION, not CONFIRMED WASTE: it is worth checking whether anything should have changed between those calls before assuming time was lost.",
+      "This may indicate wasted work, but repeated commands are not always unnecessary — a command can legitimately return the same answer more than once. This is a DETECTED REPETITION, not CONFIRMED WASTE: it is worth checking whether anything should have changed between those commands before assuming time was lost.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -619,7 +619,7 @@ const repeatTool = {
 
 const largeToolResult = {
   id: "large-tool-result",
-  name: "Large tool results",
+  name: "Commands returned very long output",
   description:
     "Tool results large enough that they dominate the context they land in, happening often enough in one session to be a habit rather than one necessary answer.",
   threshold: {
@@ -632,9 +632,9 @@ const largeToolResult = {
   fix: "claude-output-hygiene",
   plain: {
     problem:
-      "This session pulled in an unusually large tool result {count} separate times, each one big enough on its own to crowd out other context.",
+      "This session pulled in an unusually long command result {count} separate times, each one big enough on its own to crowd out the room left for everything else the AI needs to remember.",
     why:
-      "One large result answering one real question is normal. Several large results in one session usually means a whole file or a whole log was read in rather than just the part that was needed.",
+      "One long result answering one real question is normal. Several long results in one session usually means a whole file or a whole log was read in rather than just the part that was needed.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -754,7 +754,7 @@ function theilSenSlope(points, cap = 300) {
 
 const longRisingContext = {
   id: "long-rising-context",
-  name: "Long rising context",
+  name: "Long session that kept growing",
   description:
     "A session that has run for hours AND whose context is still trending upward — it is not compacting, it is accumulating.",
   threshold: {
@@ -767,9 +767,9 @@ const longRisingContext = {
   fix: "claude-compact-contract",
   plain: {
     problem:
-      "This session has been running for more than four hours, and its context size keeps climbing rather than levelling off or shrinking.",
+      "This conversation has been running for more than four hours, and the amount it is carrying — tokens, the chunks of text the AI reads — keeps climbing rather than levelling off or shrinking.",
     why:
-      "A long session is fine by itself if it periodically compacts its context. This only fires when BOTH the length and the upward trend hold together — a session that runs long but stays flat is not flagged, and a session that spikes briefly and then compacts is not flagged either.",
+      "A long conversation is fine by itself if it periodically summarises what has been discussed so far. This only fires when BOTH the length and the upward trend hold together — a conversation that runs long but stays flat is not flagged, and one that spikes briefly and then gets summarised is not flagged either.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:
@@ -990,7 +990,7 @@ function peakOverlap(intervals) {
 
 const subagentConcurrency = {
   id: "subagent-concurrency",
-  name: "High sub-agent concurrency",
+  name: "Too many helper agents at once",
   description:
     "How many sub-agents were running at the same moment, against how many the session dispatched in total — a burst of parallel workers rather than staged work.",
   threshold: {
@@ -1004,9 +1004,9 @@ const subagentConcurrency = {
   fix: "claude-worker-cap",
   plain: {
     problem:
-      "At its busiest moment, this session had sub-agents running at the same time equal to {pct} of everything it dispatched — a burst of parallel work rather than one thing at a time.",
+      "At its busiest moment, this session had helper agents (AI assistants the main session hands sub-tasks to) running at the same time equal to {pct} of everything it started — a burst of parallel work rather than one thing at a time.",
     why:
-      "Running several sub-agents at once can be a deliberate and efficient way to fan work out. This only flags it when at least two of them were genuinely running together AND more than half of what was dispatched was active at the same moment — one sub-agent working on its own is never flagged, whatever share of the session's dispatches it happens to be — so it is worth a quick check that the burst was intentional rather than accidental.",
+      "Running several helper agents at once can be a deliberate and efficient way to split work up. This only flags it when at least two of them were genuinely running together AND more than half of what was started was active at the same moment — one helper agent working on its own is never flagged, whatever share of the session's total it happens to be — so it is worth a quick check that the burst was intentional rather than accidental.",
     unmeasured: {
       ...SHARED_UNMEASURED,
       default:

@@ -40,6 +40,7 @@ test("happy path renders every required section in order", () => {
 
   assert.deepEqual(sectionTitles(md, 1), ["SessionRx diagnostic report"]);
   assert.deepEqual(sectionTitles(md, 2), [
+    "Summary for managers",
     "1. Date range covered",
     "2. CLIs detected",
     "3. Top findings",

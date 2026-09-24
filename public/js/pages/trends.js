@@ -264,7 +264,7 @@ function contextChart(trends) {
           pointRadius: 3,
         },
         {
-          label: `Turns above ${threshold}% of window (%)`,
+          label: `Turns above ${threshold}% full (%)`,
           data: high,
           yAxisID: 'yPct',
           spanGaps: false,
@@ -315,7 +315,7 @@ function contextChart(trends) {
 
   return chartCard({
     id: 'g1-context',
-    title: 'G1 · Context efficiency',
+    title: 'G1 · How full the conversation got',
     sub: `${measuredAvg}/${rows.length} days with a context reading · ${measuredHigh}/${rows.length} with a computable share`,
     config,
     legend: [{ swatch: 'legend-swatch-gap', caption: 'a break in the line is a day that was not measured, not a zero' }],
@@ -391,7 +391,7 @@ function spendChart(trends) {
 
   return chartCard({
     id: 'g2-spend',
-    title: 'G2 · Token spend',
+    title: 'G2 · Text used (tokens)',
     sub: `${measured}/${rows.length} days with a cache reading`,
     config,
     legend: [{ swatch: 'legend-swatch-gap', caption: 'a missing bar is a day with no cache counter, not a day of no spend' }],
@@ -441,7 +441,7 @@ function cacheChart(trends) {
   const colorsResolved = Object.values(zoneColors).every((value) => typeof value === 'string' && value);
 
   const dataset = {
-    label: 'Cache hit rate (%)',
+    label: 'Reused content (%)',
     data: rates,
     spanGaps: false,
     tension: 0.2,
@@ -488,7 +488,7 @@ function cacheChart(trends) {
 
   return chartCard({
     id: 'g3-cache',
-    title: 'G3 · Cache hit rate',
+    title: 'G3 · Reused vs rebuilt content',
     sub: `${measured}/${rows.length} days with a rate`,
     config,
     legend: [
@@ -502,7 +502,7 @@ function cacheChart(trends) {
       + 'unread creation figure treated as zero would report a flawless 100%.',
     emptyReason:
       measured === 0
-        ? 'No day in this window produced a cache hit rate, so there is nothing to plot and no zone to report.'
+        ? 'No day in this window had a reuse rate to measure, so there is nothing to plot and no zone to report.'
         : null,
     table: dataTable(
       [

@@ -373,6 +373,25 @@ h4 { margin-bottom: 4px; font-size: 12px; color: var(--muted); text-transform: u
 .summary-stat-label { color: var(--subtle); font: 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
 .summary-action { flex: 0 0 auto; }
 
+/* ------------------------------------------- Report page: manager summary */
+
+.report-summary { display: flex; flex-direction: column; gap: 10px; margin-bottom: 4px; }
+.report-summary-stats { flex-wrap: wrap; }
+.summary-metric-card {
+  display: flex; flex-direction: column; gap: 4px; min-width: 140px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--border);
+}
+.summary-metric-value { font: 24px var(--mono); font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+.summary-metric-label { color: var(--subtle); font: 12px var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+.summary-metric-caption { color: var(--unknown); font: 11px var(--mono); font-style: italic; }
+.summary-metric-accent { border-left-color: var(--accent); }
+.summary-metric-warn { border-left-color: var(--warn); }
+.summary-metric-pass { border-left-color: var(--pass); }
+.summary-metric-unknown { border-left-color: var(--unknown); background: var(--unknown-bg); }
+.report-summary-tools { list-style: none; display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 0; margin: 0; }
+.report-summary-tools li { display: flex; align-items: center; gap: 8px; }
+
 /* ---------------------------------------- health card header + meta grid */
 
 .health-card { display: grid; }

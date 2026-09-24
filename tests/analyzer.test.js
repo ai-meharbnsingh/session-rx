@@ -1452,7 +1452,7 @@ test("F-023: the set-aside count reaches the rendered report, next to the count 
 // the report contract (R_3C)
 // ===========================================================================
 
-const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "rules", "fixes", "trend"];
+const REPORT_INPUT_KEYS = ["generatedAt", "parserVersion", "range", "clis", "rules", "summary", "fixes", "trend"];
 const RULE_RESULT_KEYS = ["id", "name", "severity", "fix", "threshold", "evidence"];
 const EVIDENCE_KEYS = ["status", "reason", "values", "sources", "derivation", "parserVersion"];
 const VALUE_KEYS = ["label", "value", "unit", "windowSource", "sessionId"];

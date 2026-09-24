@@ -357,6 +357,97 @@ function setAsideCount(sessions, explicit) {
   return channelSeen ? derived : null;
 }
 
+/** The CLIs a manager-facing summary always names, in this order, whether or not anything was read for them. */
+const SUMMARY_TOOLS = Object.freeze(["claude", "codex", "cursor", "antigravity"]);
+
+/**
+ * A plain-language, manager-readable rollup of the same verdicts the report
+ * renders — sessions analysed, how many checks came back observed /
+ * not-observed / unknown, a per-check breakdown, and a per-tool breakdown.
+ *
+ * ANTIGRAVITY IS NEVER SHOWN AS "0 problems". It is detection-only (its
+ * collector reads no session transcript), so `problems: null` and
+ * `status: "detected-not-read"` are reported for it — a null there renders as
+ * "detected, not read yet" on the page, never as a clean zero nothing
+ * measured.
+ *
+ * @param {{sessions?: Array<object>, clis?: Array<object>}} input
+ *   `sessions` are analyzed session-health objects (`analyzeSession` output,
+ *   each carrying `.rules`); `clis` is `analyzeAll().collectors`.
+ * @returns {{sessionsAnalyzed: number, verdicts: {observed: number,
+ *   notObserved: number, unknown: number}, perCheck: Array<{id: string,
+ *   name: string, observed: number, notObserved: number, unknown: number}>,
+ *   perTool: Array<{cli: string, status: string, sessions: number|null,
+ *   problems: number|null, note: string|null}>}}
+ */
+export function buildManagerSummary(input = {}) {
+  const sessions = Array.isArray(input?.sessions) ? input.sessions : [];
+  const clis = Array.isArray(input?.clis) ? input.clis : [];
+
+  let observed = 0;
+  let notObserved = 0;
+  let unknown = 0;
+  const perCheck = RULES.map((rule) => ({ id: rule.id, name: rule.name, observed: 0, notObserved: 0, unknown: 0 }));
+  const perCheckById = new Map(perCheck.map((row) => [row.id, row]));
+
+  for (const session of sessions) {
+    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+      const status = rule?.evidence?.status;
+      const bucket = perCheckById.get(str(rule?.id));
+      if (status === "observed") {
+        observed += 1;
+        if (bucket) bucket.observed += 1;
+      } else if (status === "not-observed") {
+        notObserved += 1;
+        if (bucket) bucket.notObserved += 1;
+      } else {
+        unknown += 1;
+        if (bucket) bucket.unknown += 1;
+      }
+    }
+  }
+
+  const cliByName = new Map(clis.map((row) => [str(row?.cli), row]));
+  const perTool = SUMMARY_TOOLS.map((cli) => {
+    const row = cliByName.get(cli) ?? null;
+    const detectionOnly = row?.support === "detection-only" || (!row && cli === "antigravity");
+    if (detectionOnly) {
+      return {
+        cli,
+        status: "detected-not-read",
+        sessions: null,
+        problems: null,
+        note: str(row?.note) || "detected on this machine, but SessionRx cannot read its sessions yet, so nothing about its usage is measured here — that is not the same as zero problems.",
+      };
+    }
+    const toolSessions = sessions.filter((session) => str(session?.cli) === cli);
+    let problems = null;
+    if (toolSessions.length) {
+      problems = 0;
+      for (const session of toolSessions) {
+        for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
+          if (rule?.evidence?.status === "observed") problems += 1;
+        }
+      }
+    }
+    const sessionCount = num(row?.sessions) ?? (toolSessions.length || null);
+    return {
+      cli,
+      status: row ? "read" : "not-installed",
+      sessions: sessionCount,
+      problems,
+      note: str(row?.note) || null,
+    };
+  });
+
+  return {
+    sessionsAnalyzed: sessions.length,
+    verdicts: { observed, notObserved, unknown },
+    perCheck,
+    perTool,
+  };
+}
+
 /**
  * Build the corpus-level `ReportInput` consumed by `generateReport`.
  *
@@ -399,12 +490,18 @@ export function buildReportInput(input = {}) {
     Object.assign(range, input.contextMeasurement);
   }
 
+  const clis = Array.isArray(input?.clis) ? input.clis : [];
+
   return {
     generatedAt: str(input?.generatedAt) || null,
     parserVersion,
     range,
-    clis: Array.isArray(input?.clis) ? input.clis : [],
+    clis,
     rules: aggregateRules(sessions, parserVersion),
+    // Computed from the SAME session-health objects (and the same verdicts)
+    // the rest of this report renders — never re-derived from the assembled
+    // Markdown prose, which is free to change under it (see generator.js).
+    summary: input?.summary && typeof input.summary === "object" ? input.summary : buildManagerSummary({ sessions, clis }),
     fixes: Array.isArray(input?.fixes) ? input.fixes : [],
     trend: input?.trend ?? {
       direction: "unknown",

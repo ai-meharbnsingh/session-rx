@@ -1641,6 +1641,11 @@ export function createApp(options = {}) {
       // Not in BP-005.05, and required anyway: a report assembled from a corpus
       // where a collector failed must say so, or it reads as a complete picture.
       diagnostics: result.analysis.diagnostics ?? [],
+      // A plain-language rollup of the SAME verdicts the markdown above was
+      // built from (reportInput.summary, health.buildManagerSummary) — never
+      // parsed back out of the assembled Markdown text, which is free to
+      // change under it. public/js/pages/report.js renders this as cards.
+      summary: reportInput.summary ?? null,
     });
   }));
 

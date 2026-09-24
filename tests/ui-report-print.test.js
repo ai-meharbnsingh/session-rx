@@ -13,19 +13,18 @@
  *      actually hides navigation / buttons / interactive chrome and keeps
  *      the `unknown` verdict visually distinct on paper (dashed + hatched,
  *      not just a colour a printer may not reproduce);
- *   3. NO plain-language "problems found / passed / could not be measured"
- *      summary block was added to the Report page. `/api/report` (BP-005.05,
- *      src/server.js) returns `{markdown, generatedAt, redactions, scan,
- *      sessionWindow, diagnostics}` — the per-rule `observed` /
- *      `not-observed` / `unknown` verdicts live only inside the assembled
- *      Markdown prose, not as structured counts the page can read without
- *      re-parsing generator wording (src/report/generator.js) that is free to
- *      change under it. Deriving "N problems / N passed / N unmeasured" from
- *      that text would be exactly the kind of silent, fragile inference the
- *      honesty contract in CLAUDE.md exists to forbid, so this page does not
- *      attempt it — a server change (returning verdict counts alongside the
- *      markdown) would be required first. This suite pins that the page
- *      still never claims a false "all clear" in the meantime.
+ *   3. A plain-language "problems found / passed / could not be measured"
+ *      summary block IS rendered on the Report page, built ONLY from the
+ *      structured `summary` field `/api/report` now returns (BP-005.05,
+ *      src/server.js — `{markdown, generatedAt, redactions, scan,
+ *      sessionWindow, diagnostics, summary}`, computed by
+ *      `health.buildManagerSummary` from the same session-health verdicts the
+ *      markdown itself was rendered from). report.js must NEVER derive these
+ *      counts by parsing the assembled Markdown prose (src/report/generator.js
+ *      is free to change under it) — that would be exactly the kind of
+ *      silent, fragile inference the honesty contract in CLAUDE.md exists to
+ *      forbid. This suite pins both: the structured cards render, and the
+ *      page never claims a false "all clear".
  *
  * DOM shim follows the same minimal pattern as tests/ui-health.test.js and
  * tests/frontend-contract.test.js: createElement / createTextNode / append /
@@ -209,6 +208,15 @@ const REPORT = (over = {}) => ({
   scan: { limitPerCollector: 250, defaulted: true, atLimit: false, note: null },
   sessionWindow: { matched: 1, excludedUndated: 0 },
   diagnostics: [],
+  summary: {
+    sessionsAnalyzed: 1,
+    verdicts: { observed: 1, notObserved: 4, unknown: 1 },
+    perCheck: [{ id: "repeat-tool", name: "Ran the same command again and again", observed: 1, notObserved: 0, unknown: 0 }],
+    perTool: [
+      { cli: "claude", status: "read", sessions: 1, problems: 1, note: null },
+      { cli: "antigravity", status: "detected-not-read", sessions: null, problems: null, note: "detected, not read yet" },
+    ],
+  },
   ...over,
 });
 
@@ -389,11 +397,11 @@ test("the Report page never claims a false 'all clear', with or without a loaded
   }
 });
 
-test("the Report page does not compute or render its own observed/not-observed/unknown counts", () => {
-  // /api/report (src/server.js) returns {markdown, generatedAt, redactions,
-  // scan, sessionWindow, diagnostics} — no structured per-rule verdict
-  // counts. report.js must not silently invent them by scanning the
-  // Markdown text for generator.js's current wording, which would be a
+test("the Report page renders its observed/not-observed/unknown summary cards from the structured API field, never by parsing Markdown", () => {
+  // /api/report (src/server.js) now returns a structured `summary` field
+  // alongside {markdown, generatedAt, redactions, scan, sessionWindow,
+  // diagnostics}. report.js must render from THAT field, never by scanning
+  // the Markdown text for generator.js's current wording, which would be a
   // parse that goes stale the moment the report prose changes and would
   // then report the WRONG counts rather than an honest absence.
   const src = read(REPORT_JS);
@@ -402,7 +410,38 @@ test("the Report page does not compute or render its own observed/not-observed/u
     "report.js must not parse verdict counts out of the assembled Markdown text",
   );
   const mount = render(REPORT({}));
-  assert.equal(withClass(mount, "report-summary").length, 0, "no fabricated summary block is rendered");
+  assert.equal(withClass(mount, "report-summary").length, 1, "the structured summary block renders once");
+
+  const text = mount.textContent;
+  assert.match(text, /Sessions checked/i);
+  assert.match(text, /Problems found/i);
+  assert.match(text, /Passed/i);
+  assert.match(text, /Could not be measured/i);
+  assert.match(text, /not a pass/i, "the unknown card states plainly that it is not a pass");
+  // antigravity is detection-only: it must read as "detected, not read yet",
+  // never as a measured zero.
+  assert.match(text, /detected, not read yet/i);
+  assert.ok(!/antigravity.{0,40}\b0\b.{0,15}problem/i.test(text), "antigravity must never render as 0 problems");
+});
+
+test("a report with no structured summary renders no summary cards, and no fabricated zero", () => {
+  const mount = render(REPORT({ summary: null }));
+  assert.equal(withClass(mount, "report-summary").length, 0, "no summary block when the server supplied none");
+  assert.doesNotMatch(mount.textContent, /Sessions checked/i);
+});
+
+test("a null count in the summary renders 'not available', never 0", () => {
+  const mount = render(REPORT({
+    summary: {
+      sessionsAnalyzed: null,
+      verdicts: { observed: null, notObserved: null, unknown: null },
+      perCheck: [],
+      perTool: [],
+    },
+  }));
+  const text = mount.textContent;
+  assert.match(text, /not recorded/i);
+  assert.doesNotMatch(text, /Sessions checked0|Problems found0|Passed0|Could not be measured0/);
 });
 
 test("no title or aria-label on the Report page leaks internal jargon (DIS-/BP-/F- ids, 'sidechain', etc.)", () => {

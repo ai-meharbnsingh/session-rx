@@ -82,7 +82,8 @@
    * a border is legible on paper, a soft shadow is not, and a coloured card
    * fill on a photocopier is a grey rectangle hiding the text inside it. */
   .card, .rx-card, .callout, .verdict, .modal-facts, .diff, .diff-box,
-  .health-summary, .chart-container, .table-wrap {
+  .health-summary, .chart-container, .table-wrap,
+  .report-summary, .summary-metric-card {
     background: #ffffff !important;
     box-shadow: none !important;
     border: 1px solid #999999 !important;
@@ -107,7 +108,7 @@
     font-style: italic;
   }
   .badge-unknown, .verdict-unknown, .finding-pill-unknown, .health-pill.health-unknown,
-  .score-seg-unknown, .heatmap-cell.is-null {
+  .score-seg-unknown, .heatmap-cell.is-null, .summary-metric-unknown {
     background-image: repeating-linear-gradient(135deg, #00000022 0 4px, transparent 4px 8px) !important;
     background-color: #ffffff !important;
     border-style: dashed !important;
@@ -125,10 +126,11 @@
    * row, one verdict, one session card — not the whole report, which must be
    * free to span pages or nothing would print past page one. */
   .card, .rx-card, .verdict, .health-card, .callout, tr, .modal-facts,
-  .chart-container, .summary-card {
+  .chart-container, .summary-card, .summary-metric-card {
     break-inside: avoid;
     page-break-inside: avoid;
   }
+  .report-summary-stats { display: flex; flex-wrap: wrap; gap: 8pt; }
   h1, h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
 
   /* ------------------------------------------- collapsed disclosure, opened
