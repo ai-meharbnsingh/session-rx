@@ -1084,6 +1084,14 @@ const subagentConcurrency = {
     const children = Array.isArray(ctx?.children) ? ctx.children : [];
     const dispatched = children.length;
 
+    if (ctx?.sessionMeta?.subagentReadError) {
+      return unknown(
+        `the linked sub-agent list is incomplete: ${ctx.sessionMeta.subagentReadError}. A partial child read cannot establish a definitive concurrency measurement.`,
+        dispatched ? [countValue("sub-agent sessions linked to this session", dispatched)] : [],
+        "subagent-reading-partial",
+      );
+    }
+
     if (dispatched === 0) {
       // Claude's collector reads the subagents directory beside every selected
       // parent, so an array here is complete evidence for THIS parent even when

@@ -12,6 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { RULES } from "../src/analyzer/rules.js";
 import { analyzeSession, buildManagerSummary, buildReportInput } from "../src/analyzer/health.js";
 import { generateReport } from "../src/report/generator.js";
 
@@ -99,6 +100,62 @@ test("buildManagerSummary: a tool with sessions read gets a real (non-null) prob
   assert.equal(row.status, "read");
   assert.equal(row.sessions, 1);
   assert.equal(row.problems, 1);
+});
+
+test("applicable missing verdicts are unknown, while not-applicable sessions stay outside the denominator", () => {
+  const claude = analyzeSession(repeatToolSession("claude", "claude-missing"), { toolCallsRecorded: true });
+  claude.rules = claude.rules.filter((rule) => rule.id !== "subagent-concurrency");
+  const codex = analyzeSession(repeatToolSession("codex", "codex-na"), { toolCallsRecorded: true });
+  const sessions = [claude, codex];
+  const ruleApplicability = [{
+    cli: "codex",
+    notApplicable: [{ ruleId: "subagent-concurrency", reason: "the format has no parent link" }],
+  }];
+
+  const summary = buildManagerSummary({ sessions, clis: [], ruleApplicability });
+  const row = summary.perCheck.find((item) => item.id === "subagent-concurrency");
+  assert.deepEqual(
+    { observed: row.observed, notObserved: row.notObserved, unknown: row.unknown, notApplicable: row.notApplicable },
+    { observed: 0, notObserved: 0, unknown: 1, notApplicable: 1 },
+  );
+  assert.equal(summary.verdicts.unknown, summary.perCheck.reduce((sum, item) => sum + item.unknown, 0));
+
+  const report = buildReportInput({ sessions, clis: [{ cli: "codex" }], ruleApplicability });
+  const aggregate = report.rules.find((item) => item.id === "subagent-concurrency");
+  assert.equal(aggregate.evidence.values.find((item) => item.label === "sessions checked").value, 1);
+  assert.equal(aggregate.evidence.values.find((item) => item.label.includes("not applicable")).value, 1);
+  assert.equal(aggregate.evidence.values.find((item) => item.label.includes("could NOT")).value, 1);
+});
+
+test("every report and manager per-rule denominator equals its applicable sessions", () => {
+  const first = analyzeSession(repeatToolSession("claude", "mixed-1"), { toolCallsRecorded: true });
+  const second = analyzeSession(repeatToolSession("claude", "mixed-2"), { toolCallsRecorded: true });
+  second.rules = second.rules.filter((rule) => rule.id !== "cache-hit");
+  const codex = analyzeSession(repeatToolSession("codex", "mixed-codex"), { toolCallsRecorded: true });
+  const sessions = [first, second, codex];
+  const ruleApplicability = [{
+    cli: "codex",
+    notApplicable: [{ ruleId: "subagent-concurrency", reason: "the format has no parent link" }],
+  }];
+  const summary = buildManagerSummary({ sessions, clis: [], ruleApplicability });
+  const report = buildReportInput({ sessions, clis: [{ cli: "codex" }], ruleApplicability });
+
+  for (const rule of RULES) {
+    const applicable = rule.id === "subagent-concurrency" ? 2 : 3;
+    const summaryRow = summary.perCheck.find((item) => item.id === rule.id);
+    assert.equal(summaryRow.observed + summaryRow.notObserved + summaryRow.unknown, applicable, rule.id);
+    const aggregate = report.rules.find((item) => item.id === rule.id);
+    const checked = aggregate.evidence.values.find((item) => item.label === "sessions checked").value;
+    assert.equal(checked, applicable, `${rule.id} report denominator`);
+    assert.equal(
+      aggregate.evidence.values.find((item) => item.label === "sessions where this was observed").value
+        + aggregate.evidence.values.find((item) => item.label === "sessions where this could NOT be measured (not counted as passing)").value
+        + (checked - aggregate.evidence.values.find((item) => item.label === "sessions where this was observed").value
+          - aggregate.evidence.values.find((item) => item.label === "sessions where this could NOT be measured (not counted as passing)").value),
+      applicable,
+      `${rule.id} report three-state denominator`,
+    );
+  }
 });
 
 test("buildReportInput computes summary automatically when not supplied", () => {

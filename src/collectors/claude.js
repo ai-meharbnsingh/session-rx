@@ -437,15 +437,29 @@ export class ClaudeCollector extends Collector {
       if (!matched) continue;
       const agentId = matched[1];
       const child = path.join(dir, file.name);
+      const skippedBefore = diagnostic.linesSkipped;
+      const truncatedBefore = diagnostic.truncated.length;
+      const errorsBefore = diagnostic.errors.length;
       try {
+        const session = await parseSession(child, {
+          project: entry.project,
+          diagnostic,
+          maxBytes: this.maxBytes,
+          sessionId: subagentSessionId(parent.sessionId, agentId),
+        });
+        const incomplete = diagnostic.truncated.length > truncatedBefore
+          || diagnostic.linesSkipped > skippedBefore
+          || diagnostic.errors.length > errorsBefore;
+        if (incomplete) {
+          const details = [];
+          if (diagnostic.truncated.length > truncatedBefore) details.push("truncated");
+          if (diagnostic.linesSkipped > skippedBefore) details.push("malformed or skipped lines");
+          if (diagnostic.errors.length > errorsBefore) details.push("read errors");
+          readError = readError || `sub-agent file ${child} was incomplete (${details.join(", ")})`;
+        }
         children.push({
           agentId,
-          session: await parseSession(child, {
-            project: entry.project,
-            diagnostic,
-            maxBytes: this.maxBytes,
-            sessionId: subagentSessionId(parent.sessionId, agentId),
-          }),
+          session,
         });
       } catch (error) {
         diagnostic.filesSkipped += 1;

@@ -397,24 +397,37 @@ export function buildManagerSummary(input = {}) {
   let unknown = 0;
   const perCheck = RULES.map((rule) => ({ id: rule.id, name: rule.name, observed: 0, notObserved: 0, unknown: 0, notApplicable: 0 }));
   const perCheckById = new Map(perCheck.map((row) => [row.id, row]));
+  const suppliedNotApplicable = new Set();
+  for (const entry of Array.isArray(input?.ruleApplicability) ? input.ruleApplicability : []) {
+    const cli = str(entry?.cli) || "unknown";
+    for (const item of Array.isArray(entry?.notApplicable) ? entry.notApplicable : []) {
+      suppliedNotApplicable.add(`${cli}:${str(item?.ruleId)}`);
+    }
+  }
 
   for (const session of sessions) {
-    for (const item of Array.isArray(session?.notApplicable) ? session.notApplicable : []) {
-      const bucket = perCheckById.get(str(item?.ruleId));
-      if (bucket) bucket.notApplicable += 1;
-    }
-    for (const rule of Array.isArray(session?.rules) ? session.rules : []) {
-      const status = rule?.evidence?.status;
-      const bucket = perCheckById.get(str(rule?.id));
+    const cli = str(session?.cli) || "unknown";
+    const sessionNotApplicable = new Set(
+      (Array.isArray(session?.notApplicable) ? session.notApplicable : []).map((item) => str(item?.ruleId)),
+    );
+    for (const rule of RULES) {
+      const bucket = perCheckById.get(rule.id);
+      const notApplicable = sessionNotApplicable.has(rule.id) || suppliedNotApplicable.has(`${cli}:${rule.id}`);
+      if (notApplicable) {
+        bucket.notApplicable += 1;
+        continue;
+      }
+      const verdict = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry?.id === rule.id);
+      const status = verdict?.evidence?.status;
       if (status === "observed") {
         observed += 1;
-        if (bucket) bucket.observed += 1;
+        bucket.observed += 1;
       } else if (status === "not-observed") {
         notObserved += 1;
-        if (bucket) bucket.notObserved += 1;
+        bucket.notObserved += 1;
       } else {
         unknown += 1;
-        if (bucket) bucket.unknown += 1;
+        bucket.unknown += 1;
       }
     }
   }
@@ -535,7 +548,9 @@ export function buildReportInput(input = {}) {
     // Computed from the SAME session-health objects (and the same verdicts)
     // the rest of this report renders — never re-derived from the assembled
     // Markdown prose, which is free to change under it (see generator.js).
-    summary: input?.summary && typeof input.summary === "object" ? input.summary : buildManagerSummary({ sessions, clis }),
+    summary: input?.summary && typeof input.summary === "object"
+      ? input.summary
+      : buildManagerSummary({ sessions, clis, ruleApplicability: input?.ruleApplicability }),
     fixes: Array.isArray(input?.fixes) ? input.fixes : [],
     trend: input?.trend ?? {
       direction: "unknown",
@@ -604,7 +619,17 @@ function aggregateRules(sessions, parserVersion, ruleApplicability = []) {
         continue;
       }
       const match = (Array.isArray(session?.rules) ? session.rules : []).find((entry) => entry.id === rule.id);
-      if (match) results.push(match);
+      results.push(match ?? {
+        id: rule.id,
+        name: rule.name,
+        evidence: {
+          status: "unknown",
+          reason: "this rule is applicable to the session, but no verdict was recorded for it, so the check cannot be treated as measured",
+          values: [],
+          sources: [],
+          derivation: "the session was applicable to this rule, but its verdict entry was missing",
+        },
+      });
     }
     const total = results.length;
     // A rule with no applicable sessions has no verdict to aggregate. It is
