@@ -53,11 +53,11 @@ Never invent a log format. Confirm the real on-disk shape first by examining act
 | Directory | Responsibility |
 |---|---|
 | `src/analyzer/` | Health rules, verdict logic, trend analysis |
-| `src/collectors/` | CLI log parsers (Claude Code, Codex, Cursor) and detection for Antigravity |
+| `src/collectors/` | CLI log parsers (Claude Code, Codex, Cursor) |
 | `src/suggestions/` | Suggestion definitions, tool targets, and request/preview generation |
 | `src/clean.js` | `session-rx clean` — deletes only SessionRx's own leftover data |
 | `src/report/` | Markdown report generation + secret redaction |
-| `public/js/pages/` | Page modules (health, report, sessions, trends, fixes/Suggestions) |
+| `public/js/pages/` | Page modules (fixes, health, overview, report, sessions, trends) |
 | `public/js/components/` | UI components (chart, suggestion-panel, etc.) |
 | `public/css/` | Stylesheets |
 | `public/vendor/` | Vendored third-party libraries (Chart.js) |
