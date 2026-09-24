@@ -993,10 +993,15 @@ test("subagent-concurrency: an unknown from a CLI whose sub-agent evidence IS re
     for (const ctx of contexts) {
       const result = verdict("subagent-concurrency", session, ctx);
       const label = `${cli} with ctx ${JSON.stringify(ctx)}`;
-      assert.equal(result.evidence.status, "unknown", label);
-      assert.ok(result.evidence.reason.length > 40, `${label} reason too thin: ${result.evidence.reason}`);
-      assertNoClosedParserGapClaim(result.evidence.reason, label);
-      assertDoesNotClaimZeroDispatched(result.evidence.reason, label);
+      const expected = ctx.childLinkageAvailable === true && Array.isArray(ctx.sessionMeta?.subagentSessionIds)
+        ? "not-observed"
+        : "unknown";
+      assert.equal(result.evidence.status, expected, label);
+      if (expected === "unknown") {
+        assert.ok(result.evidence.reason.length > 40, `${label} reason too thin: ${result.evidence.reason}`);
+        assertNoClosedParserGapClaim(result.evidence.reason, label);
+        assertDoesNotClaimZeroDispatched(result.evidence.reason, label);
+      }
     }
   }
 });

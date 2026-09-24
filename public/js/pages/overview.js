@@ -39,11 +39,11 @@ function donut(totals, comparison) {
   if (ratio !== null) { const ring = document.createElementNS(svgNs, 'circle'); ring.setAttribute('cx', '75'); ring.setAttribute('cy', '75'); ring.setAttribute('r', '58'); ring.setAttribute('class', 'donut-pass'); ring.setAttribute('pathLength', '100'); ring.setAttribute('stroke-dasharray', `${ratio * 100} 100`); svg.append(ring); }
   const label = document.createElementNS(svgNs, 'text'); label.setAttribute('class', 'donut-label'); label.setAttribute('x', '75'); label.setAttribute('y', '75'); label.textContent = ratio === null ? 'not measured' : String(Math.round(ratio * 100)); svg.append(label);
   const sub = document.createElementNS(svgNs, 'text'); sub.setAttribute('class', 'donut-sub'); sub.setAttribute('x', '75'); sub.setAttribute('y', '91'); sub.textContent = '% passed'; svg.append(sub);
-  column.append(svg, el('p', 'donut-caption', ratio === null ? 'Measured check pass rate could not be determined.' : `${fmt(measured)} measured · ${fmt(unknown)} could not be measured`));
+  column.append(svg, el('p', 'donut-caption', ratio === null ? 'Measured check pass rate could not be determined.' : `${fmt(measured)} measured`));
   const donutDelta = el('p', 'donut-delta'); donutDelta.append(deltaChip(comparison, 'notObservedChecks')); column.append(donutDelta);
   const distribution = el('div', 'distribution-column'); distribution.append(el('h3', '', 'Issue distribution')); const items = Array.isArray(totals?.ruleTotals) ? totals.ruleTotals : []; const total = items.reduce((sum, item) => sum + (finite(item?.observed) ? item.observed : 0), 0);
   if (!total) distribution.append(el('p', 'not-measured', 'No observed findings were measured in this window.'));
-  else { const sorted = items.filter((item) => item && typeof item.id === 'string').sort((a, b) => (b.observed || 0) - (a.observed || 0)); const percentages = largestRemainder(sorted.map((item) => (item.observed || 0) / total * 100)); sorted.forEach((item, index) => { const share = (item.observed || 0) / total * 100; const row = el('div', 'distribution-row'); row.style.setProperty('--distribution-color', `var(--distribution-${(index % 6) + 1})`); const labelNode = el('div', 'distribution-label'); labelNode.append(el('span', 'distribution-dot'), el('span', '', item.name || item.id)); row.append(labelNode, el('strong', '', `${percentages[index]}%`)); const bar = el('div', 'bar-track'); const fill = el('div', 'bar-fill distribution-fill'); fill.style.width = `${share}%`; bar.append(fill); row.append(bar); if (finite(item.unknown) && item.unknown > 0) row.append(el('small', 'distribution-status', `could not be measured on ${fmt(item.unknown)} ${item.unknown === 1 ? 'session' : 'sessions'}`)); distribution.append(row); }); }
+  else { const sorted = items.filter((item) => item && typeof item.id === 'string').sort((a, b) => (b.observed || 0) - (a.observed || 0)); const percentages = largestRemainder(sorted.map((item) => (item.observed || 0) / total * 100)); sorted.forEach((item, index) => { const share = (item.observed || 0) / total * 100; const row = el('div', 'distribution-row'); row.style.setProperty('--distribution-color', `var(--distribution-${(index % 6) + 1})`); const labelNode = el('div', 'distribution-label'); labelNode.append(el('span', 'distribution-dot'), el('span', '', item.name || item.id)); row.append(labelNode, el('strong', '', `${percentages[index]}%`)); const bar = el('div', 'bar-track'); const fill = el('div', 'bar-fill distribution-fill'); fill.style.width = `${share}%`; bar.append(fill); row.append(bar); distribution.append(row); }); }
   wrap.append(column, distribution); return wrap;
 }
 
@@ -194,12 +194,19 @@ async function renderOverview(mount, data, ctx = {}) {
   const cliSummary = el('span', 'rx-cli-summary');
   cliSummary.append(el('span', 'rx-cli-mark', 'ϟ'), el('strong', '', `${detected.length} CLIs detected`));
   cliList.append(cliSummary);
-  detected.forEach((collector) => cliList.append(el('span', 'rx-chip', collector.cli || collector.id || 'Unknown CLI')));
+  detected.forEach((collector) => {
+    const name = collector.cli || collector.id || 'Unknown CLI';
+    const notRead = collector?.support === 'detection-only'
+      || (collector?.support === 'supported' && collector?.note && (!Number.isFinite(collector?.sessions) || collector.sessions === 0));
+    const chip = el('span', 'rx-chip', notRead ? `${name} · not read yet` : name);
+    if (notRead && collector?.note) chip.title = collector.note;
+    cliList.append(chip);
+  });
   hero.append(intro, cliList);
   root.append(hero);
   if (noSessionsFound || rangeHasNoSessions) root.append(emptyOverviewPanel(health, rangeHasNoSessions));
   else {
-    const cards = el('div', 'rx-grid rx-grid-four');
+    const cards = el('div', 'rx-grid rx-grid-three');
     const fixes = health?.distinctFixes;
     const fixValue = finite(fixes?.count) ? number(fixes.count) : 'not measured';
     // This card's VALUE is distinctFixes.count. The published series and delta
@@ -217,7 +224,7 @@ async function renderOverview(mount, data, ctx = {}) {
       ? `${number(fixes.findings)} findings with a suggested change`
       : 'distinct suggestions offered';
     const sessionSubtitle = `sessions in the last ${dayText}${health?.coverage?.atLimit === true ? ' · floor (scan at limit)' : ''}`;
-    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), sessionSubtitle, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `findings vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Suggestions available', 'fixes', fixValue, fixSubtitle, null, fixComparison, 'distinctFixes', 'pass'), summaryCard('Not measured', 'unmeasured', number(totals.unknownChecks), `checks could not be analyzed`, series.unknownChecks, health.comparison, 'unknownChecks', 'unknown'));
+    cards.append(summaryCard('Sessions analyzed', 'sessions', number(totals.sessions), sessionSubtitle, series.sessions, health.comparison, 'sessions', 'accent'), summaryCard('Problems found', 'problems', number(totals.observedFindings), `findings vs. previous ${dayText}`, series.observedFindings, health.comparison, 'observedFindings', 'warn'), summaryCard('Suggestions available', 'fixes', fixValue, fixSubtitle, null, fixComparison, 'distinctFixes', 'pass'));
     const note = comparisonNote(health);
     if (note) cards.append(el('p', 'comparison-note', note));
     root.append(cards);
@@ -239,6 +246,9 @@ async function renderOverview(mount, data, ctx = {}) {
   const lower = el('div', 'rx-grid rx-grid-two overview-lower');
   lower.append(topFixes(health, api), recentSessions(sessionsPayload));
   root.append(lower);
+  if (Number.isFinite(totals.unknownChecks) && totals.unknownChecks > 0) {
+    root.append(el('p', 'note unmeasured-page-note', `${number(totals.unknownChecks)} check${totals.unknownChecks === 1 ? '' : 's'} could not be measured from the session logs; they were not treated as passes. This is NOT a pass — the check could not run here.`));
+  }
   const footer = el('footer', 'rx-footer');
   const version = health?.version || globalThis.__SESSION_RX_BOOTSTRAP__?.version;
   footer.textContent = `SessionRx${typeof version === 'string' && version ? ` · v${version}` : ''} · Reads local session evidence. Nothing leaves this machine.`;

@@ -5,7 +5,7 @@
  * ---------------------------------------------------------
  * The analyzer emits three verdicts, not two: `observed` (a problem was found),
  * `not-observed` (the check ran and found nothing) and `unknown` (the check
- * COULD NOT RUN).  On the real corpus the third is the majority.  A UI that
+ * COULD NOT RUN).  A UI that
  * folds `unknown` into a tick tells the user an unmeasurable check passed,
  * which is the single failure this product exists to prevent.
  *
@@ -13,14 +13,9 @@
  *   1. its own row class `.verdict-unknown` (dashed + hatched, wave 5C)
  *   2. its own glyph `?` where pass is `✓` and a problem is `!`
  *   3. its own words — "COULD NOT BE MEASURED", never "OK"
- *   4. the sentence "This is NOT a pass" in plain text, not a tooltip
- *   5. a plain-English sentence saying WHAT could not be worked out and WHY,
- *      leading the row; the engineering `evidence.reason` that sentence stands
- *      in for keeps its every word, one click away inside the evidence
- *      `<details>`.  Where a rule has no plain sentence for its cause, the
- *      engineering reason stays on the card face — it is then all a reader has,
- *      and an unknown with no stated cause would be a worse honesty failure
- *      than a jargon-heavy one.
+ *   4. a page-level sentence saying that unmeasured checks are not passes
+ *   5. the engineering `evidence.reason` remains one click away inside the
+ *      evidence `<details>`.
  * plus `data-status="unknown"` for any styling or test that wants to assert it.
  *
  * The score bar is three segments — passed, observed, unknown — so the unknown
@@ -428,6 +423,17 @@ export function ruleById(session, id) {
   return rules.find((rule) => rule?.id === id);
 }
 
+/** Rules listed in notApplicable are absent from the dashboard entirely. */
+function applicableRules(session) {
+  const excluded = new Set(
+    (Array.isArray(session?.notApplicable) ? session.notApplicable : [])
+      .map((entry) => entry?.ruleId)
+      .filter((id) => typeof id === 'string' && id),
+  );
+  return (Array.isArray(session?.rules) ? session.rules : [])
+    .filter((rule) => !excluded.has(rule?.id));
+}
+
 /**
  * The sub-agent turn count, or an honest absence.
  *
@@ -671,10 +677,9 @@ export function verdictNode(session, rule, api = null, rerender = null) {
   details.append(verdictSummary(rule, meta, critical));
 
   const more = el('div', 'verdict-more');
-  // The engineering reason, in full and unedited, first behind the disclosure —
-  // it is the most specific thing this rule recorded about why it could not
-  // run. It is only here when a plain sentence is leading the row in its place.
-  if (unmeasuredPlain) more.append(el('p', 'verdict-detail', unknownReasonText(rule)));
+  // The engineering reason, in full and unedited, stays behind the disclosure;
+  // it is the most specific thing this rule recorded about why it could not run.
+  if (status === 'unknown') more.append(el('p', 'verdict-detail', unknownReasonText(rule)));
   const threshold = el('p', 'verdict-detail');
   threshold.append(text(`Threshold ${String(rule?.threshold?.value ?? 'not recorded')}`));
   if (rule?.threshold?.derivation) threshold.append(text(` — ${rule.threshold.derivation}`));
@@ -689,15 +694,6 @@ export function verdictNode(session, rule, api = null, rerender = null) {
   if (sources.length) more.append(el('p', 'verdict-detail', `Evidence: ${sources.join(' · ')}`));
   details.append(more);
   body.append(details);
-
-  if (status === 'unknown') {
-    // The line the whole product turns on. Plain text, not a tooltip, and not
-    // behind the disclosure — a reader must see this without clicking.
-    const reason = el('p', 'verdict-reason');
-    reason.append(el('strong', null, 'Not measured. This is NOT a pass — the check could not run here. '));
-    if (!unmeasuredPlain) reason.append(text(unknownReasonText(rule)));
-    body.append(reason);
-  }
 
   // Why a percentage is missing, in visible text (BP-002.18).
   if (values.some(isSuppressedShare)) body.append(el('p', 'note verdict-floor-note', FLOOR_SHARE_NOTE));
@@ -724,8 +720,8 @@ export function verdictNode(session, rule, api = null, rerender = null) {
  *
  * @returns {HTMLElement}
  */
-export function verdictList(session, api = null, rerender = null) {
-  const rules = Array.isArray(session?.rules) ? session.rules : [];
+export function verdictList(session, api = null, rerender = null, { includeUnknown = true } = {}) {
+  const rules = applicableRules(session).filter((rule) => includeUnknown || rule?.evidence?.status !== 'unknown');
   if (!rules.length) {
     return el(
       'p',
@@ -754,7 +750,7 @@ export function verdictList(session, api = null, rerender = null) {
  * @param {Array<object>} rules used only to split observed into warn/critical
  * @returns {HTMLElement}
  */
-export function scoreNode(score, rules = []) {
+export function scoreNode(score, rules = [], { showUnknownCallout = true } = {}) {
   const total = Number.isFinite(score?.total) ? score.total : 0;
   const passed = Number.isFinite(score?.passed) ? score.passed : 0;
   const observed = Number.isFinite(score?.observed) ? score.observed : 0;
@@ -790,7 +786,8 @@ export function scoreNode(score, rules = []) {
   // The badge is shared with Sessions so denominator, wording and colour
   // cannot drift between the two views.
   const headline = el('div', 'score-headline');
-  headline.append(healthNode(score, false));
+  const badge = healthNode(score, false);
+  headline.append(badge);
   wrap.append(headline);
 
   const legend = el('div', 'score-legend');
@@ -805,7 +802,7 @@ export function scoreNode(score, rules = []) {
   legend.append(swatch('unknown', `${unknown} unknown`));
   wrap.append(legend);
 
-  if (unknown > 0) {
+  if (unknown > 0 && showUnknownCallout) {
     wrap.append(
       el(
         'p',
@@ -842,7 +839,7 @@ function metaCell(label, value, why) {
  * @param {Function} rerender
  * @returns {HTMLElement}
  */
-export function sessionCard(session, api, rerender) {
+export function sessionCard(session, api, rerender, { compact = false } = {}) {
   const card = el('article', 'card health-card');
   card.dataset.cli = session?.cli ?? 'unknown';
   card.dataset.sessionId = session?.sessionId ?? '';
@@ -866,7 +863,7 @@ export function sessionCard(session, api, rerender) {
   card.append(head);
 
   const body = el('div', 'card-body');
-  body.append(scoreNode(session?.score, session?.rules));
+  body.append(scoreNode(session?.score, applicableRules(session), { showUnknownCallout: !compact }));
 
   const grid = el('div', 'meta-grid');
   grid.append(metaCell('project', session?.project ?? null, 'the collector recorded no project for this session'));
@@ -879,7 +876,7 @@ export function sessionCard(session, api, rerender) {
   const promotion = promotionCallout(session?.windowPromotion);
   if (promotion) body.append(promotion);
 
-  body.append(verdictList(session, api, rerender));
+  body.append(verdictList(session, api, rerender, { includeUnknown: !compact }));
   card.append(body);
   return card;
 }
@@ -913,7 +910,8 @@ export function collectorsPanel(collectors) {
   const supported = rows.filter(
     (row) => row?.support === 'supported' && Number.isFinite(row?.sessions) && row.sessions > 0,
   );
-  const detectionOnly = rows.filter((row) => row?.support === 'detection-only');
+  const detectionOnly = rows.filter((row) => row?.support === 'detection-only'
+    || (row?.support === 'supported' && (!Number.isFinite(row?.sessions) || row.sessions === 0) && row?.note));
 
   /**
    * A collector's note is a CAVEAT on the count beside it — a collection limit
@@ -923,7 +921,7 @@ export function collectorsPanel(collectors) {
    * states how many there are and which CLIs they qualify, and the count chip
    * of a CLI that has one is marked.  Nothing is dropped.
    */
-  const notes = supported.filter((row) => typeof row?.note === 'string' && row.note.length > 0);
+  const notes = rows.filter((row) => typeof row?.note === 'string' && row.note.length > 0);
 
   const list = el('div', 'cli-list cli-list-inline');
   for (const row of supported) {
@@ -942,8 +940,8 @@ export function collectorsPanel(collectors) {
   for (const row of detectionOnly) {
     const item = el('div', 'cli-item');
     item.append(el('span', 'cli-name', row.cli ?? 'unknown'));
-    const status = el('span', 'cli-status badge badge-sm badge-unknown', 'Detected — support coming soon');
-    status.setAttribute('title', row?.note ?? 'this tool is installed, but it keeps no session transcript that can be read, so nothing about its usage is measured here');
+    const status = el('span', 'cli-status badge badge-sm badge-unknown', 'detected, not read yet');
+    if (row?.note) status.setAttribute('title', row.note);
     item.append(status);
     list.append(item);
   }
@@ -1000,7 +998,7 @@ export function firstActionableIndex(shown) {
   const sessions = Array.isArray(shown) ? shown : [];
   for (let index = 0; index < sessions.length; index += 1) {
     const rules = Array.isArray(sessions[index]?.rules) ? sessions[index].rules : [];
-    if (rules.some((rule) => rule?.evidence?.status === 'observed' && rule?.fix)) return index;
+    if (applicableRules(sessions[index]).some((rule) => rule?.evidence?.status === 'observed' && rule?.fix)) return index;
   }
   return -1;
 }
@@ -1039,7 +1037,7 @@ export function healthSummaryNode(shown, actionableIndex) {
     const rules = Array.isArray(session?.rules) ? session.rules : null;
     if (!rules) continue;
     sawRules = true;
-    for (const rule of rules) {
+    for (const rule of applicableRules(session)) {
       const st = rule?.evidence?.status;
       if (st === 'observed') {
         problems += 1;
@@ -1068,14 +1066,13 @@ export function healthSummaryNode(shown, actionableIndex) {
   // fixes. Both are true; sharing one label made the smaller Overview number
   // look like a contradiction of the larger one here. The label names the
   // quantity; the count itself is unchanged.
-  stats.append(stat('Fixable findings', sawRules ? fixable : null, noEvidence));
-  stats.append(stat('Checks not measured', sawRules ? unmeasured : null, noEvidence));
+  stats.append(stat('Findings with a suggestion', sawRules ? fixable : null, noEvidence));
   wrap.append(stats);
 
-  const action = el('button', 'button button-primary summary-action', 'Review fixes');
+  const action = el('button', 'button button-primary summary-action', 'Review suggestions');
   action.type = 'button';
   if (actionableIndex >= 0) {
-    action.setAttribute('aria-label', 'Review fixes: jump to the first session with an actionable problem');
+    action.setAttribute('aria-label', 'Review suggestions: jump to the first session with an actionable problem');
     action.addEventListener('click', () => {
       const target = document.getElementById(`health-card-${actionableIndex}`);
       if (!target) return;
@@ -1148,7 +1145,7 @@ export function renderHealth(mount, data, ctx = {}) {
       'note',
       `The ${shown.length} most recent session${shown.length === 1 ? '' : 's'} of ${groupInt(sessionsTotal) ?? '0'} read from this machine. `
         + 'Every check returns one of three verdicts: a problem was observed, nothing was observed, or it could not be measured. '
-        + 'The third is not a pass, and it is the most common answer on real data.',
+        + 'The third is not a pass.',
     ),
   );
   if (data?.scan?.note) stack.append(el('p', 'note', `Scan: ${data.scan.note}`));
@@ -1170,13 +1167,19 @@ export function renderHealth(mount, data, ctx = {}) {
   // Indexed so the summary's "Review fixes" button (`firstActionableIndex`)
   // has a stable element to jump to.
   shown.forEach((session, index) => {
-    const card = sessionCard(session, api, rerender);
+    const card = sessionCard(session, api, rerender, { compact: true });
     card.id = `health-card-${index}`;
     stack.append(card);
   });
 
   const diagnostics = diagnosticsNode(data?.diagnostics);
   if (diagnostics) stack.append(diagnostics);
+
+  const unmeasured = shown.reduce((total, session) => total + applicableRules(session)
+    .filter((rule) => rule?.evidence?.status === 'unknown').length, 0);
+  if (unmeasured > 0) {
+    stack.append(el('p', 'note unmeasured-page-note', `${groupInt(unmeasured)} check${unmeasured === 1 ? '' : 's'} could not be measured from the session logs; they were not treated as passes. This is NOT a pass — the check could not run here.`));
+  }
 
   mount.append(stack);
 }

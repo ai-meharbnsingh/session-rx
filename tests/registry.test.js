@@ -406,12 +406,13 @@ test("a read that partly failed keeps its count and says the count may be low", 
   ]);
   const entry = entries[0];
 
-  // One session really was read, so the count stands — it is the COMPLETENESS
-  // of the count that is in doubt, and only that is what the note qualifies.
-  assert.equal(entry.sessions, 1);
+  // The transcript was read, but it contained no turns: it is excluded from
+  // analyzed-session counts rather than represented by five unknown checks.
+  assert.equal(entry.sessions, 0);
   assert.equal(entry.subagentSessions, 0);
   assert.match(entry.note, /one error/);
   assert.match(entry.note, /may be lower than the truth/);
+  assert.match(entry.note, /contained no turns and were excluded/);
   assert.ok(!/reading this CLI failed/.test(entry.note), "a partial read did not fail outright");
 });
 

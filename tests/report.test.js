@@ -61,6 +61,7 @@ test("date range, per-CLI session counts and trend direction all appear", () => 
   assert.match(md, /\| claude \| 96 \|/);
   assert.match(md, /\| codex \| 14 \|/);
   assert.match(md, /\| cursor \| 8 \|/);
+  assert.match(md, /\| widget \| 2 \|/);
 
   assert.match(md, /^Direction: declining$/m);
   assert.match(md, /Reason: mean session context rose/);

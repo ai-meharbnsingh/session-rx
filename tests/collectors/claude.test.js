@@ -286,7 +286,7 @@ test("every collected session matches the normalized contract", async () => {
     for (const turn of session.turns) {
       assert.deepEqual(Object.keys(turn).sort(), [
         "cacheCreate", "cacheRead", "context", "isSidechain",
-        "output", "toolCalls", "toolResultBytes", "ts",
+        "output", "toolCalls", "toolResultBytes", "toolResultBytesByCall", "ts",
       ]);
       assert.ok(["native", "derived", "unknown"].includes(turn.context.source));
     }

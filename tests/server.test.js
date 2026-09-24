@@ -853,6 +853,85 @@ describe("BP-005.01 — /api/health serializes only HEALTH_CARD_LIMIT sessions",
     const res = await running.get(`/api/health?from=${encodeURIComponent(ISO(1, 0))}&to=${encodeURIComponent(ISO(TOTAL, 23))}`);
     for (const rule of res.json.ruleTotals) assert.equal(rule.observed + rule.notObserved + rule.unknown, res.json.ruleTotalsSessions, rule.id);
   });
+
+  it("excludes not-applicable sessions from a rule denominator and records them separately", async () => {
+    const claudeSessions = [
+      testSession({ cli: "claude", sessionId: "claude-applicable-1" }),
+      testSession({ cli: "claude", sessionId: "claude-applicable-2" }),
+    ];
+    const codexSessions = [
+      testSession({ cli: "codex", sessionId: "codex-inapplicable-1" }),
+      testSession({ cli: "codex", sessionId: "codex-inapplicable-2" }),
+    ];
+    for (const session of codexSessions) {
+      session.notApplicable = [{
+        ruleId: "subagent-concurrency",
+        name: "Sub-agent concurrency",
+        reasonCode: "no-subagent-identity",
+        reason: "the CLI format has no sub-agent identity or parent link",
+      }];
+    }
+    const ruleSets = {
+      "claude-applicable-1": [syntheticRule("subagent-concurrency", { status: "observed" })],
+      "claude-applicable-2": [syntheticRule("subagent-concurrency", { status: "not-observed" })],
+      "codex-inapplicable-1": [],
+      "codex-inapplicable-2": [],
+    };
+    const running = await server({
+      collectors: [new FakeCollector("claude", claudeSessions), new FakeCollector("codex", codexSessions)],
+      modules: { health: syntheticHealth(ruleSets) },
+    });
+    const res = (await running.get("/api/health")).json;
+    const total = res.ruleTotals.find((rule) => rule.id === "subagent-concurrency");
+    assert.deepEqual(
+      { observed: total.observed, notObserved: total.notObserved, unknown: total.unknown, notApplicable: total.notApplicable },
+      { observed: 1, notObserved: 1, unknown: 0, notApplicable: 2 },
+    );
+    assert.equal(total.observed + total.notObserved + total.unknown, claudeSessions.length);
+  });
+
+  it("keeps the sum of per-rule unknown totals aligned with window unknown checks", async () => {
+    const sessions = [
+      testSession({ sessionId: "unknown-1" }),
+      testSession({ sessionId: "unknown-2" }),
+    ];
+    const running = await server({
+      collectors: [new FakeCollector("claude", sessions)],
+      modules: { health: syntheticHealth({
+        "unknown-1": [
+          syntheticRule("rule-a", { status: "unknown" }),
+          syntheticRule("rule-b", { status: "unknown" }),
+        ],
+        "unknown-2": [
+          syntheticRule("rule-a", { status: "unknown" }),
+          syntheticRule("rule-b", { status: "unknown" }),
+        ],
+      }) },
+    });
+    const res = (await running.get("/api/health")).json;
+    assert.equal(
+      res.ruleTotals.reduce((sum, rule) => sum + rule.unknown, 0),
+      res.windowTotals.unknownChecks,
+    );
+  });
+
+  it("counts an absent rule as unknown when no not-applicable reason is recorded", async () => {
+    const sessions = [
+      testSession({ sessionId: "missing-rule-present" }),
+      testSession({ sessionId: "missing-rule-absent" }),
+    ];
+    const running = await server({
+      collectors: [new FakeCollector("claude", sessions)],
+      modules: { health: syntheticHealth({
+        "missing-rule-present": [syntheticRule("missing-rule", { status: "not-observed" })],
+        "missing-rule-absent": [],
+      }) },
+    });
+    const res = (await running.get("/api/health")).json;
+    const total = res.ruleTotals.find((rule) => rule.id === "missing-rule");
+    assert.equal(total.unknown, 1);
+    assert.equal(total.notApplicable, 0);
+  });
 });
 
 describe("/api/health window-wide totals and comparison", () => {
@@ -1080,11 +1159,11 @@ describe("date windows are serialization filters, not scan bounds", () => {
     const running = await server({ collectors: [new FakeCollector("claude", [dated, undated])] });
     const whole = await running.get("/api/health");
     const bounded = await running.get(`/api/health?from=${encodeURIComponent(ISO(3, 0))}`);
-    assert.equal(whole.json.sessions.length, 2);
+    assert.equal(whole.json.sessions.length, 1, "the empty transcript is excluded from analyzed sessions");
     assert.equal(whole.json.sessionWindow.excludedUndated, 0);
-    assert.equal(whole.json.sessionWindow.matched, 2);
+    assert.equal(whole.json.sessionWindow.matched, 1);
     assert.equal(bounded.json.sessions.length, 1);
-    assert.equal(bounded.json.sessionWindow.excludedUndated, 1);
+    assert.equal(bounded.json.sessionWindow.excludedUndated, 0, "empty undated transcripts are excluded before date-window matching");
     assert.equal(bounded.json.sessionWindow.matched, 1);
   });
 

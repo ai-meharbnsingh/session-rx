@@ -383,13 +383,13 @@ test("Overview hero cards render their metric units in each card", async () => {
   const mount = new ShimElement("main");
   await overviewPage.default(mount, populatedOverviewHealth(), { api: populatedOverviewApi });
   const cards = withClass(mount, "summary-card");
-  assert.equal(cards.length, 4);
+  assert.equal(cards.length, 3);
   // The unit is asserted on the card's own subtitle line (`.rx-label`), not on
   // the whole card: `textContent` joins sibling nodes with no separator, so a
   // card-wide match reads across element boundaries ("...not comparablesessions
   // in the last 4 days") and then succeeds or fails for reasons that have
   // nothing to do with the unit word. The subtitle is where the unit belongs.
-  for (const [card, unit] of cards.map((card, index) => [card, ["sessions", "findings", "findings", "checks"][index]])) {
+  for (const [card, unit] of cards.map((card, index) => [card, ["sessions", "findings", "findings"][index]])) {
     const label = withClass(card, "rx-label")[0];
     assert.ok(label, `card must carry a subtitle line to publish its ${unit} unit on`);
     assert.match(label.textContent, new RegExp(`\\b${unit}\\b`), `card must publish its ${unit} unit`);
@@ -488,6 +488,19 @@ test("Overview counts installed supported and detection-only CLIs, ignoring abse
   assert.equal(withClass(mount, "rx-chip").length, 2);
 });
 
+test("Overview marks an installed detection-only collector as not read yet without a zero", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, populatedOverviewHealth({ collectors: [
+    { cli: "Claude Code", support: "supported", installed: true, sessions: 3 },
+    { cli: "Cursor", support: "detection-only", installed: true, sessions: null, note: "no Cursor CLI chat store was found" },
+  ] }), { api: populatedOverviewApi });
+  assert.match(mount.textContent, /2 CLIs detected/);
+  const cursor = withClass(mount, "rx-chip").find((node) => /Cursor/.test(node.textContent));
+  assert.ok(cursor);
+  assert.match(cursor.textContent, /not read yet/);
+  assert.doesNotMatch(cursor.textContent, /\b0\b/);
+});
+
 test("Overview falls back to support when installed data is absent", async () => {
   const mount = new ShimElement("main");
   await overviewPage.default(mount, overviewHealth({ collectors: [
@@ -538,7 +551,7 @@ test("Overview keeps populated summary cards and unavailable trend evidence", as
     return overviewApi.get(url);
   }};
   await overviewPage.default(mount, health, { api });
-  assert.equal(withClass(mount, "summary-card").length, 4);
+  assert.equal(withClass(mount, "summary-card").length, 3);
   assert.equal(withClass(mount, "overview-health-row").length, 1);
   assert.match(mount.textContent, /Not enough measured days in this window to compare\./);
   assert.match(mount.textContent, new RegExp(reason));
@@ -902,7 +915,7 @@ test("a measured zero still renders as 0, so absent and zero are not the same pi
   assert.ok(!/not measured/.test(value.textContent), "and it is not labelled absent");
 });
 
-test("the score line always states the unknown count, even when it is 0", () => {
+test("the score line states unknowns only when present", () => {
   const withUnknown = renderCard(SESSION({}));
   assert.match(withUnknown.textContent, /4\/6 checks passed/);
   assert.match(withUnknown.textContent, /2 could not be measured/);
@@ -912,7 +925,8 @@ test("the score line always states the unknown count, even when it is 0", () => 
 
   const clean = renderCard(SESSION({ score: { total: 6, passed: 6, observed: 0, unknown: 0, label: "" } }));
   assert.match(clean.textContent, /6\/6 checks passed/);
-  assert.match(clean.textContent, /0 could not be measured/, "the phrase is unconditional");
+  assert.doesNotMatch(clean.textContent, /0 could not be measured/);
+  assert.doesNotMatch(clean.textContent, /0 problems? observed/);
 
   // The bar carries a segment per state, and the unknown one is its own segment.
   const bar = withClass(withUnknown, "score-bar")[0];
@@ -925,6 +939,19 @@ test("the score line always states the unknown count, even when it is 0", () => 
   // The bar's own description is the headline, so a screen reader hears the
   // unknown count too rather than a bare percentage.
   assert.match(bar.getAttribute("aria-label") ?? "", /could not be measured/);
+});
+
+test("a clean session header omits zero problem and unknown clauses", () => {
+  const card = renderCard(SESSION({ score: { total: 5, passed: 5, observed: 0, unknown: 0, label: "" } }));
+  const headline = withClass(card, "score-headline")[0].textContent;
+  assert.equal(headline, "5/5 checks passed");
+  assert.doesNotMatch(headline, /problems? observed|could not be measured/);
+});
+
+test("a session with two unmeasured checks keeps the unknown header clause", () => {
+  const card = renderCard(SESSION({ score: { total: 5, passed: 3, observed: 0, unknown: 2, label: "" } }));
+  const headline = withClass(card, "score-headline")[0].textContent;
+  assert.equal(headline, "3/5 checks passed · 2 could not be measured");
 });
 
 test("shared health verdict never turns unknown checks into a pass", () => {
@@ -948,6 +975,29 @@ test("shared health verdict keeps the total denominator and unknown signal in co
   assert.doesNotMatch(full.textContent, /4\/5/);
   assert.match(compact.textContent, /1 could not be measured/);
   assert.match(compact.className, /health-warn/);
+});
+
+test("shared health pill omits zero problem and unknown clauses", () => {
+  const pill = ui.healthNode({ total: 5, passed: 5, observed: 0, unknown: 0, label: "5 of 5 checks passed, 0 problems observed, 0 could not be measured" });
+  assert.equal(pill.textContent, "5/5 checks passed");
+  assert.equal(pill.title, "5 of 5 checks passed");
+});
+
+test("shared health pill keeps an observed-problem clause without zero unknown noise", () => {
+  const pill = ui.healthNode({ total: 5, passed: 4, observed: 1, unknown: 0, label: "4 of 5 checks passed, 1 problem observed, 0 could not be measured" });
+  assert.equal(pill.textContent, "4/5 checks passed · 1 problem observed");
+  assert.equal(pill.title, "4 of 5 checks passed, 1 problem observed");
+});
+
+test("shared health pill never omits non-zero unknown checks", () => {
+  const pill = ui.healthNode({ total: 5, passed: 3, observed: 0, unknown: 2, label: "3 of 5 checks passed, 0 problems observed, 2 could not be measured" });
+  assert.equal(pill.textContent, "3/5 checks passed · 2 could not be measured");
+  assert.equal(pill.title, "3 of 5 checks passed, 2 could not be measured");
+});
+
+test("shared health pill keeps the not measured state when no checks were measured", () => {
+  const pill = ui.healthNode({ total: 0, passed: 0, observed: 0, unknown: 0, label: "0 of 0 checks passed" });
+  assert.equal(pill.childNodes[0].textContent, "not measured");
 });
 
 /**
@@ -1126,13 +1176,35 @@ test("one rule, one severity: the Sessions page reads the shared helper in both 
   }
 });
 
-test("Sessions and Health use the same shared verdict component", () => {
+test("Sessions and Health use shared verdict styling with conditional header clauses", () => {
   const sessions = read(path.join(PUBLIC, "js", "pages", "sessions.js"));
   const health = read(path.join(PUBLIC, "js", "pages", "health.js"));
-  assert.match(sessions, /healthNode\(session\?\.score, true\)/);
+  assert.match(sessions, /sessionHealthNode\(session\?\.score, true\)/);
   assert.match(health, /healthNode\(score, false\)/);
   const score = { total: 6, passed: 4, observed: 1, unknown: 1, label: "4 of 6 checks passed, 1 problem observed, 1 could not be measured" };
   assert.equal(ui.healthNode(score, true).textContent, ui.healthNode(score, false).textContent);
+});
+
+test("Overview has no per-rule unknown lines and exactly one bottom disclosure", async () => {
+  const mount = new ShimElement("main");
+  await overviewPage.default(mount, populatedOverviewHealth({
+    windowTotals: { sessions: 1, observedFindings: 2, unknownChecks: 6 },
+    ruleTotals: [
+      { id: "one", name: "One", observed: 2, unknown: 4 },
+      { id: "two", name: "Two", observed: 1, unknown: 2 },
+    ],
+  }), { api: populatedOverviewApi });
+  assert.equal(withClass(mount, "summary-card").length, 3);
+  assert.equal(withClass(mount, "unmeasured-page-note").length, 1);
+  assert.match(mount.textContent, /6 checks could not be measured from the session logs/);
+  assert.doesNotMatch(mount.textContent, /could not be measured on \d+ sessions?/);
+  assert.doesNotMatch(mount.textContent, /Checks not measured/);
+});
+
+test("Report keeps its explicit unknown and not-a-pass wording", () => {
+  const report = read(path.join(PUBLIC, "js", "pages", "report.js"));
+  assert.match(report, /could not be measured/i);
+  assert.match(report, /not a pass/);
 });
 
 test("the passed segment is passed/total and never passed+unknown", () => {
@@ -1157,7 +1229,7 @@ test("the passed segment is passed/total and never passed+unknown", () => {
   assert.ok(allUnknown.childNodes.some((node) => node.className.includes("score-seg-unknown")));
 });
 
-test("an unknown verdict shows its reason and is styled as neither pass nor warn", () => {
+test("an unknown verdict is styled as neither pass nor warn, with its reason in evidence details", () => {
   const reason = "the cache counters were absent, so this could not be measured";
   const card = renderCard(SESSION({
     rules: [RULE({ evidence: { status: "unknown", reason, values: [], sources: [], derivation: null, parserVersion: "t" } })],
@@ -1168,9 +1240,8 @@ test("an unknown verdict shows its reason and is styled as neither pass nor warn
   assert.ok(!verdict.classList.contains("verdict-warn"));
   assert.ok(!verdict.classList.contains("verdict-critical"));
   assert.equal(verdict.dataset.status, "unknown");
-  assert.match(card.textContent, new RegExp(reason.slice(0, 40)), "the reason must be visible");
-  // In words, in the row — not in a tooltip, and not as a pass.
-  assert.match(card.textContent, /This is NOT a pass — the check could not run here/);
+  assert.match(withClass(card, "verdict-more")[0].textContent, new RegExp(reason.slice(0, 40)), "the reason remains in evidence details");
+  assert.equal(withClass(card, "verdict-reason").length, 0, "unknown reasons are not rendered as inline rows");
   assert.match(card.textContent, /COULD NOT BE MEASURED/);
 
   // Four states, four different row classes.
@@ -1294,7 +1365,7 @@ test("a rule's default state is ONE line, and the honesty surface is not behind 
   );
 });
 
-test("an unknown's reason stays visible, outside the disclosure", () => {
+test("an unknown's reason stays in the evidence disclosure, not as an inline row", () => {
   const reason = "Nothing in Codex's rollout records establishes a sub-agent interval (DIS-004)";
   const row = withClass(
     renderCard(SESSION({
@@ -1306,11 +1377,8 @@ test("an unknown's reason stays visible, outside the disclosure", () => {
   )[0];
 
   const details = nodes(row).find((node) => node.tagName === "DETAILS");
-  const reasonNode = withClass(row, "verdict-reason")[0];
-  assert.ok(reasonNode, "an unknown must state why it could not run");
-  assert.ok(!isInside(reasonNode, details), "that reason must not be behind a disclosure — it is the product's point");
-  assert.match(reasonNode.textContent, /This is NOT a pass — the check could not run here/);
-  assert.match(reasonNode.textContent, new RegExp(reason.slice(0, 40)));
+  assert.equal(withClass(row, "verdict-reason").length, 0, "an unknown has no inline reason row");
+  assert.match(details.textContent, new RegExp(reason.slice(0, 40)));
 
   // The score sentence and the bar are card-level and likewise never folded.
   const card = renderCard(SESSION({}));

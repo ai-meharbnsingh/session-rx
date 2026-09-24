@@ -644,7 +644,7 @@ function renderRange(range) {
 }
 
 function renderClis(clis) {
-  const rows = asArray(clis).filter((row) => ["claude", "codex", "cursor"].includes(str(row?.cli)));
+  const rows = asArray(clis);
   const lines = ["## 2. CLIs detected", ""];
   if (rows.length === 0) {
     lines.push("No CLI was detected. That is a detection result, not a statement that no CLI is installed.");

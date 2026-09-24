@@ -732,39 +732,6 @@ function verdictCard(trends) {
   return card;
 }
 
-/** Everything the window could not measure, counted (BP-005.04 `unknowns`). */
-function unknownsCard(trends) {
-  const unknowns = Array.isArray(trends?.unknowns) ? trends.unknowns : [];
-  const card = el('section', 'card card-pad');
-  card.append(sectionTitle('What could not be measured', 'unmeasured', 'unknown'));
-  const heading = el('div', 'panel-heading');
-  heading.append(el('h3', null, 'Unknowns in this window'));
-  card.append(heading);
-
-  if (!unknowns.length) {
-    card.append(el('p', 'empty-state', 'Every turn in this window was placeable and every series had a reading.'));
-    return card;
-  }
-  const list = el('ul', 'verdict-list');
-  for (const unknown of unknowns) {
-    const item = el('li', 'verdict verdict-unknown');
-    item.dataset.status = 'unknown';
-    const mark = el('span', 'verdict-mark', '?');
-    mark.setAttribute('aria-hidden', 'true');
-    item.append(mark);
-    const body = el('div');
-    const head = el('div', 'verdict-head');
-    head.append(el('span', 'verdict-name', `${groupInt(unknown?.count) ?? '?'} · ${unknown?.code ?? 'unknown'}`));
-    head.append(el('span', 'badge badge-sm badge-unknown', 'excluded, not zeroed'));
-    body.append(head);
-    body.append(el('p', 'verdict-reason', unknown?.detail ?? 'no detail recorded.'));
-    item.append(body);
-    list.append(item);
-  }
-  card.append(list);
-  return card;
-}
-
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -819,7 +786,20 @@ export function renderTrends(mount, data) {
   stack.append(grid);
 
   stack.append(heatmapCard(data));
-  stack.append(unknownsCard(data));
+  const excluded = data?.excluded ?? {};
+  const unknownCount = [
+    excluded.turnsWithoutComputableFraction,
+    excluded.sessionsWithoutTurns,
+    excluded.turnsWithoutContextReading,
+  ].reduce((total, count) => total + (Number.isFinite(count) ? count : 0), 0);
+  if (unknownCount > 0) {
+    stack.append(el('p', 'note unmeasured-page-note', `${groupInt(unknownCount) ?? unknownCount} item${unknownCount === 1 ? '' : 's'} could not be measured from the trend logs; they were not treated as zero.`));
+  }
+  const outsideTurns = Number.isFinite(excluded.turnsOutsideWindow) ? excluded.turnsOutsideWindow : 0;
+  const outsideSessions = Number.isFinite(excluded.sessionsOutsideWindow) ? excluded.sessionsOutsideWindow : 0;
+  if (outsideTurns > 0 || outsideSessions > 0) {
+    stack.append(el('p', 'note trend-window-note', `${groupInt(outsideTurns)} turn${outsideTurns === 1 ? '' : 's'} and ${groupInt(outsideSessions)} session${outsideSessions === 1 ? '' : 's'} fell outside the selected date window; they were excluded by the filter, not left unmeasured.`));
+  }
 
   mount.append(stack);
 }

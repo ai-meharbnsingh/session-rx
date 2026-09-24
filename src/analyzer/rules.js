@@ -569,25 +569,29 @@ const repeatTool = {
     const sessionId = str(session?.sessionId) || null;
     const cli = str(session?.cli) || "this CLI";
 
-    // A result signature is only attributable to ONE call: `toolResultBytes`
-    // is recorded per TURN, so a turn making two calls cannot say which of
-    // them produced those bytes.  Attributing it anyway would invent the
-    // pairing, so those calls are counted as UNMEASURED, not as non-repeats.
+    // Claude publishes result lengths by tool id. Prefer that per-call evidence
+    // when present; the scalar remains the compatibility path for collectors
+    // whose normalized format only records one total per turn.
     let totalCalls = 0;
     let attributableCalls = 0;
     const groups = new Map();
     for (const turn of turns) {
       const calls = Array.isArray(turn?.toolCalls) ? turn.toolCalls : [];
       totalCalls += calls.length;
-      const bytes = num(turn?.toolResultBytes);
-      if (calls.length !== 1 || bytes === null) continue;
-      const call = calls[0];
-      const name = str(call?.name).trim().toLowerCase() || "(unnamed tool)";
-      const key = `${name}|${signature(call?.input ?? null)}|${bytes}`;
-      attributableCalls += 1;
-      const existing = groups.get(key);
-      if (existing) existing.count += 1;
-      else groups.set(key, { count: 1, name, bytes });
+      const perCall = Array.isArray(turn?.toolResultBytesByCall) && turn.toolResultBytesByCall.length === calls.length
+        ? turn.toolResultBytesByCall
+        : calls.length === 1 ? [turn?.toolResultBytes] : null;
+      if (!perCall) continue;
+      calls.forEach((call, index) => {
+        const bytes = num(perCall[index]);
+        if (bytes === null) return;
+        const name = str(call?.name).trim().toLowerCase() || "(unnamed tool)";
+        const key = `${name}|${signature(call?.input ?? null)}|${bytes}`;
+        attributableCalls += 1;
+        const existing = groups.get(key);
+        if (existing) existing.count += 1;
+        else groups.set(key, { count: 1, name, bytes });
+      });
     }
 
     if (totalCalls === 0) {
@@ -628,7 +632,7 @@ const repeatTool = {
     }
     if (attributableCalls < totalCalls) {
       return unknown(
-        `no group of identical tool call + input + result reached ${this.threshold.value} among the ${attributableCalls} of ${totalCalls} calls whose result could be attributed to a single call (the highest was ${worst.count}). The remaining ${totalCalls - attributableCalls} call${totalCalls - attributableCalls === 1 ? "" : "s"} shared a turn with another call, so their results cannot be separated — and unmeasured calls are exactly where a repeat would hide, so this is not reported as a clean result.`,
+        `no group of identical tool call + input + result reached ${this.threshold.value} among the ${attributableCalls} of ${totalCalls} calls whose result could be attributed to a single call (the highest was ${worst.count}). The remaining ${totalCalls - attributableCalls} call${totalCalls - attributableCalls === 1 ? "" : "s"} have no recorded result signature, so their results cannot be separated or checked — and unmeasured calls are exactly where a repeat would hide, so this is not reported as a clean result.`,
         values,
         "partial-result-coverage",
       );
@@ -1074,10 +1078,11 @@ const subagentConcurrency = {
     const dispatched = children.length;
 
     if (dispatched === 0) {
-      // A measured zero is only honest when the whole corpus was scanned: with
-      // a collection limit in force, a child session may simply not have been
-      // collected.
-      if (ctx?.childLinkageAvailable === true && ctx?.corpusComplete === true) {
+      // Claude's collector reads the subagents directory beside every selected
+      // parent, so an array here is complete evidence for THIS parent even when
+      // the top-level session scan is bounded. `undefined` retains the defensive
+      // unknown for callers that did not provide collector metadata.
+      if (ctx?.childLinkageAvailable === true && (Array.isArray(ctx?.sessionMeta?.subagentSessionIds) || ctx?.corpusComplete === true)) {
         return notObserved(
           [countValue("sub-agent sessions linked to this session", 0)],
           "this CLI records which session dispatched each sub-agent session, the scan was not cut short by the collection limit, and no session names this one as its parent. This is a measured zero, not a missing field.",

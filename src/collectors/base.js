@@ -427,6 +427,9 @@ export function normalizeTurn(fields = {}) {
     })) : [],
     toolResultBytes: fields.toolResultBytes ?? null,
     isSidechain: fields.isSidechain ?? null,
+    ...(Array.isArray(fields.toolResultBytesByCall)
+      ? { toolResultBytesByCall: fields.toolResultBytesByCall.map((value) => value ?? null) }
+      : {}),
   };
 }
 

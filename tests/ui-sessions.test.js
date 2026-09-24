@@ -327,6 +327,24 @@ function paint(corpus, api, { pageSize = 20 } = {}) {
   return mount;
 }
 
+test("the Sessions render entry point survives browser NodeList childNodes and keeps all score wording", () => {
+  const cases = [
+    [{ total: 5, passed: 5, observed: 0, unknown: 0, label: "" }, "5/5 checks passed"],
+    [{ total: 5, passed: 4, observed: 1, unknown: 0, label: "" }, "4/5 checks passed · 1 problem observed"],
+    [{ total: 6, passed: 4, observed: 0, unknown: 2, label: "" }, "4/6 checks passed · 2 could not be measured"],
+  ];
+
+  for (const [score, expected] of cases) {
+    const session = corpusOf(1)[0];
+    const corpus = [{ ...session, score }];
+    const mount = paint(corpus, makeApi(corpus));
+    const badge = withClass(mount, "health-pill")[0];
+    assert.ok(badge, "the real Sessions renderer must produce a health badge");
+    assert.equal(badge.textContent, expected);
+    assert.ok(mount.textContent.length > 100, "the page must contain real content, not an error box");
+  }
+});
+
 /** Data rows only — the diagnosis row and the header row are not sessions. */
 const dataRows = (mount) => withTag(mount, "tr").filter((row) => typeof row.dataset.sessionId === "string"
   && row.dataset.sessionId !== ""

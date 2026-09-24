@@ -726,12 +726,22 @@ export function analyzeAll(collected = {}, options = {}) {
       if (toolCallsRecorded) break;
     }
 
-    // EVERY collected session is analyzed, sub-agents included — the rules run
-    // over exactly the set they ran over before (F-023).  Only where the result
-    // is FILED changes: a session that names a parent goes under that parent.
+    // A transcript with no turns is an empty shell, not a session for which five
+    // health checks failed to find evidence. Keep it in the collector coverage
+    // note, but exclude it from rule analysis and the analyzed-session count.
+    // Non-empty sub-agents continue to be analyzed and attached as before.
     const ownHealth = [];
     const subagentHealth = [];
+    let emptyOwnSessions = 0;
+    let emptySubagentSessions = 0;
     for (const session of sessions) {
+      const hasTurns = Array.isArray(session?.turns) && session.turns.length > 0;
+      const metadata = sessionMeta?.[str(session?.sessionId)] ?? null;
+      if (!hasTurns) {
+        if (parentOf(metadata)) emptySubagentSessions += 1;
+        else emptyOwnSessions += 1;
+        continue;
+      }
       const health = analyzeSession(session, {
         parserVersion,
         promotion: promotions.bySession.get(str(session?.sessionId)) ?? null,
@@ -739,7 +749,7 @@ export function analyzeAll(collected = {}, options = {}) {
         childLinkageAvailable,
         corpusComplete,
         toolCallsRecorded,
-        sessionMeta: sessionMeta?.[str(session?.sessionId)] ?? null,
+        sessionMeta: metadata,
       });
       (health.isSubagentSession ? subagentHealth : ownHealth).push(health);
     }
@@ -799,6 +809,12 @@ export function analyzeAll(collected = {}, options = {}) {
         `Every turn, token and verdict of ${subagentHealth.length === 1 ? "it" : "theirs"} is unchanged and still reachable under that parent, and ${subagentHealth.length === 1 ? "its interval" : "their intervals"} still feed the sub-agent concurrency rule.` +
         (orphansHere ? ` ${orphansHere} of them name${orphansHere === 1 ? "s" : ""} a parent that this scan did not read, so ${orphansHere === 1 ? "it has" : "they have"} no parent card to sit under and ${orphansHere === 1 ? "is" : "are"} set aside without one.` : ""),
       );
+    }
+    if (emptyOwnSessions || emptySubagentSessions) {
+      const parts = [];
+      if (emptyOwnSessions) parts.push(`${emptyOwnSessions} user session${emptyOwnSessions === 1 ? "" : "s"}`);
+      if (emptySubagentSessions) parts.push(`${emptySubagentSessions} sub-agent session${emptySubagentSessions === 1 ? "" : "s"}`);
+      notes.push(`${parts.join(" and ")} contained no turns and were excluded from health checks; they are not counted as analyzed sessions rather than being reported as five unknown checks.`);
     }
     if (!corpusComplete) {
       notes.push(`the collection limit of ${limit} was reached for this CLI, so this is the newest ${ownHealth.length} session${ownHealth.length === 1 ? "" : "s"}, not all of them.`);

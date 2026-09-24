@@ -1339,10 +1339,21 @@ export function createApp(options = {}) {
       for (const rule of rules) {
         if (!rule || typeof rule.id !== "string") continue;
         if (!ruleTotalsById.has(rule.id)) {
-          ruleTotalsById.set(rule.id, { id: rule.id, name: rule.name ?? null, observed: 0, notObserved: 0, unknown: 0 });
+          ruleTotalsById.set(rule.id, {
+            id: rule.id,
+            name: rule.name ?? null,
+            observed: 0,
+            notObserved: 0,
+            unknown: 0,
+            notApplicable: 0,
+          });
         }
       }
       for (const [id, total] of ruleTotalsById) {
+        if (Array.isArray(session?.notApplicable) && session.notApplicable.some((entry) => entry?.ruleId === id)) {
+          total.notApplicable += 1;
+          continue;
+        }
         const status = rulesById.get(id)?.evidence?.status;
         if (status === "observed") total.observed += 1;
         else if (status === "not-observed") total.notObserved += 1;

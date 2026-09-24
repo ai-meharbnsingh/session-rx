@@ -129,9 +129,10 @@ function draftTurn(entry, resultBytes) {
   // Only bytes we actually matched to a recorded result are counted; an
   // unmatched call leaves the total null rather than pretending it was empty.
   let bytes = null;
+  const bytesByCall = [];
   for (const call of toolCalls) {
-    if (call.id === null) continue;
-    const observed = resultBytes.get(call.id);
+    const observed = call.id === null ? undefined : resultBytes.get(call.id);
+    bytesByCall.push(observed === undefined ? null : observed);
     if (observed === undefined) continue;
     bytes = (bytes ?? 0) + observed;
   }
@@ -144,6 +145,7 @@ function draftTurn(entry, resultBytes) {
     output: numberOrNull(usage?.output_tokens),
     toolCalls,
     toolResultBytes: bytes,
+    toolResultBytesByCall: bytesByCall,
     isSidechain: entry.isSidechain,
   };
 }
@@ -162,6 +164,7 @@ function finalizeTurn(draft, window) {
     output: draft.output,
     toolCalls: draft.toolCalls,
     toolResultBytes: draft.toolResultBytes,
+    toolResultBytesByCall: draft.toolResultBytesByCall,
     isSidechain: draft.isSidechain,
   });
 }
