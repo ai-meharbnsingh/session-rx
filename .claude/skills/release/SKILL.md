@@ -194,9 +194,26 @@ if [ "${RELEASE_DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
-# 2. LIVE MODE ONLY past this point
+# 2. LIVE MODE ONLY past this point.
+# `set -e`: a failed `git commit` must never fall through to `git tag` /
+# `git push` (a P1 a reviewer caught — D-3 claimed this abort behavior
+# without actually enforcing it). Every command below must exit non-zero
+# on failure for this to work; none of them are piped.
+set -e
+
 npm version "$NEXT" --no-git-tag-version
-# prepend CHANGELOG.md entry
+
+# CHANGELOG.md entry: this is authored content (a summary of what changed),
+# not a mechanical bash step — it is written by whoever is running this
+# skill (the orchestrator), using Edit/Write, BEFORE this point in the
+# procedure. This check enforces that it actually happened instead of
+# silently committing with no entry (a P2 a reviewer caught — a bare
+# comment here previously let every release ship without one):
+grep -q "^## \[$NEXT\]" CHANGELOG.md || {
+  echo "CHANGELOG.md has no '## [$NEXT]' entry yet — write one (Edit/Write, prepended, Keep a Changelog format) before continuing"
+  exit 1
+}
+
 git add package.json package-lock.json CHANGELOG.md
 git commit -m "[session-rx] chore(release): $NEXT"
 RELEASE_SHA=$(git rev-parse HEAD)
@@ -238,7 +255,8 @@ git push origin "v$NEXT"
 |----|------|
 | D-1 | dry-run mode: `RELEASE_DRY_RUN=1` gate exits after printing the would-be version and the commit list the CHANGELOG entry is drafted from — this is a real preview the step actually produces, not just a claim; `npm version`/`git commit`/`git tag`/`git push` never execute in this path |
 | D-2 | live mode: `gh run watch --exit-status` non-zero -> the Tests workflow went red on `main` -> STOP, exit before the tag block; the tag is never created or pushed in this path, so `publish.yml` never fires. The commands are ordered push-main / wait-green / tag-and-push-tag specifically so a red main can never reach a tag push — do not reorder them. |
-| D-3 | any git command failing (auth, conflict, rejected push) -> ABORT, report the exact command and error, do not retry blindly |
+| D-3 | any git command failing (auth, conflict, rejected push) -> ABORT, report the exact command and error, do not retry blindly. Enforced by `set -e` at the top of the live block (a reviewer caught this being claimed but not actually enforced) — none of RS-D's live commands may be wrapped in a pipeline or `if` that would swallow their exit code. |
+| D-4 | the CHANGELOG.md entry is authored by whoever runs this skill, before the `grep -q "^## \[$NEXT\]"` gate — that gate is what makes D-4 real instead of a comment nobody acts on (a reviewer caught an earlier draft shipping releases with no changelog entry at all) |
 
 ### RS-E — Verify published
 
