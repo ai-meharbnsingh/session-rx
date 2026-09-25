@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-25
+
+### Added
+
+- **Sub-agent token-spend rollup.** SessionRx's collectors already parsed a session's dispatched sub-agent transcripts, but nothing summed their token cost. A user had to open every sub-agent session by hand to see what an orchestration run actually cost. `analyzeSession()` in `src/analyzer/health.js` now computes each session's own `tokenSpend` (cacheRead/cacheCreate/output summed from its turns), and `analyzeAll()` attaches a recursive `subagentTokenSpend` rollup to every session, summing every descendant sub-agent's spend (any nesting depth) without folding it into the session's own totals. The session detail page (`public/js/pages/sessions.js`) shows this as a new "sub-agent token spend" row. Honesty preserved throughout: a session that dispatched no sub-agents gets a real 0; a session that dispatched sub-agents whose usage was never recorded gets `null` token fields (visibly different from "dispatched nothing"), never a fabricated 0.
+
+- **G2 trend chart transparency.** The G2 "Token spend" trend chart (`src/analyzer/trends.js`) was already summing sub-agent turns into its daily cacheRead/cacheCreation/total figures (sub-agent sessions are collected as flat siblings, and were never excluded from that sum) — this was correct behavior (sub-agent tokens are real spend) but was undocumented and untested. The daily totals are unchanged; the fix adds an explicit `subagentCacheRead`/`subagentCacheCreation`/`subagentTotal` breakdown per day so a day of heavy delegation is legible rather than an unexplained spike, plus a new legend line on the chart, plus test coverage for the mixed/own-only/sub-agent-only cases.
+
+### Tests
+
+- Full suite: 769 passing tests (3 new trend tests added), exit code 0, no regressions.
+
 ## [0.3.3] - 2026-09-24
 
 ### Fixed
