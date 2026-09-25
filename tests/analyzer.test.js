@@ -1153,6 +1153,16 @@ test("analyzeSession emits all applicable rules and records structural exclusion
   }
 });
 
+test("analyzeSession sums only measured own token spend fields", () => {
+  const health = analyzeSession(makeSession({ turns: [
+    { ts: at(1), cacheRead: 100, cacheCreate: null, output: 7 },
+    { ts: at(2), cacheRead: null, cacheCreate: 30, output: null },
+    { ts: at(3), cacheRead: 25, cacheCreate: null, output: 3 },
+  ] }));
+  assert.deepEqual(health.tokenSpend, { cacheRead: 125, cacheCreate: 30, output: 10 });
+  assert.deepEqual(analyzeSession(makeSession({ turns: [{ ts: at(1), cacheRead: 1 }] })).tokenSpend, { cacheRead: 1, cacheCreate: null, output: null });
+});
+
 test("analyzeSession ranks observed rules first, then unmeasurable, then passes", () => {
   const health = analyzeSession(bigResults, { toolCallsRecorded: true });
   const order = health.rules.map((rule) => rule.evidence.status);
@@ -1369,14 +1379,14 @@ test("an empty corpus is unknown on all six rules, never six passes", () => {
  *   (nothing) <- orphan                      (names a parent this scan did not read)
  */
 function subagentCorpus() {
-  const parentOne = makeSession({ sessionId: "parent-1", startedAt: at(0), endedAt: at(60), turns: [{ ts: at(1), inputTokens: 1000, toolCalls: [call("Task", { a: 1 })] }] });
+  const parentOne = makeSession({ sessionId: "parent-1", startedAt: at(0), endedAt: at(60), turns: [{ ts: at(1), inputTokens: 1000, cacheRead: 900, cacheCreate: 80, output: 40, toolCalls: [call("Task", { a: 1 })] }] });
   const parentTwo = makeSession({ sessionId: "parent-2", startedAt: at(0), endedAt: at(60), turns: [{ ts: at(1), inputTokens: 1000, toolCalls: [call("Task", { b: 2 })] }] });
-  const childA = makeSession({ sessionId: "child-a", startedAt: at(0), endedAt: at(30), turns: [{ ts: at(2), inputTokens: 500 }] });
-  const childB = makeSession({ sessionId: "child-b", startedAt: at(5), endedAt: at(35), turns: [{ ts: at(6), inputTokens: 500 }] });
-  const childC = makeSession({ sessionId: "child-c", startedAt: at(10), endedAt: at(40), turns: [{ ts: at(11), inputTokens: 500 }] });
+  const childA = makeSession({ sessionId: "child-a", startedAt: at(0), endedAt: at(30), turns: [{ ts: at(2), inputTokens: 500, cacheRead: 100, cacheCreate: 10, output: 20 }] });
+  const childB = makeSession({ sessionId: "child-b", startedAt: at(5), endedAt: at(35), turns: [{ ts: at(6), inputTokens: 500, cacheRead: 200, cacheCreate: 20, output: 30 }] });
+  const childC = makeSession({ sessionId: "child-c", startedAt: at(10), endedAt: at(40), turns: [{ ts: at(11), inputTokens: 500, cacheRead: 300, cacheCreate: 30, output: 40 }] });
   const childD = makeSession({ sessionId: "child-d", startedAt: at(0), endedAt: at(10), turns: [{ ts: at(2), inputTokens: 500 }] });
   const childE = makeSession({ sessionId: "child-e", startedAt: at(20), endedAt: at(30), turns: [{ ts: at(22), inputTokens: 500 }] });
-  const grandchild = makeSession({ sessionId: "grandchild", startedAt: at(1), endedAt: at(9), turns: [{ ts: at(2), inputTokens: 250 }] });
+  const grandchild = makeSession({ sessionId: "grandchild", startedAt: at(1), endedAt: at(9), turns: [{ ts: at(2), inputTokens: 250, cacheRead: 400, cacheCreate: 40, output: 50 }] });
   const orphan = makeSession({ sessionId: "orphan", startedAt: at(0), endedAt: at(5), turns: [{ ts: at(1), inputTokens: 250 }] });
 
   const sessions = [parentOne, parentTwo, childA, childB, childC, childD, childE, grandchild, orphan];
@@ -1446,6 +1456,40 @@ test("F-023: every sub-agent session set aside is still analyzed, counted and re
   const orphan = out.subagentSessions.find((session) => session.sessionId === "orphan");
   assert.ok(orphan, "a sub-agent whose parent was not scanned is still in the payload");
   assert.equal(ownIds(out).includes("orphan"), false, "and it is still not a session of the user's own");
+});
+
+test("sub-agent token spend rolls up recursively without changing the parent's own spend", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const parentOne = out.sessions.find((session) => session.sessionId === "parent-1");
+  assert.deepEqual(parentOne.subagentTokenSpend, {
+    cacheRead: 1000,
+    cacheCreate: 100,
+    output: 140,
+    sessionsIncluded: 4,
+    turnsIncluded: 4,
+  });
+  assert.deepEqual(parentOne.tokenSpend, { cacheRead: 900, cacheCreate: 80, output: 40 });
+});
+
+test("sub-agent token spend distinguishes dispatched but unmeasured sessions", () => {
+  const out = analyzeAll(subagentCorpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  const parentTwo = out.sessions.find((session) => session.sessionId === "parent-2");
+  assert.equal(parentTwo.subagentTokenSpend.sessionsIncluded, 2);
+  assert.equal(parentTwo.subagentTokenSpend.turnsIncluded, 2);
+  assert.equal(parentTwo.subagentTokenSpend.cacheRead, null);
+  assert.equal(parentTwo.subagentTokenSpend.cacheCreate, null);
+  assert.equal(parentTwo.subagentTokenSpend.output, null);
+});
+
+test("a session with no sub-agents has a measured empty token rollup", () => {
+  const out = analyzeAll(corpus(), { generatedAt: "2026-09-20T16:00:00Z" });
+  assert.deepEqual(out.sessions[0].subagentTokenSpend, {
+    cacheRead: null,
+    cacheCreate: null,
+    output: null,
+    sessionsIncluded: 0,
+    turnsIncluded: 0,
+  });
 });
 
 test("F-023: rule 6 keeps every sub-agent interval — the verdict is identical to when children were peers", () => {

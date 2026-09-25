@@ -208,9 +208,18 @@ export function analyzeSession(session, ctx = {}) {
   const turns = Array.isArray(session?.turns) ? session.turns : [];
   let sidechainTurns = 0;
   let ownToolCalls = 0;
+  const tokenSpend = { cacheRead: 0, cacheCreate: 0, output: 0 };
+  const tokenSpendMeasured = { cacheRead: false, cacheCreate: false, output: false };
   for (const turn of turns) {
     if (turn?.isSidechain === true) sidechainTurns += 1;
     if (Array.isArray(turn?.toolCalls) && turn.toolCalls.length) ownToolCalls += 1;
+    for (const field of Object.keys(tokenSpend)) {
+      const value = num(turn?.[field]);
+      if (value !== null) {
+        tokenSpend[field] += value;
+        tokenSpendMeasured[field] = true;
+      }
+    }
   }
 
   const ruleCtx = {
@@ -247,10 +256,41 @@ export function analyzeSession(session, ctx = {}) {
     endedAt: session?.endedAt ?? null,
     turnCount: turns.length,
     subagentTurns: sidechainTurns,
+    /** A flow, summed, never a gauge (R4). */
+    tokenSpend: Object.fromEntries(Object.keys(tokenSpend).map((field) => [
+      field,
+      tokenSpendMeasured[field] ? tokenSpend[field] : null,
+    ])),
     score: scoreRules(results),
     rules: results,
     notApplicable,
   };
+}
+
+/** Add a descendant's own spend without turning an unmeasured side into zero. */
+function addMeasured(total, value) {
+  const measured = num(value);
+  return measured === null ? total : (total === null ? 0 : total) + measured;
+}
+
+/** Additive evidence about the parent, never blended into its own tokenSpend. */
+function subagentTokenSpend(session) {
+  const rollup = { cacheRead: null, cacheCreate: null, output: null, sessionsIncluded: 0, turnsIncluded: 0 };
+  const visited = new Set([session]);
+  const visit = (parent) => {
+    for (const child of Array.isArray(parent?.subagentSessions) ? parent.subagentSessions : []) {
+      if (visited.has(child)) continue;
+      visited.add(child);
+      rollup.sessionsIncluded += 1;
+      rollup.turnsIncluded += num(child?.turnCount) ?? 0;
+      for (const field of ["cacheRead", "cacheCreate", "output"]) {
+        rollup[field] = addMeasured(rollup[field], child?.tokenSpend?.[field]);
+      }
+      visit(child);
+    }
+  };
+  visit(session);
+  return rollup;
 }
 
 /** Per-CLI index of window promotions, keyed by session id. */
@@ -853,6 +893,11 @@ export function analyzeAll(collected = {}, options = {}) {
       // is left unattached rather than made to point at itself.
       if (parent && parent !== child) parent.subagentSessions.push(child);
       else orphansHere += 1;
+    }
+    // Additive evidence about the parent, never blended into its own tokenSpend;
+    // this is the token-count analogue of F-023's parent/peer distinction.
+    for (const health of [...ownHealth, ...subagentHealth]) {
+      health.subagentTokenSpend = subagentTokenSpend(health);
     }
     orphanSubagents += orphansHere;
     analyzed.push(...ownHealth);

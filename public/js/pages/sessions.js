@@ -1016,6 +1016,24 @@ function metricsTab(session) {
   const grid = el('div', 'meta-grid');
   const turns = Number.isFinite(session?.turnCount) ? groupInt(session.turnCount) : null;
   const subSessions = Array.isArray(session?.subagentSessions) ? session.subagentSessions.length : null;
+  const subagentSpend = session?.subagentTokenSpend;
+  let subagentSpendValue = null;
+  if (subagentSpend) {
+    const sessionsIncluded = Number.isFinite(subagentSpend.sessionsIncluded) ? subagentSpend.sessionsIncluded : null;
+    if (sessionsIncluded === 0) {
+      subagentSpendValue = 'no sub-agent sessions dispatched';
+    } else if (subagentSpend.cacheRead === null && subagentSpend.cacheCreate === null && subagentSpend.output === null) {
+      subagentSpendValue = notMeasured(`${groupInt(sessionsIncluded)} sub-agent session(s) were dispatched but no token counts were recorded for them`);
+    } else {
+      const fields = [
+        ['cacheRead', 'cache-read'],
+        ['cacheCreate', 'cache-create'],
+        ['output', 'output'],
+      ].filter(([field]) => subagentSpend[field] !== null)
+        .map(([field, label]) => `${groupInt(subagentSpend[field])} ${label}`);
+      subagentSpendValue = `${fields.join(' + ')} across ${groupInt(sessionsIncluded)} sub-agent sessions`;
+    }
+  }
   grid.append(
     factRow('turns', turns, 'no turn count was recorded'),
     factRow('duration', durationText(session?.startedAt, session?.endedAt), 'the session start or end was not recorded'),
@@ -1023,6 +1041,7 @@ function metricsTab(session) {
     factRow('context window', windowValueNode(session?.window)),
     factRow('sub-agent turns', subagentTurnsNode(session)),
     factRow('sub-agent sessions', subSessions === null ? null : groupInt(subSessions), 'the collector did not report sub-agent sessions'),
+    factRow('sub-agent token spend', subagentSpendValue, 'the collector did not report sub-agent sessions'),
   );
   box.append(grid);
   box.append(scoreNode(session?.score, session?.rules, { showUnknownCallout: false }));
