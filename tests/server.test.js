@@ -1610,6 +1610,74 @@ describe("GET /api/suggestions — THE SUGGESTION CONTRACT", () => {
     assert.equal(res.json.suggestions[0].status, "not-added");
   });
 
+  it("reports keyword and rule-table secondary matches without changing the exact marker status", async () => {
+    const running = await server();
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    await fs.writeFile(target, "Use grep before read when locating a symbol.\n", "utf8");
+    let res = await running.get("/api/suggestions?id=claude-output-hygiene&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "possibly-already-satisfied");
+    assert.equal(res.json.suggestions[0].statusReason, "keyword-match");
+
+    await fs.writeFile(target, "| TB-6 | Bound tool output |\n", "utf8");
+    res = await running.get("/api/suggestions?id=claude-output-hygiene&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "possibly-already-satisfied");
+    assert.equal(res.json.suggestions[0].statusReason, "rule-id-table");
+  });
+
+  it("reports numeric worker caps and preserve-near-compact evidence", async () => {
+    const running = await server();
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    await fs.writeFile(target, "At most 3 concurrent sub-agents.\n", "utf8");
+    let res = await running.get("/api/suggestions?id=claude-worker-cap&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "possibly-already-satisfied");
+    assert.equal(res.json.suggestions[0].statusReason, "numeric-cap-near-keyword");
+
+    await fs.writeFile(target, "compact\nkeep this line\npreserve the file paths\n", "utf8");
+    res = await running.get("/api/suggestions?id=claude-compact-contract&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "possibly-already-satisfied");
+    assert.equal(res.json.suggestions[0].statusReason, "preserve-near-compact");
+  });
+
+  it("ignores digits in rule IDs when finding numeric worker-cap evidence", async () => {
+    const running = await server();
+    const target = path.join(running.home, ".claude", "CLAUDE.md");
+    await fs.writeFile(
+      target,
+      "| WK-1 | sub-agents are ONE-SHOT, one worker at a time. |\n| WK-3 | at most 3 sub-agents run in parallel. |\n",
+      "utf8",
+    );
+    const res = await running.get("/api/suggestions?id=claude-worker-cap&tool=claude&scope=global");
+    const suggestion = res.json.suggestions[0];
+    assert.equal(res.status, 200);
+    assert.equal(suggestion.status, "possibly-already-satisfied");
+    assert.match(suggestion.evidenceSnippet, /at most 3/);
+  });
+
+  it("reports an auto-compact launch flag from the supported shell files", async () => {
+    const running = await server();
+    await fs.writeFile(path.join(running.home, ".zshrc"), 'alias claude="claude --autocompact 450000"\n', "utf8");
+    const res = await running.get("/api/suggestions?id=claude-auto-compact&tool=claude&scope=global");
+    const suggestion = res.json.suggestions[0];
+    assert.equal(suggestion.status, "possibly-already-satisfied");
+    assert.equal(suggestion.statusReason, "launch-command-flag");
+    assert.equal(suggestion.evidenceSourceLabel, "~/.zshrc");
+  });
+
+  it("reports an auto-compact launch flag when settings.json is absent", async () => {
+    const running = await server();
+    await fs.rm(path.join(running.home, ".claude", "settings.json"));
+    await fs.writeFile(path.join(running.home, ".zshrc"), 'alias claude="claude --autocompact 450000"\n', "utf8");
+    const res = await running.get("/api/suggestions?id=claude-auto-compact&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "possibly-already-satisfied");
+  });
+
+  it("keeps a file with none of the secondary signals as not-added", async () => {
+    const running = await server();
+    await fs.writeFile(path.join(running.home, ".claude", "CLAUDE.md"), "Unrelated guidance only.\n", "utf8");
+    const res = await running.get("/api/suggestions?id=claude-output-hygiene&tool=claude&scope=global");
+    assert.equal(res.json.suggestions[0].status, "not-added");
+  });
+
   it("a Codex-targeted suggestion is never routed at Claude Code's settings file", async () => {
     const running = await server();
     const res = await running.get("/api/suggestions?id=claude-batch-commands&tool=codex&scope=global");

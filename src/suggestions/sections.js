@@ -14,6 +14,15 @@
  * request asks the target tool to append.
  */
 
+import {
+  detectKeywordOrRuleTable,
+  detectLaunchCommandFlag,
+  detectNumericCapNearKeywords,
+  detectPreserveNearCompact,
+} from "./secondary-detectors.js";
+
+const HYGIENE_BATCH_KEYWORDS = [/\bbatch\b/i, /\bsingle call\b/i, /\bgrep before read\b/i];
+
 export function renderSection({ marker, heading, body }) {
   return `<!-- ${marker} -->\n## ${heading}\n${body}\n<!-- /${marker} -->\n`;
 }
@@ -30,6 +39,7 @@ export const OUTPUT_HYGIENE = {
   rationale: "SessionRx flags a session once three or more tool results each exceed 10,240 bytes. Those "
     + "bytes do not cost one turn: every later turn re-reads them, so a handful of unbounded commands is "
     + "what pushes average per-turn context toward the window ceiling.",
+  secondaryCheck: (text) => detectKeywordOrRuleTable(text, HYGIENE_BATCH_KEYWORDS),
   body: [
     "Bound every tool result before it enters the transcript. A result over 10 KiB is",
     "not paid for once: it is re-read as context on every later turn of the session.",
@@ -60,6 +70,7 @@ export const BATCH_COMMANDS = {
     + "call, and forbids re-running a call whose answer is already in context.",
   rationale: "SessionRx flags a session when the same tool, the same input and the same result recur "
     + "five or more times — the session paid repeatedly for an answer it already had.",
+  secondaryCheck: (text) => detectKeywordOrRuleTable(text, HYGIENE_BATCH_KEYWORDS),
   body: [
     "Batch independent read-only commands when safe; avoid repeating identical tool calls and reuse verified results.",
     "",
@@ -89,6 +100,7 @@ export const WORKER_CAP = {
     + "handed, with an explicit batch discipline and brief limit.",
   rationale: "SessionRx flags a session whose peak simultaneous sub-agents exceeded half of what it "
     + "dispatched. Fan-out multiplies context: each worker pays for its own brief on every turn it takes.",
+  secondaryCheck: detectNumericCapNearKeywords,
   body: [
     "Keep concurrent sub-agents at or below half of the dispatched worker count unless a deliberate exception is documented.",
     "",
@@ -128,6 +140,7 @@ export const COMPACT_CONTRACT = {
   rationale: "SessionRx flags a session that ran over four hours with its context slope still rising — "
     + "it is accumulating, not compacting. Compacting only helps if the facts the work depends on "
     + "survive it, so this section enumerates them.",
+  secondaryCheck: detectPreserveNearCompact,
   body: [
     "When context pressure rises, compact deliberately: preserve active requirements, decisions, unresolved risks, and exact file paths before continuing.",
     "",
@@ -173,6 +186,11 @@ export const AUTO_COMPACT = {
   rationale: "SessionRx warns when a session's average per-turn context passes 0.70 of the window it "
     + "actually had. The remaining three tenths are the budget that absorbs the next turn's tool output "
     + "and leaves room to compact on purpose; auto-compaction spends it that way.",
+  secondaryLaunchCheck: (opts) => detectLaunchCommandFlag({
+    binaryNames: ["claude"],
+    flagPattern: /--auto-?compact\b/i,
+    ...opts,
+  }),
   // No settings target for another tool is confirmed, so a non-Claude session
   // is offered this instruction section instead — the same "compact
   // deliberately" contract, phrased for an agent rather than for a setting.

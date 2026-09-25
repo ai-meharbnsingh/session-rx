@@ -71,6 +71,41 @@ function statusCallout(suggestion) {
   if (status === "not-added") {
     return callout("info", "Not added yet", "SessionRx did not find this section in the target file.");
   }
+  if (status === "possibly-already-satisfied") {
+    const evidenceLine = Number.isFinite(suggestion?.evidenceLine) ? suggestion.evidenceLine : "an unspecified";
+    const evidenceSnippet = str(suggestion?.evidenceSnippet);
+    const sourceLabel = str(suggestion?.evidenceSourceLabel) || str(suggestion?.targetLabel) || "the target";
+    const message = `This file appears to address this with different wording (found near line ${evidenceLine} of ${sourceLabel}: '${evidenceSnippet}'). SessionRx couldn't confirm automatically. Review before applying — applying anyway won't duplicate content, but it's likely unnecessary.`;
+    const box = callout("maybe", "Possibly already satisfied", message);
+    const actions = el("div", "modal-actions suggestion-actions");
+    const showButton = el("button", "button button-sm", "Show me");
+    showButton.type = "button";
+    const details = el("details");
+    const evidenceDetails = str(suggestion?.evidenceSnippetFull) || evidenceSnippet;
+    details.append(el("summary", null, "Evidence"), el("p", null, evidenceDetails));
+    showButton.addEventListener("click", () => {
+      details.open = !details.open;
+    });
+
+    const applyButton = el("button", "button button-sm button-primary", "Apply anyway");
+    applyButton.type = "button";
+    const applyStatus = el("span", "copy-status", "");
+    applyStatus.setAttribute("role", "status");
+    applyButton.addEventListener("click", async () => {
+      const ok = await copyToClipboard(str(suggestion?.request));
+      applyStatus.textContent = ok ? "Copied." : "Could not copy automatically — select the text below and copy it yourself.";
+    });
+
+    const dismissButton = el("button", "button button-sm", "Dismiss");
+    dismissButton.type = "button";
+    dismissButton.addEventListener("click", () => {
+      box.replaceChildren(el("p", null, "Dismissed — treating as not confirmed either way."));
+    });
+
+    actions.append(showButton, applyButton, applyStatus, dismissButton);
+    box.append(actions, details);
+    return box;
+  }
   const reason = str(suggestion?.statusReason);
   const why = reason === "project-path-not-resolvable"
     ? "SessionRx cannot resolve a project path from here, so it cannot say whether this is already added."

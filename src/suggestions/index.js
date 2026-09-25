@@ -104,7 +104,10 @@ export async function buildSuggestion(id, toolId, scope, { env = process.env, ho
     // The preview is the key/value pair on its own line, not a whole document —
     // that is what the request asks the tool to MERGE in, byte for byte.
     const previewLine = `"${def.key}": ${JSON.stringify(def.value)}\n`;
-    const check = await checkSettingsStatus({ toolId, scope, key: def.key, value: def.value, env, home });
+    const check = await checkSettingsStatus({
+      toolId, scope, key: def.key, value: def.value, env, home,
+      secondaryCheck: def.secondaryLaunchCheck,
+    });
     return {
       id: def.id,
       ruleId: def.ruleId,
@@ -119,6 +122,9 @@ export async function buildSuggestion(id, toolId, scope, { env = process.env, ho
       request: requestForSettings({ toolId, scope, targetDisplay, key: def.key, value: def.value }),
       status: check.status,
       statusReason: check.reason,
+      evidenceLine: check.evidenceLine ?? null,
+      evidenceSnippet: check.evidenceSnippet ?? null,
+      evidenceSourceLabel: check.evidenceSourceLabel ?? targetDisplay ?? null,
       available: true,
     };
   }
@@ -128,7 +134,9 @@ export async function buildSuggestion(id, toolId, scope, { env = process.env, ho
   const target = tool[scope];
   const cursorGlobalNoFile = toolId === "cursor" && scope === "global";
   const targetDisplay = target?.display ? target.display({ env, home }) : null;
-  const check = await checkMarkerStatus({ toolId, scope, marker: def.marker, env, home });
+  const check = await checkMarkerStatus({
+    toolId, scope, marker: def.marker, env, home, secondaryCheck: def.secondaryCheck,
+  });
   const request = cursorGlobalNoFile
     ? requestForCursorUserRules(preview)
     : requestForFile({ toolId, scope, targetDisplay, preview, note: target?.note ?? null });
@@ -152,6 +160,9 @@ export async function buildSuggestion(id, toolId, scope, { env = process.env, ho
     request,
     status: cursorGlobalNoFile ? "unknown" : check.status,
     statusReason: cursorGlobalNoFile ? "no-local-file" : check.reason,
+    evidenceLine: check.evidenceLine ?? null,
+    evidenceSnippet: check.evidenceSnippet ?? null,
+    evidenceSourceLabel: check.evidenceSourceLabel ?? targetDisplay ?? null,
     available: true,
     usingFallback,
   };

@@ -664,6 +664,8 @@ td.num, th.num { text-align: right; }
 .callout-info { border-left-color: var(--info); background: var(--info-bg); }
 .callout-info .callout-title { color: var(--info); }
 .callout-unknown { border-left-style: dashed; border-left-color: var(--unknown-line); background-color: var(--unknown-bg); background-image: var(--unknown-hatch); color: var(--unknown); font-style: italic; }
+.callout-maybe { border-left-style: dashed; border-left-color: var(--warn-line); background-color: var(--warn-bg); background-image: var(--unknown-hatch); color: var(--warn); }
+.callout-maybe .callout-title { color: var(--warn); }
 .callout-code { display: block; margin-top: 6px; font: 11px var(--mono); letter-spacing: .04em; opacity: .85; }
 .callout-detail { margin-top: 6px; font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 

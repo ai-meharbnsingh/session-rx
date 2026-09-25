@@ -93,9 +93,9 @@ export function toolLabel(toolId) {
  * `unknown` with a machine-readable reason rather than guessing either way —
  * the same honesty rule the health rules themselves follow.
  *
- * @returns {Promise<{status: "already-added"|"not-added"|"unknown", reason: string|null}>}
+ * @returns {Promise<{status: "already-added"|"not-added"|"possibly-already-satisfied"|"unknown", reason: string|null}>}
  */
-export async function checkMarkerStatus({ toolId, scope, marker, env = process.env, home }) {
+export async function checkMarkerStatus({ toolId, scope, marker, env = process.env, home, secondaryCheck }) {
   if (scope !== "global") {
     return { status: "unknown", reason: "project-path-not-resolvable" };
   }
@@ -111,13 +111,27 @@ export async function checkMarkerStatus({ toolId, scope, marker, env = process.e
     if (error?.code === "ENOENT") return { status: "not-added", reason: null };
     return { status: "unknown", reason: `read-failed:${error?.code ?? "unknown"}` };
   }
+  if (!text.includes(`<!-- ${marker} -->`) && typeof secondaryCheck === "function") {
+    const match = await secondaryCheck(text);
+    if (match) {
+      return {
+        status: "possibly-already-satisfied",
+        reason: match.reason,
+        evidenceLine: match.line,
+        evidenceSnippet: match.snippet,
+        evidenceSourceLabel: null,
+      };
+    }
+  }
   return text.includes(`<!-- ${marker} -->`)
     ? { status: "already-added", reason: null }
     : { status: "not-added", reason: null };
 }
 
-/** Same idea, for the one settings-file suggestion (Claude Code only). */
-export async function checkSettingsStatus({ toolId, scope, key, value, env = process.env, home }) {
+/** Same idea, for the one settings-file suggestion (Claude Code only).
+ * @returns {Promise<{status: "already-added"|"not-added"|"possibly-already-satisfied"|"unknown", reason: string|null}>}
+ */
+export async function checkSettingsStatus({ toolId, scope, key, value, env = process.env, home, secondaryCheck }) {
   if (scope !== "global") {
     return { status: "unknown", reason: "project-path-not-resolvable" };
   }
@@ -129,7 +143,21 @@ export async function checkSettingsStatus({ toolId, scope, key, value, env = pro
   try {
     text = await readFile(settings.resolve({ env, home }), "utf8");
   } catch (error) {
-    if (error?.code === "ENOENT") return { status: "not-added", reason: null };
+    if (error?.code === "ENOENT") {
+      if (typeof secondaryCheck === "function") {
+        const match = await secondaryCheck({ env, home });
+        if (match) {
+          return {
+            status: "possibly-already-satisfied",
+            reason: match.reason,
+            evidenceLine: match.line,
+            evidenceSnippet: match.snippet,
+            evidenceSourceLabel: match.sourceFile ?? null,
+          };
+        }
+      }
+      return { status: "not-added", reason: null };
+    }
     return { status: "unknown", reason: `read-failed:${error?.code ?? "unknown"}` };
   }
   let parsed;
@@ -140,6 +168,18 @@ export async function checkSettingsStatus({ toolId, scope, key, value, env = pro
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { status: "unknown", reason: "target-unparseable" };
+  }
+  if (!(Object.hasOwn(parsed, key) && parsed[key] === value) && typeof secondaryCheck === "function") {
+    const match = await secondaryCheck({ env, home });
+    if (match) {
+      return {
+        status: "possibly-already-satisfied",
+        reason: match.reason,
+        evidenceLine: match.line,
+        evidenceSnippet: match.snippet,
+        evidenceSourceLabel: match.sourceFile ?? null,
+      };
+    }
   }
   return Object.hasOwn(parsed, key) && parsed[key] === value
     ? { status: "already-added", reason: null }
