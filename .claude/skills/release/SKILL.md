@@ -237,12 +237,28 @@ git push origin main
 CI_RUN_ID=""
 for _ in $(seq 1 20); do
   CI_RUN_ID=$(gh run list --workflow=test.yml --branch=main --commit "$RELEASE_SHA" --json databaseId -q '.[0].databaseId')
-  [ -n "$CI_RUN_ID" ] && [ "$CI_RUN_ID" != "null" ] && break
+  # NOT `[ ... ] && [ ... ] && break` -- under `set -e`, a bare AND-list with
+  # no trailing `||` propagates ITS OWN failure (when the run hasn't
+  # appeared yet, which is the NORMAL first few iterations) straight to the
+  # script's exit, aborting the whole release on iteration 1 instead of
+  # retrying. A reviewer caught this exact interaction after `set -e` was
+  # added in the previous fix. `if/then/fi` is one of the few constructs
+  # POSIX explicitly exempts from `set -e`, so this form is required, not
+  # stylistic:
+  if [ -n "$CI_RUN_ID" ] && [ "$CI_RUN_ID" != "null" ]; then break; fi
   sleep 3
 done
 [ -n "$CI_RUN_ID" ] && [ "$CI_RUN_ID" != "null" ] || { echo "no Tests run appeared for $RELEASE_SHA after 60s — tag NOT pushed"; exit 1; }
-gh run watch --exit-status "$CI_RUN_ID"
-CI_EXIT=$?
+# Same `set -e` hazard applies to `gh run watch`: it exits non-zero when CI
+# is red, and a bare non-zero exit on a standalone command IS what `set -e`
+# is supposed to catch and abort on -- except here we need to catch it
+# ourselves first to print which commit/run failed and confirm the tag was
+# never pushed. `|| CI_EXIT=$?` (an assignment, always itself exit-0) is the
+# standard way to capture a failing command's status without either
+# triggering `set -e` or losing the code (a reviewer caught the earlier
+# `CI_EXIT=$?` on its own line never being reached for the same reason):
+CI_EXIT=0
+gh run watch --exit-status "$CI_RUN_ID" || CI_EXIT=$?
 [ "$CI_EXIT" -eq 0 ] || { echo "CI red on main ($CI_RUN_ID, $RELEASE_SHA) — tag NOT pushed, no publish triggered"; exit 1; }
 
 # 4. only now — main is green on the exact pushed commit — push the tag,
