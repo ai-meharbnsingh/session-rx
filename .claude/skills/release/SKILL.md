@@ -40,21 +40,24 @@ no npm registry interaction anywhere in dry-run mode.
 ### RS-A — Full test suite
 
 ```bash
+SCRATCH="${CLAUDE_SCRATCHPAD:-/tmp}"
 set -o pipefail
-npm test 2>&1 | tee release_test_output.txt
-echo "EXIT:$?"
+npm test 2>&1 | tee "$SCRATCH/release_test_output.txt"
+TEST_EXIT=$?
+echo "EXIT:$TEST_EXIT"
 ```
 
 | ID | Rule |
 |----|------|
-| A-1 | non-zero exit -> ABORT the whole release; do not proceed to RS-B |
-| A-2 | `release_test_output.txt` is the evidence artifact for RS-F row 1; move it to `_trash/` (never `rm`) once the table is filled |
+| A-1 | `[ "$TEST_EXIT" -ne 0 ]` -> ABORT the whole release; do not proceed to RS-B. Capture the exit code into a variable BEFORE any further command runs — a bare trailing `echo "EXIT:$?"` always itself exits 0, so a caller checking the block's own exit status would see success even when the tests failed. This is a real bug a reviewer caught in an earlier draft; do not reintroduce it. |
+| A-2 | `release_test_output.txt` lives in the session scratchpad, never the repo root — an evidence file sitting in the working tree (even temporarily, even if moved to `_trash/` afterward) is a real "writes to the user's tree" complaint, and reviewers will correctly flag it |
 
 ### RS-B — Independent review of the release diff
 
 ```bash
+SCRATCH="${CLAUDE_SCRATCHPAD:-/tmp}"
 git diff origin/main...HEAD --stat
-git diff origin/main...HEAD > /tmp/release_diff.patch   # or the session scratchpad
+git diff origin/main...HEAD > "$SCRATCH/release_diff.patch"
 git log origin/main..HEAD --format='%B'                  # writer-detection input
 ```
 
@@ -79,60 +82,78 @@ RULE: never invoke the 2nd reviewer unless the 1st produced NO verdict
 been tried, for either writer branch.
 ```
 
-**Review prompt template** (same for every reviewer — fill `<DIFF>`):
+**Review prompt template** — write it to a file in the session scratchpad
+FIRST (never the repo root — an evidence artifact left in the working tree
+is exactly the "writes user files" complaint a reviewer will correctly
+raise); every reviewer invocation below depends on this file existing:
 
-```
-Review this session-rx release diff for correctness and contract compliance.
+```bash
+SCRATCH="${CLAUDE_SCRATCHPAD:-/tmp}"   # session scratchpad if set, else /tmp
+SHA=$(git rev-parse HEAD)
+cat > "$SCRATCH/review_prompt.txt" <<EOF
+Review commit $SHA in this repository (run 'git show $SHA' yourself, or use
+the embedded diff below if your tool cannot run shell commands) for
+correctness and contract compliance.
+
 Check specifically: the Honesty Contract (verdict is always observed |
-not-observed | unknown — never a fourth state, never null-as-0), the
+not-observed | unknown -- never a fourth state, never null-as-0), the
 Suggestion Contract (no file writes, byte-for-byte preview text, append-only
 requests, idempotence marker check), read-only collector guarantees
-(createReadStream / SQLite opened `mode=ro`), and the no-network rule (no
+(createReadStream / SQLite opened mode=ro), and the no-network rule (no
 fetch/require('http'), no CDN <script>, Chart.js stays vendored).
-
-Diff:
-<DIFF>
 
 End your review with exactly one line, verbatim, nothing else on that line:
 VERDICT: PASS
 VERDICT: FIX
 VERDICT: BLOCK
+EOF
 ```
 
-**Grounded invocation commands:**
+| ID | Rule |
+|----|------|
+| RB-1 | if the reviewer tool cannot be granted shell/command permission in non-interactive mode (headless `--print`/`exec` modes commonly can't prompt for a permission grant), append the diff itself (`git show --format=fuller "$SHA"`) to the prompt file instead of asking the reviewer to run `git show` — never grant a blanket `--dangerously-skip-permissions`/sandbox-bypass flag just to let a reviewer shell out; that is a bigger risk than the review is worth |
+
+**Grounded invocation commands** (`$SCRATCH` as defined above):
 
 ```bash
 # agy (with Gemini 3.1 Pro) — verified model id via `agy models`
-agy --print --model gemini-3.1-pro-high "$(cat review_prompt.txt)" > release_review_agy.txt 2>&1
+agy --print --model gemini-3.1-pro-high "$(cat "$SCRATCH/review_prompt.txt")" > "$SCRATCH/release_review_agy.txt" 2>&1
 
-# Codex Sol = codex's own non-interactive review subcommand
-codex review --base origin/main - < review_prompt.txt > release_review_codex.txt 2>&1
+# Codex Sol = codex's own non-interactive review subcommand.
+# NOTE: --base/--uncommitted/--commit are MUTUALLY EXCLUSIVE with a custom
+# PROMPT argument (verified: `codex review --base X -` errors "cannot be
+# used with '[PROMPT]'"). Use the self-contained prompt file (which already
+# names the commit and, if RB-1 applied, embeds the diff) with NO scope flag:
+codex review - < "$SCRATCH/review_prompt.txt" > "$SCRATCH/release_review_codex.txt" 2>&1
 
 # Opus fallback = Agent tool call, model: "opus", NOT a CLI — write its
-# report to release_review_opus.txt via the agent's own file write
+# report to "$SCRATCH/release_review_opus.txt" via the agent's own file write
 ```
 
 | ID | Rule |
 |----|------|
 | RM-3 | review file must contain exactly one `VERDICT: (PASS\|FIX\|BLOCK)` line: `grep -Eo 'VERDICT: (PASS\|FIX\|BLOCK)' <file>` returns exactly 1 line |
-| RM-4 | `grep -iE '429\|quota\|rate.?limit\|resource_exhausted'` matching anywhere in the review file, OR zero/more-than-one VERDICT lines, = **no verdict** -> try the 2nd reviewer in RM-2's order; if the 2nd also gives no verdict -> STOP and ask the operator |
-| RM-5 | no reviewer available at all (both binaries missing / both Agent calls fail) -> STOP and ask the operator; never proceed on an assumed PASS |
-| RM-6 | `VERDICT: FIX` or `VERDICT: BLOCK` -> STOP, report the reviewer's findings, do not proceed to RS-C |
+| RM-4 | `grep -iE '429\|quota\|rate.?limit\|resource_exhausted\|unavailable\|\b50[0-9]\b'` matching anywhere in the review file, OR zero/more-than-one VERDICT lines, = **no verdict** -> try the 2nd reviewer in RM-2's order; if the 2nd also gives no verdict -> STOP and ask the operator |
+| RM-4a | a transient `UNAVAILABLE`/`50x` from the CLI itself (not the model's review content) may be retried once after a short wait before counting as "no verdict" — a genuine model-authored review is worth one retry, a formatting failure (missing VERDICT line) is not, and is not retried |
+| RM-5 | no reviewer available at all (both binaries missing / both Agent calls fail, or both give no verdict after RM-4/RM-4a) -> STOP and ask the operator; never proceed on an assumed PASS |
+| RM-6 | `VERDICT: FIX` or `VERDICT: BLOCK` -> STOP, report the reviewer's findings verbatim, fix them, commit the fix as a NEW commit, and re-run RS-B against the new commit before proceeding to RS-C. A FIX/BLOCK verdict is never overridden to keep a demonstration or dry-run moving. |
 
 ### RS-C — npm pack + smoke test
 
 ```bash
-npm pack --pack-destination /tmp
-TARBALL=$(ls -t /tmp/session-rx-*.tgz | head -1)
-mkdir -p /tmp/session-rx-smoke && tar -xzf "$TARBALL" -C /tmp/session-rx-smoke
-node /tmp/session-rx-smoke/package/src/cli.js --version
-echo "EXIT:$?"
+SCRATCH="${CLAUDE_SCRATCHPAD:-/tmp}"
+npm pack --pack-destination "$SCRATCH"
+TARBALL=$(ls -t "$SCRATCH"/session-rx-*.tgz | head -1)
+mkdir -p "$SCRATCH/session-rx-smoke" && tar -xzf "$TARBALL" -C "$SCRATCH/session-rx-smoke"
+node "$SCRATCH/session-rx-smoke/package/src/cli.js" --version
+SMOKE_EXIT=$?
+echo "EXIT:$SMOKE_EXIT"
 ```
 
 | ID | Rule |
 |----|------|
-| C-1 | non-zero exit anywhere in this block -> ABORT, do not proceed to RS-D |
-| C-2 | tarball and extracted dir are session-scratch, not project files — never leave them under the repo |
+| C-1 | `[ "$SMOKE_EXIT" -ne 0 ]` -> ABORT, do not proceed to RS-D. Same exit-code-capture rule as A-1 — capture before any further command runs. |
+| C-2 | tarball and extracted dir live in the session scratchpad, never the repo — never leave them under the project working tree |
 
 ### RS-D — Version bump, CHANGELOG, commit, tag, push, CI wait
 
@@ -153,18 +174,28 @@ npm version "$NEXT" --no-git-tag-version
 # prepend CHANGELOG.md entry
 git add package.json package-lock.json CHANGELOG.md
 git commit -m "[session-rx] chore(release): $NEXT"
-git tag "v$NEXT"
 git push origin main
-git push origin "v$NEXT"
 
 # 3. wait for the Tests workflow on the main-branch push to go green
-gh run watch --exit-status $(gh run list --workflow=test.yml --branch=main -L1 --json databaseId -q '.[0].databaseId')
+# BEFORE touching the tag — a `v*` tag push fires publish.yml UNCONDITIONALLY
+# (it does not itself wait on the Tests workflow), so the tag must never be
+# pushed until this wait has returned success. Pushing the tag first was a
+# real ordering bug an earlier draft shipped with (caught by two independent
+# reviewers); never reorder this back.
+CI_RUN_ID=$(gh run list --workflow=test.yml --branch=main -L1 --json databaseId -q '.[0].databaseId')
+gh run watch --exit-status "$CI_RUN_ID"
+CI_EXIT=$?
+[ "$CI_EXIT" -eq 0 ] || { echo "CI red on main ($CI_RUN_ID) — tag NOT pushed, no publish triggered"; exit 1; }
+
+# 4. only now — main is green — push the tag, which triggers publish.yml
+git tag "v$NEXT"
+git push origin "v$NEXT"
 ```
 
 | ID | Rule |
 |----|------|
 | D-1 | dry-run mode: everything above the `LIVE MODE ONLY` line runs for real (it is pure computation); nothing at or below it runs — show the would-be `NEXT` version and a `git diff --stat`-style preview of package.json/CHANGELOG.md instead |
-| D-2 | live mode: `gh run watch --exit-status` non-zero -> the Tests workflow went red on `main` -> STOP, do not push the tag if it hasn't been pushed yet; if RS-D already pushed the tag, that already triggered `publish.yml` — this ordering (push main, wait green, only then push tag) exists specifically so a red main never reaches a tag push |
+| D-2 | live mode: `gh run watch --exit-status` non-zero -> the Tests workflow went red on `main` -> STOP, exit before the tag block; the tag is never created or pushed in this path, so `publish.yml` never fires. The commands are ordered push-main / wait-green / tag-and-push-tag specifically so a red main can never reach a tag push — do not reorder them. |
 | D-3 | any git command failing (auth, conflict, rejected push) -> ABORT, report the exact command and error, do not retry blindly |
 
 ### RS-E — Verify published
@@ -191,3 +222,4 @@ npm view session-rx version
 | F-1 | every row's exit code and key output line must come from a command actually run THIS invocation — no recalled/remembered values |
 | F-2 | a row with no evidence is `UNVERIFIED`, and per the operator's standing rule: **the release is not done** |
 | F-3 | dry-run rows for RS-D's git actions and all of RS-E are `SKIPPED (dry-run)` — a distinct, honest state, never conflated with `UNVERIFIED` (which means "should have evidence and doesn't") or with a fabricated pass |
+| F-4 | when RM-6 halts the release at RS-B (FIX/BLOCK verdict), the rows for every later step are `NOT RUN (blocked by review verdict)` — a third distinct state, different again from `SKIPPED (dry-run)` (which means the pipeline reached that point and deliberately did not act) and from `UNVERIFIED` (which means a claimed row has no evidence). The table still ships; a halted release is a correct, reportable outcome, not a reason to omit the table. |
