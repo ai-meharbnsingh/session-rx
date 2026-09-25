@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Full suite: 769 passing tests (3 new trend tests added), exit code 0, no regressions.
 
+## [0.4.1] - 2026-09-25
+
+### Added
+
+- **A third suggestion status, `possibly-already-satisfied`, closing a false-negative in `checkMarkerStatus`/`checkSettingsStatus` (`src/suggestions/targets.js`).** Previously, if a user's instructions file already addressed a finding in different wording than SessionRx's own exact marker, the suggestion was reported as plain "not-added" — indistinguishable from a user who had done nothing. The exact-marker/exact-settings-key check is unchanged and is still the only path that produces a clean "already-added" (idempotence guarantee preserved). Now, only when that exact check fails, an optional secondary heuristic runs per suggestion (`src/suggestions/secondary-detectors.js`): a keyword/rule-ID-table detector for the batch-commands and output-hygiene suggestions, a numeric-cap-near-keyword detector for the sub-agent worker-cap suggestion, a preserve-near-compact detector for the compaction-contract suggestion, and a launch-command-flag detector (checks shell rc files for a `--autocompact`-style CLI flag/alias) for the auto-compact suggestion. A match reports `possibly-already-satisfied` with the matched line number and snippet as evidence, never a silent reclassification to "already-added" — the UI (`public/js/components/suggestion-panel.js`) shows this as a distinct "Possibly already satisfied" callout with the evidence, and `[Show me]` (expand the evidence), `[Apply anyway]` (copies the request text regardless), and `[Dismiss]` actions.
+
+- **`tests/ui-suggestion-panel.test.js`: the first automated test coverage for `suggestion-panel.js`'s rendering logic.** Covers every suggestion status (`already-added`, `not-added` with and without a reason, `possibly-already-satisfied`'s evidence display and its three actions, all three `unknown` reasons, and the unavailable-tool message) using a hand-built DOM shim, no browser.
+
+### Fixed
+
+- **The `claude-auto-compact` suggestion's "not-added" reason now adds one clarifying sentence when a readable global instructions file exists alongside settings.json:** "Not found in settings.json or shell rc files. If you set --autocompact via a CLI flag or alias, this check can't see it — only settings.json and shell rc files are read." The other four suggestions' reason text is unaffected.
+
+### Tests
+
+- Full suite: 784 passing tests, exit code 0, no regressions.
+
 ## [0.3.3] - 2026-09-24
 
 ### Fixed
