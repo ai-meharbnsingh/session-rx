@@ -1,6 +1,6 @@
 {
   "name": "session-rx",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Diagnose and fix inefficient AI coding sessions. Local, private, one command.",
   "type": "module",
   "bin": {

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-09-25
+
+### Added
+
+- **`prepublishOnly` test gate.** `package.json` now runs `npm test` automatically before any `npm publish`, whether invoked manually or via this project's own release skill, so a publish can no longer skip the suite by accident.
+
+- **`.claude/skills/release/SKILL.md`: a deterministic, independently-reviewed release pipeline.** Defines the full release procedure -- test suite, an independent review of the release diff (never by a reviewer sharing the writer's own family: Codex-written diffs try agy with Gemini 3.1 Pro first and fall back to Opus only if agy gives no verdict; Claude-written diffs try `codex review` first and fall back to agy), npm pack/smoke test, version bump/changelog/commit/tag/push with a CI-green gate strictly before the tag is ever pushed (since a `v*` tag push triggers the real OIDC-driven npm publish unconditionally), and a mandatory evidence table with three distinct non-evidence states (`UNVERIFIED`, `SKIPPED (dry-run)`, `NOT RUN (blocked by review verdict)`) so a missing result is never confused with a deliberate skip. Built and hardened through five rounds of adversarial review against its own first cut, which caught and fixed: a tag-push-before-CI-wait ordering bug, a CI-run lookup race condition, a `set -e` interaction that silently broke the polling loop it was meant to protect, a CHANGELOG step that was a comment instead of a gate, and a packed-tarball smoke test that never actually installed the package's dependencies.
+
 ## [0.4.0] - 2026-09-25
 
 ### Added
