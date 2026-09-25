@@ -153,6 +153,14 @@ SCRATCH="${CLAUDE_SCRATCHPAD:-/tmp}"
 npm pack --pack-destination "$SCRATCH"
 TARBALL=$(ls -t "$SCRATCH"/session-rx-*.tgz | head -1)
 mkdir -p "$SCRATCH/session-rx-smoke" && tar -xzf "$TARBALL" -C "$SCRATCH/session-rx-smoke"
+# The tarball is package.json's own `files` list ONLY (src, public, README,
+# LICENSE) -- it does not include node_modules. Running the CLI straight
+# from the extraction fails on any runtime dependency (verified: this
+# actually threw ERR_MODULE_NOT_FOUND on `express` the first time this
+# skill was run, not a hypothetical -- ALWAYS `npm install` in the
+# extracted dir first, the same as an actual `npm install session-rx` user
+# would experience):
+( cd "$SCRATCH/session-rx-smoke/package" && npm install --omit=dev --no-audit --no-fund )
 node "$SCRATCH/session-rx-smoke/package/src/cli.js" --version
 SMOKE_EXIT=$?
 echo "EXIT:$SMOKE_EXIT"
@@ -161,6 +169,7 @@ echo "EXIT:$SMOKE_EXIT"
 | ID | Rule |
 |----|------|
 | C-1 | `[ "$SMOKE_EXIT" -ne 0 ]` -> ABORT, do not proceed to RS-D. Same exit-code-capture rule as A-1 — capture before any further command runs. |
+| C-3 | the `npm install` above is REQUIRED, not optional hardening — omitting it means this step only ever tests "does the file listing extract," never "does the published package actually run," which is the entire point of a smoke test |
 | C-2 | tarball and extracted dir live in the session scratchpad, never the repo — never leave them under the project working tree |
 
 ### RS-D — Version bump, CHANGELOG, commit, tag, push, CI wait
