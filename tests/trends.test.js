@@ -307,6 +307,54 @@ test("G2 sums the two cache components and keeps them separable for stacking", (
   assert.equal(byDate(t.charts.cache).get(dayKey(0)).hitRate, 86.36);
 });
 
+test("G2 keeps sub-agent cache spend in the headline totals and breaks it out", () => {
+  const t = trends([
+    session({
+      sessionId: "mixed-subagents",
+      turns: [
+        turn({ ts: localTs(0, 9), cacheRead: 1_000, cacheCreate: 100 }),
+        turn({ ts: localTs(0, 10), cacheRead: 2_000, cacheCreate: 200, isSidechain: true }),
+      ],
+    }),
+  ]);
+  const spend = byDate(t.charts.spend).get(dayKey(0));
+  assert.equal(spend.cacheRead, 3_000);
+  assert.equal(spend.cacheCreation, 300);
+  assert.equal(spend.total, 3_300);
+  assert.equal(spend.subagentCacheRead, 2_000);
+  assert.equal(spend.subagentCacheCreation, 200);
+  assert.equal(spend.subagentTotal, 2_200);
+});
+
+test("G2 reports null sub-agent spend when a day has only own turns", () => {
+  const t = trends([
+    session({
+      sessionId: "own-only",
+      turns: [turn({ ts: localTs(0, 9), cacheRead: 1_000, cacheCreate: 100, isSidechain: false })],
+    }),
+  ]);
+  const spend = byDate(t.charts.spend).get(dayKey(0));
+  assert.equal(spend.subagentCacheRead, null);
+  assert.equal(spend.subagentCacheCreation, null);
+  assert.equal(spend.subagentTotal, null);
+});
+
+test("G2 includes sub-agent-only cache spend in both headline and breakdown totals", () => {
+  const t = trends([
+    session({
+      sessionId: "subagents-only",
+      turns: [turn({ ts: localTs(0, 9), cacheRead: 4_000, cacheCreate: 400, isSidechain: true })],
+    }),
+  ]);
+  const spend = byDate(t.charts.spend).get(dayKey(0));
+  assert.equal(spend.cacheRead, 4_000);
+  assert.equal(spend.cacheCreation, 400);
+  assert.equal(spend.total, 4_400);
+  assert.equal(spend.subagentCacheRead, 4_000);
+  assert.equal(spend.subagentCacheCreation, 400);
+  assert.equal(spend.subagentTotal, 4_400);
+});
+
 // --------------------------------------------------------------------------
 // R4 — context is never summed
 // --------------------------------------------------------------------------

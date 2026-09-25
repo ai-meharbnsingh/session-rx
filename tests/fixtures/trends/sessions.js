@@ -31,7 +31,7 @@ export function dayKey(day) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-export function turn({ ts, inputTokens = null, fraction = null, source = "derived", cacheRead = null, cacheCreate = null, output = null }) {
+export function turn({ ts, inputTokens = null, fraction = null, source = "derived", cacheRead = null, cacheCreate = null, output = null, isSidechain = null }) {
   return {
     ts,
     context: { inputTokens, fraction, source },
@@ -40,7 +40,7 @@ export function turn({ ts, inputTokens = null, fraction = null, source = "derive
     output,
     toolCalls: [],
     toolResultBytes: null,
-    isSidechain: null,
+    isSidechain,
   };
 }
 

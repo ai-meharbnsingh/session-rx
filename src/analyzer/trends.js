@@ -49,6 +49,12 @@
  *     `getMonth` / `getDate` / `getHours`, and `window.timezoneOffsetMinutes`
  *     records the offset the numbers were computed under.
  *
+ * R6  SUB-AGENT SPEND IS REAL SPEND, BROKEN OUT SEPARATELY.  G2's
+ *     `cacheRead`/`cacheCreation`/`total` include sub-agent turns because
+ *     their tokens are real spend; the `subagent*` fields break that portion
+ *     out for legibility, so heavy delegation is readable rather than an
+ *     unexplained spike.
+ *
  * A CLI that reports a NATIVE context fraction (BLUEPRINT DIS-005) does so
  * with `window.tokens === null`.  It therefore contributes to G1's fraction
  * series and to nothing token-denominated.  Its fraction is never multiplied
@@ -243,6 +249,10 @@ function newBucket() {
     cacheReadCount: 0,
     cacheCreate: 0,
     cacheCreateCount: 0,
+    subagentCacheRead: 0,
+    subagentCacheReadCount: 0,
+    subagentCacheCreate: 0,
+    subagentCacheCreateCount: 0,
     hours: new Array(HEATMAP_HOURS).fill(0),
   };
 }
@@ -355,10 +365,18 @@ export function buildTrends(input, options = {}) {
       if (finite(turn?.cacheRead)) {
         bucket.cacheRead += turn.cacheRead;
         bucket.cacheReadCount += 1;
+        if (turn?.isSidechain === true) {
+          bucket.subagentCacheRead += turn.cacheRead;
+          bucket.subagentCacheReadCount += 1;
+        }
       }
       if (finite(turn?.cacheCreate)) {
         bucket.cacheCreate += turn.cacheCreate;
         bucket.cacheCreateCount += 1;
+        if (turn?.isSidechain === true) {
+          bucket.subagentCacheCreate += turn.cacheCreate;
+          bucket.subagentCacheCreateCount += 1;
+        }
       }
     }
     if (!placedAny) excluded.sessionsOutsideWindow += 1;
@@ -423,6 +441,8 @@ function contextRow(date, bucket) {
 function spendRow(date, bucket) {
   const cacheRead = bucket.cacheReadCount > 0 ? bucket.cacheRead : null;
   const cacheCreation = bucket.cacheCreateCount > 0 ? bucket.cacheCreate : null;
+  const subagentCacheRead = bucket.subagentCacheReadCount > 0 ? bucket.subagentCacheRead : null;
+  const subagentCacheCreation = bucket.subagentCacheCreateCount > 0 ? bucket.subagentCacheCreate : null;
   return {
     date,
     hasData: bucket.turns > 0,
@@ -432,8 +452,16 @@ function spendRow(date, bucket) {
     // an undercount presented as a total, so it stays null unless both sides
     // were actually read.
     total: cacheRead !== null && cacheCreation !== null ? cacheRead + cacheCreation : null,
+    subagentCacheRead,
+    subagentCacheCreation,
+    subagentTotal:
+      subagentCacheRead !== null && subagentCacheCreation !== null
+        ? subagentCacheRead + subagentCacheCreation
+        : null,
     turnsWithCacheRead: bucket.cacheReadCount,
     turnsWithCacheCreation: bucket.cacheCreateCount,
+    turnsWithSubagentCacheRead: bucket.subagentCacheReadCount,
+    turnsWithSubagentCacheCreation: bucket.subagentCacheCreateCount,
   };
 }
 

@@ -394,7 +394,10 @@ function spendChart(trends) {
     title: 'G2 · Text used (tokens)',
     sub: `${measured}/${rows.length} days with a cache reading`,
     config,
-    legend: [{ swatch: 'legend-swatch-gap', caption: 'a missing bar is a day with no cache counter, not a day of no spend' }],
+    legend: [
+      { swatch: 'legend-swatch-gap', caption: 'a missing bar is a day with no cache counter, not a day of no spend' },
+      { swatch: 'legend-swatch-gap', caption: 'daily totals include sub-agent token spend' },
+    ],
     note:
       'The daily total appears only where BOTH cache read and cache creation were read. One measured side plus one absent '
       + 'side would be an undercount presented as a total.',
