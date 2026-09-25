@@ -15,6 +15,7 @@
 
 import { renderSection, SUGGESTION_DEFS } from "./sections.js";
 import { checkMarkerStatus, checkSettingsStatus, TOOL_IDS, toolLabel, TOOLS } from "./targets.js";
+import { readFile } from "node:fs/promises";
 
 export { SUGGESTION_DEFS, TOOL_IDS, toolLabel };
 
@@ -108,6 +109,18 @@ export async function buildSuggestion(id, toolId, scope, { env = process.env, ho
       toolId, scope, key: def.key, value: def.value, env, home,
       secondaryCheck: def.secondaryLaunchCheck,
     });
+    let statusReason = check.reason;
+    if (check.status === "not-added" && def.id === "claude-auto-compact") {
+      try {
+        const globalInstructions = TOOLS[toolId]?.global?.resolve?.({ env, home });
+        if (globalInstructions) {
+          await readFile(globalInstructions, "utf8");
+          statusReason = "Not found in settings.json or shell rc files. If you set --autocompact via a CLI flag or alias, this check can't see it — only settings.json and shell rc files are read.";
+        }
+      } catch {
+        // Keep the existing null/other reason when the global instructions file cannot be read.
+      }
+    }
     return {
       id: def.id,
       ruleId: def.ruleId,
@@ -121,7 +134,7 @@ export async function buildSuggestion(id, toolId, scope, { env = process.env, ho
       preview: previewLine,
       request: requestForSettings({ toolId, scope, targetDisplay, key: def.key, value: def.value }),
       status: check.status,
-      statusReason: check.reason,
+      statusReason,
       evidenceLine: check.evidenceLine ?? null,
       evidenceSnippet: check.evidenceSnippet ?? null,
       evidenceSourceLabel: check.evidenceSourceLabel ?? targetDisplay ?? null,

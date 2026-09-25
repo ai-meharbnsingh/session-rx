@@ -1610,6 +1610,32 @@ describe("GET /api/suggestions — THE SUGGESTION CONTRACT", () => {
     assert.equal(res.json.suggestions[0].status, "not-added");
   });
 
+  it("explains the auto-compact settings check when the readable global instructions file exists", async () => {
+    const running = await server();
+    const res = await running.get("/api/suggestions?id=claude-auto-compact&tool=claude&scope=global");
+    const suggestion = res.json.suggestions[0];
+    assert.equal(suggestion.status, "not-added");
+    assert.equal(
+      suggestion.statusReason,
+      "Not found in settings.json or shell rc files. If you set --autocompact via a CLI flag or alias, this check can't see it — only settings.json and shell rc files are read.",
+    );
+  });
+
+  it("keeps the other four suggestion status reasons unchanged when not-added", async () => {
+    const running = await server();
+    for (const id of [
+      "claude-output-hygiene",
+      "claude-batch-commands",
+      "claude-worker-cap",
+      "claude-compact-contract",
+    ]) {
+      const res = await running.get(`/api/suggestions?id=${id}&tool=claude&scope=global`);
+      const suggestion = res.json.suggestions[0];
+      assert.equal(suggestion.status, "not-added", id);
+      assert.equal(suggestion.statusReason, null, id);
+    }
+  });
+
   it("reports keyword and rule-table secondary matches without changing the exact marker status", async () => {
     const running = await server();
     const target = path.join(running.home, ".claude", "CLAUDE.md");

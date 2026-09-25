@@ -69,7 +69,11 @@ function statusCallout(suggestion) {
     return callout("ok", "Already added", `The marker for this suggestion was found in ${str(suggestion?.targetLabel) || "the target"}, so it looks like this change is already in place.`);
   }
   if (status === "not-added") {
-    return callout("info", "Not added yet", "SessionRx did not find this section in the target file.");
+    const reason = str(suggestion?.statusReason);
+    const message = reason
+      ? `SessionRx did not find this section in the target file. ${reason}`
+      : "SessionRx did not find this section in the target file.";
+    return callout("info", "Not added yet", message);
   }
   if (status === "possibly-already-satisfied") {
     const evidenceLine = Number.isFinite(suggestion?.evidenceLine) ? suggestion.evidenceLine : "an unspecified";
