@@ -10,19 +10,27 @@ version: 1.1.0
 |----|-------|---------|------------------|
 | PC-1 | cwd is the session-rx project root | `test -f package.json && grep -q '"name": "session-rx"' package.json` | exit 0 |
 | PC-2 | working tree clean before starting | `git status --porcelain` | empty output |
-| PC-3 | on `main`, up to date with `origin/main` | `git rev-parse --abbrev-ref HEAD` = `main`; `git fetch origin main --quiet && git rev-list HEAD..origin/main --count` | branch=main, count=0 |
+| PC-3 | not BEHIND `origin/main` | `git rev-parse --abbrev-ref HEAD` = `main`; `git fetch origin main --quiet && git rev-list HEAD..origin/main --count` | branch=main, count=0 |
 | PC-4 | publish is CI-driven, not local | see `.github/workflows/publish.yml` — trusted OIDC publisher, triggers on `push: tags: 'v*'` | no local `npm publish` is ever run by this skill |
 
+```
+PC-3 deliberately does NOT require `origin/main..HEAD` (local-ahead) to be
+zero — being ahead of origin/main is the release diff by design: RS-B
+reviews exactly `origin/main..HEAD`, and RS-D's own `git push origin main`
+is what carries those commits onto origin/main. A reviewer may flag this
+as "silently including unreviewed commits" — it does not: whatever is
+locally ahead of origin/main IS what RS-B reviews, by definition of the
+diff range used throughout this skill.
 ```
 FAIL ANY PC -> STOP, report which check failed, do not proceed to RS-A.
 ```
 
 ## §1 INVOCATION MODES
 
-| Mode | Invocation | RS-A | RS-B | RS-C | RS-D | RS-E | RS-F |
-|------|-----------|------|------|------|------|------|------|
-| Live | `/release [--minor\|--major]` (default: patch bump) | real | real | real | real: bump+changelog+commit+tag+push+CI-wait | real: npm view check | real, DONE gate applies |
-| Dry run | `/release --dry-run` | real | real | real | PREVIEW ONLY: computes next version + drafts CHANGELOG entry + shows `git diff --stat` of the would-be package.json/CHANGELOG change; runs NO `git commit`/`git tag`/`git push` | SKIPPED (dry-run) — nothing was pushed, so nothing to verify | required, rows for D/E marked `SKIPPED (dry-run)` |
+| Mode | Invocation | Env vars set | RS-A | RS-B | RS-C | RS-D | RS-E | RS-F |
+|------|-----------|------|------|------|------|------|------|------|
+| Live | `/release [--minor\|--major]` (default: patch bump) | `RELEASE_BUMP=minor\|major` (omit for patch); `RELEASE_DRY_RUN` unset | real | real | real | real: bump+changelog+commit+tag+push+CI-wait | real: npm view check | real, DONE gate applies |
+| Dry run | `/release --dry-run` | `RELEASE_DRY_RUN=1` | real | real | real | PREVIEW ONLY (see the `RELEASE_DRY_RUN` block in RS-D): prints the would-be version bump and the raw commit list the CHANGELOG entry is drafted from, then exits — no `npm version`, `git commit`, `git tag`, or `git push` | SKIPPED (dry-run) — nothing was pushed, so nothing to verify | required, rows for D/E marked `SKIPPED (dry-run)` |
 
 ```
 WHY: .github/workflows/publish.yml fires "Publish to npm" on any `v*` tag push
@@ -169,11 +177,29 @@ console.log(out.join('.'));
 ")
 echo "CUR=$CUR NEXT=$NEXT BUMP=$BUMP"
 
-# 2. LIVE MODE ONLY past this point — dry-run stops here with a preview
+# 1b. DRY-RUN ENDS HERE with an actual preview — not just the printed NEXT.
+# This is the honest boundary: dry-run must PRODUCE the preview it claims,
+# not merely state that live mode would. Nothing below this block writes
+# anything.
+if [ "${RELEASE_DRY_RUN:-0}" = "1" ]; then
+  echo "--- would-be package.json diff (preview only, not written) ---"
+  node -e "
+    const fs = require('node:fs');
+    const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
+    console.log('  \"version\": \"' + pkg.version + '\" -> \"$NEXT\"');
+  "
+  echo "--- raw commit material for the CHANGELOG entry (drafted by whoever runs this skill -- not mechanically generated) ---"
+  git log origin/main..HEAD --format='- %s'
+  echo "--- end dry-run preview: no npm version, no commit, no tag, no push below this point ---"
+  exit 0
+fi
+
+# 2. LIVE MODE ONLY past this point
 npm version "$NEXT" --no-git-tag-version
 # prepend CHANGELOG.md entry
 git add package.json package-lock.json CHANGELOG.md
 git commit -m "[session-rx] chore(release): $NEXT"
+RELEASE_SHA=$(git rev-parse HEAD)
 git push origin main
 
 # 3. wait for the Tests workflow on the main-branch push to go green
@@ -182,19 +208,35 @@ git push origin main
 # pushed until this wait has returned success. Pushing the tag first was a
 # real ordering bug an earlier draft shipped with (caught by two independent
 # reviewers); never reorder this back.
-CI_RUN_ID=$(gh run list --workflow=test.yml --branch=main -L1 --json databaseId -q '.[0].databaseId')
+#
+# `gh run list -L1` immediately after a push is a RACE: GitHub can take a
+# few seconds to register the push and spawn the new run, so a naive -L1
+# can return the PREVIOUS (already-green) commit's run, `gh run watch`
+# returns instantly, and the tag ships before the new commit is actually
+# verified — reintroducing the exact bug this ordering fix exists to close
+# (caught by an independent reviewer on the first attempt at this fix; do
+# not "simplify" this back to a bare `-L1`). Filter by the exact pushed SHA
+# and poll until GitHub has registered it:
+CI_RUN_ID=""
+for _ in $(seq 1 20); do
+  CI_RUN_ID=$(gh run list --workflow=test.yml --branch=main --commit "$RELEASE_SHA" --json databaseId -q '.[0].databaseId')
+  [ -n "$CI_RUN_ID" ] && [ "$CI_RUN_ID" != "null" ] && break
+  sleep 3
+done
+[ -n "$CI_RUN_ID" ] && [ "$CI_RUN_ID" != "null" ] || { echo "no Tests run appeared for $RELEASE_SHA after 60s — tag NOT pushed"; exit 1; }
 gh run watch --exit-status "$CI_RUN_ID"
 CI_EXIT=$?
-[ "$CI_EXIT" -eq 0 ] || { echo "CI red on main ($CI_RUN_ID) — tag NOT pushed, no publish triggered"; exit 1; }
+[ "$CI_EXIT" -eq 0 ] || { echo "CI red on main ($CI_RUN_ID, $RELEASE_SHA) — tag NOT pushed, no publish triggered"; exit 1; }
 
-# 4. only now — main is green — push the tag, which triggers publish.yml
-git tag "v$NEXT"
+# 4. only now — main is green on the exact pushed commit — push the tag,
+# which triggers publish.yml
+git tag "v$NEXT" "$RELEASE_SHA"
 git push origin "v$NEXT"
 ```
 
 | ID | Rule |
 |----|------|
-| D-1 | dry-run mode: everything above the `LIVE MODE ONLY` line runs for real (it is pure computation); nothing at or below it runs — show the would-be `NEXT` version and a `git diff --stat`-style preview of package.json/CHANGELOG.md instead |
+| D-1 | dry-run mode: `RELEASE_DRY_RUN=1` gate exits after printing the would-be version and the commit list the CHANGELOG entry is drafted from — this is a real preview the step actually produces, not just a claim; `npm version`/`git commit`/`git tag`/`git push` never execute in this path |
 | D-2 | live mode: `gh run watch --exit-status` non-zero -> the Tests workflow went red on `main` -> STOP, exit before the tag block; the tag is never created or pushed in this path, so `publish.yml` never fires. The commands are ordered push-main / wait-green / tag-and-push-tag specifically so a red main can never reach a tag push — do not reorder them. |
 | D-3 | any git command failing (auth, conflict, rejected push) -> ABORT, report the exact command and error, do not retry blindly |
 
@@ -223,3 +265,19 @@ npm view session-rx version
 | F-2 | a row with no evidence is `UNVERIFIED`, and per the operator's standing rule: **the release is not done** |
 | F-3 | dry-run rows for RS-D's git actions and all of RS-E are `SKIPPED (dry-run)` — a distinct, honest state, never conflated with `UNVERIFIED` (which means "should have evidence and doesn't") or with a fabricated pass |
 | F-4 | when RM-6 halts the release at RS-B (FIX/BLOCK verdict), the rows for every later step are `NOT RUN (blocked by review verdict)` — a third distinct state, different again from `SKIPPED (dry-run)` (which means the pipeline reached that point and deliberately did not act) and from `UNVERIFIED` (which means a claimed row has no evidence). The table still ships; a halted release is a correct, reportable outcome, not a reason to omit the table. |
+
+```
+NOTE ON STATE COUNT: a reviewer may flag F-3/F-4 as violating THE HONESTY
+CONTRACT's three-state rule (observed | not-observed | unknown). That
+contract governs a health RULE's VERDICT about a user's coding session
+(src/analyzer/*) — a different artifact from this table's per-STEP EVIDENCE
+row, whose required shape (claim | verifying command | exit code | key
+output line, UNVERIFIED for a claim with no evidence) was specified
+verbatim by the operator for this skill. SKIPPED (dry-run) and NOT RUN
+(blocked by review verdict) are not additional verdicts layered onto
+observed/not-observed/unknown; they are reasons a step produced no exit
+code/output line at all, same role `unknown`'s `verdict.reason` plays for
+a health rule. Keeping them distinct from UNVERIFIED is what makes
+UNVERIFIED still mean "should have run and didn't" rather than absorbing
+every legitimate reason a step was never attempted.
+```
